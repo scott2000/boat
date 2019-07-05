@@ -10,7 +10,7 @@ main :: IO ()
 main =
   let
     parserT = runCustomParser parser
-    parseResult = runParserT parserT "" "fun\n  _ Empty -> Empty\n  f (Cons x xs) -> Cons (f x) (map f xs)"
+    parseResult = runParserT parserT "" "match x y z in a b c -> f x y z a b c"
     compilerState = CompilerState { anonTypes = 0 }
   in
     case evalState parseResult compilerState of
@@ -18,4 +18,4 @@ main =
       Right x -> do
         putStrLn ("Parsed expr:\n" ++ show x ++ "\n")
         putStrLn ("De Bruijn:\n" ++ show (toDeBruijn x) ++ "\n")
- 
+

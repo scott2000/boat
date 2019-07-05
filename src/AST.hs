@@ -57,37 +57,65 @@ data Expr
   | EGlobal String
   | EApp (Meta Expr) (Meta Expr)
   | EFun [MatchCase]
+  | ELetIn (Meta Pattern) (Meta Expr) (Meta Expr)
+  | EMatchIn [Meta Expr] [MatchCase]
 
 instance Eq Expr where
-  EIndex x0 _ == EIndex x1 _ = x0 == x1
-  EGlobal n0  == EGlobal n1  = n0 == n1
-  EApp a0 b0  == EApp a1 b1  = a0 == a1 && b0 == b1
-  EFun c0     == EFun c1     = c0 == c1
+  EIndex x0 _ == EIndex x1 _ =
+    x0 == x1
+  EGlobal n0 == EGlobal n1 =
+    n0 == n1
+  EApp a0 b0 == EApp a1 b1 =
+    a0 == a1 && b0 == b1
+  EFun c0 == EFun c1 =
+    c0 == c1
+  ELetIn p0 v0 e0 == ELetIn p1 v1 e1 =
+    p0 == p1 && v0 == v1 && e0 == e1
+  EMatchIn e0 c0 == EMatchIn e1 c1 =
+    e0 == e1 && c0 == c1
   _ == _ = False
 
 instance Show Expr where
-  show (EIndex 0 Nothing) = "?"
-  show (EIndex n Nothing) = "?" ++ show n
-  show (EIndex _ (Just name)) = name
-  show (EGlobal name) = name
-  show (EApp a b) = "(" ++ show a ++ " " ++ show b ++ ")"
-  show (EFun cases) = "(fun\n  " ++ intercalate "\n  " (map showCase cases) ++ ")"
+  show expr =
+    case expr of
+      EIndex 0 Nothing -> "?"
+      EIndex n Nothing -> "?" ++ show n
+      EIndex _ (Just name) -> name
+      EGlobal name -> name
+      EApp a b ->
+        "(" ++ show a ++ " " ++ show b ++ ")"
+      EFun cases ->
+        "(fun" ++ showCases cases ++ ")"
+      ELetIn p v e ->
+        "(let " ++ show p ++ " = " ++ show v ++ " in " ++ show e ++ ")"
+      EMatchIn exprs cases ->
+        "(match " ++ intercalate " " (map show exprs) ++ " in" ++ showCases cases ++ ")"
     where
+      showCases cases = "\n  " ++ intercalate "\n  " (map showCase cases)
       showCase (pats, expr) = intercalate " " (map show pats) ++ " -> " ++ indent (show expr)
       indent = intercalate "\n  " . lines
 
 toDeBruijn :: Meta Expr -> Meta Expr
 toDeBruijn = fmap $ \case
-  EIndex index _ -> EIndex index Nothing
-  EGlobal name -> EGlobal name
-  EApp a b -> EApp (toDeBruijn a) (toDeBruijn b)
-  EFun cases -> EFun $ map toDeBruijnCase cases
+  EIndex index _ ->
+    EIndex index Nothing
+  EGlobal name ->
+    EGlobal name
+  EApp a b ->
+    EApp (toDeBruijn a) (toDeBruijn b)
+  EFun cases ->
+    EFun $ map toDeBruijnCase cases
+  ELetIn p v e ->
+    ELetIn (toDeBruijnPat p) (toDeBruijn v) (toDeBruijn e)
+  EMatchIn exprs cases ->
+    EMatchIn (map toDeBruijn exprs) $ map toDeBruijnCase cases
   where
     toDeBruijnCase (pats, expr) = (map toDeBruijnPat pats, toDeBruijn expr)
     toDeBruijnPat = fmap $ \case
       PAny -> PAny
       PBind _ -> PBind Nothing
-      PCons name pats -> PCons name $ map toDeBruijnPat pats
+      PCons name pats ->
+        PCons name $ map toDeBruijnPat pats
 
 data Pattern
   = PAny

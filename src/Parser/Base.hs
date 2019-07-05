@@ -31,7 +31,7 @@ defaultParserState :: ParserState
 defaultParserState = ParserState { minIndent = 0, multiline = True, exprBindings = [] }
 
 keywords :: [String]
-keywords = ["fun", "let"]
+keywords = ["fun", "let", "let", "match", "in"]
 
 getPos :: Parser Position
 getPos = toPosition . pstateSourcePos . statePosState <$> getParserState
@@ -65,7 +65,13 @@ withBindings bindings = local $ \s -> s { exprBindings = reverse bindings ++ exp
 findBindingFor :: String -> Parser (Maybe Int)
 findBindingFor name = do
   ParserState { exprBindings } <- ask
-  return (elemIndex (Just name) exprBindings)
+  return $ elemIndex (Just name) exprBindings
+
+countBindings :: Parser Int
+countBindings = asks (length . exprBindings)
+
+bindingAtIndex :: Int -> Parser (Maybe String)
+bindingAtIndex index = asks ((!! index) . exprBindings)
 
 symbol :: Parser a -> Parser a
 symbol p = sc' >> p

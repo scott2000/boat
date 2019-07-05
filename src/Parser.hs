@@ -23,13 +23,15 @@ parsePartial = hidden paren <|> parseMeta parseOne
 parser :: Parsable a => Parser (Meta a)
 parser = try sc' >> parsePartial >>= parseBase
   where
-    parseBase current = (try sc' >> parseMeta (parseApp current) >>= parseBase) <|> return current
+    parseBase current = try (sc' >> parseMeta (parseApp current) >>= parseBase) <|> return current
 
 instance Parsable Expr where
   parseOne = label "expression" $
     parseExprIdent
     <|> parseExprIndex
     <|> parseFunction
+    <|> parseLet
+    <|> parseMatch
 
   parseApp a = EApp a <$> parsePartial
 
@@ -42,14 +44,45 @@ parseExprIdent = do
 
 parseExprIndex :: Parser Expr
 parseExprIndex =
-  char '?' >> (index <$> try L.decimal <|> return (index 0))
+  char '?' >> (try L.decimal <|> return 0) >>= index
   where
-    index num = EIndex num Nothing
+    index num = do
+      count <- countBindings
+      if num < count then
+        bindingAtIndex num >>= \case
+          Nothing ->
+            return $ EIndex num Nothing
+          Just name ->
+            fail ("binding declared by name `" ++ name ++ "` should also be referred to by name")
+      else if count == 0 then
+        fail ("found De Bruijn index, but no bindings are in scope")
+      else if count == 1 then
+        fail ("found De Bruijn index of " ++ show num ++ ", but only 1 binding is in scope")
+      else
+        fail ("found De Bruijn index of " ++ show num ++ ", but only " ++ show count ++ " bindings are in scope")
 
 parseFunction :: Parser Expr
 parseFunction = do
   string "fun"
   EFun <$> blockOf (some matchCase)
+
+parseLet :: Parser Expr
+parseLet = do
+  string "let"
+  pat <- blockOf parser
+  sc' >> string "="
+  val <- blockOf parser
+  sc' >> string "in"
+  expr <- blockOf $ withBindings (bindingsForPat pat) parser
+  return $ ELetIn pat val expr
+
+parseMatch :: Parser Expr
+parseMatch =
+  pure EMatchIn
+  <*  string "match"
+  <*> blockOf (some parsePartial)
+  <*  symbol (string "in")
+  <*> blockOf (some matchCase)
 
 matchCase :: Parser MatchCase
 matchCase = do
