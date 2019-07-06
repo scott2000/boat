@@ -87,13 +87,16 @@ instance Show Expr where
       EFun cases ->
         "(fun" ++ showCases cases ++ ")"
       ELetIn p v e ->
-        "(let " ++ show p ++ " = " ++ show v ++ " in " ++ show e ++ ")"
+        "(let " ++ show p ++ " =" ++ indent (show v) ++ "\n" ++ show e ++ ")"
       EMatchIn exprs cases ->
         "(match " ++ intercalate " " (map show exprs) ++ " in" ++ showCases cases ++ ")"
     where
+      showCases [c] = indent (showCase c)
       showCases cases = "\n  " ++ intercalate "\n  " (map showCase cases)
-      showCase (pats, expr) = intercalate " " (map show pats) ++ " -> " ++ indent (show expr)
-      indent = intercalate "\n  " . lines
+      showCase (pats, expr) = intercalate " " (map show pats) ++ " ->" ++ indent (show expr)
+      indent = indentLines . lines
+      indentLines [one] = " " ++ one
+      indentLines rest = "\n  " ++ intercalate "\n  " rest
 
 toDeBruijn :: Meta Expr -> Meta Expr
 toDeBruijn = fmap $ \case

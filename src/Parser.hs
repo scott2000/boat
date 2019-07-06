@@ -72,7 +72,6 @@ parseLet = do
   pat <- blockOf parser
   sc' >> string "="
   val <- blockOf parser
-  sc' >> string "in"
   expr <- blockOf $ withBindings (bindingsForPat pat) parser
   return $ ELetIn pat val expr
 
