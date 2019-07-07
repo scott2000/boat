@@ -40,11 +40,14 @@ getPos = toPosition . pstateSourcePos . statePosState <$> getParserState
       { posLine = unPos $ sourceLine s
       , posColumn = unPos $ sourceColumn s }
 
-parseMeta :: Parser a -> Parser (Meta a)
-parseMeta p = withSpan <$> getPos <*> p <*> getPos
+getSpan :: Parser a -> Parser (Span, a)
+getSpan p = andSpan <$> getPos <*> p <*> getPos
   where
-    withSpan start result end = (meta result)
-      { metaSpan = Just (Span start end) }
+    andSpan start res end = (Span start end, res)
+
+parseMeta :: Parser a -> Parser (Meta a)
+parseMeta p =
+  uncurry metaWithSpan <$> getSpan p
 
 blockOf :: Parser a -> Parser a
 blockOf p = do

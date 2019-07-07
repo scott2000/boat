@@ -13,9 +13,13 @@ import Control.Monad.Reader
 class Parsable a where
   parseOne :: Parser a
   parseApp :: Meta a -> Parser a
+  parseUnit :: a
 
 paren :: Parsable a => Parser (Meta a)
-paren = char '(' *> parser <* char ')'
+paren =
+  getSpan (char '(' *> optional (blockOf parser) <* sc' <* char ')') <&> \case
+    (_, Just res) -> res
+    (span, Nothing) -> metaWithSpan span parseUnit
 
 parsePartial :: Parsable a => Parser (Meta a)
 parsePartial = hidden paren <|> parseMeta parseOne
@@ -34,6 +38,8 @@ instance Parsable Expr where
     <|> parseMatch
 
   parseApp a = EApp a <$> parsePartial
+
+  parseUnit = EValue VUnit
 
 parseExprIdent :: Parser Expr
 parseExprIdent = do
@@ -64,7 +70,7 @@ parseExprIndex =
 parseFunction :: Parser Expr
 parseFunction = do
   string "fun"
-  EFun <$> blockOf (some matchCase)
+  EValue . VFun <$> blockOf (some matchCase)
 
 parseLet :: Parser Expr
 parseLet = do
@@ -73,7 +79,7 @@ parseLet = do
   sc' >> string "="
   val <- blockOf parser
   expr <- blockOf $ withBindings (bindingsForPat pat) parser
-  return $ ELetIn pat val expr
+  return $ ELet pat val expr
 
 parseMatch :: Parser Expr
 parseMatch =
@@ -102,6 +108,8 @@ instance Parsable Pattern where
 
   parseApp Meta { unmeta = PCons name xs } = parsePartial <&> \x -> PCons name (xs ++ [x])
   parseApp other = fail ("pattern does not support parameters: " ++ show other)
+
+  parseUnit = PUnit
 
 parsePatIdent :: Parser Pattern
 parsePatIdent =
