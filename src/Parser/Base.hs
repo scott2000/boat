@@ -2,7 +2,7 @@ module Parser.Base where
 
 import AST
 
-import Text.Megaparsec
+import Text.Megaparsec hiding (State)
 import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as L
 
@@ -10,28 +10,37 @@ import Data.Void
 import Data.List
 import Data.Char
 import Control.Monad.Reader
+import Control.Monad.State.Strict
 import qualified Data.Set as Set
-import qualified Control.Monad.State.Strict as ST (State)
+
+data Assoc
+  = ALeft
+  | ANon
+  | ARight
 
 data ParserState = ParserState 
   { minIndent :: Int
   , multiline :: Bool
   , exprBindings :: [Maybe String] }
 
-type InnerParser = ParsecT Void String (ST.State CompilerState)
+type InnerParser = ParsecT Void String (State CompilerState)
 type Parser = ReaderT ParserState InnerParser
 
 runCustomParser :: Parser a -> InnerParser a
 runCustomParser p = runReaderT (followedByEnd p) defaultParserState
 
 followedByEnd :: Parser a -> Parser a
-followedByEnd p = p <* sc' <* eof
+followedByEnd p = p <* spaces <* eof
 
 defaultParserState :: ParserState
-defaultParserState = ParserState { minIndent = 0, multiline = True, exprBindings = [] }
+defaultParserState = ParserState
+  { minIndent = 0
+  , multiline = True
+  , exprBindings = [] }
 
-keywords :: [String]
-keywords = ["fun", "let", "let", "match", "in"]
+isKeyword, isReservedOp :: String -> Bool
+isKeyword    w = w `elem` ["_", "fun", "let", "let", "match", "in", "unary"]
+isReservedOp w = w `elem` [".", "?", ",", ";"]
 
 getPos :: Parser Position
 getPos = toPosition . pstateSourcePos . statePosState <$> getParserState
@@ -51,16 +60,19 @@ parseMeta p =
 
 blockOf :: Parser a -> Parser a
 blockOf p = do
-  newLine <- anySpaceChunk
+  newLine <- option False parseSomeNewlines
   ParserState { minIndent } <- ask
   if newLine then do
-    level <- subtract 1 . unPos <$> L.indentLevel
+    level <- getLevel
     if level < minIndent then
       fail ("block indented less then containing block (" ++ show level ++ " < " ++ show minIndent ++ ")")
     else
       local (\s -> s { minIndent = level, multiline = True }) p
   else
     local (\s -> s { multiline = False }) p
+
+getLevel :: Parser Int
+getLevel = subtract 1 . unPos <$> L.indentLevel
 
 withBindings :: [Maybe String] -> Parser a -> Parser a
 withBindings bindings = local $ \s -> s { exprBindings = reverse bindings ++ exprBindings s }
@@ -76,55 +88,52 @@ countBindings = asks (length . exprBindings)
 bindingAtIndex :: Int -> Parser (Maybe String)
 bindingAtIndex index = asks ((!! index) . exprBindings)
 
-symbol :: Parser a -> Parser a
-symbol p = sc' >> p
-
 comment :: Parser ()
 comment = hidden $ skipMany $ choice [lineCmnt, blockCmnt]
 
-whitespace :: Parser ()
-whitespace = void $ takeWhile1P Nothing isSpace
+plainWhitespace :: Parser ()
+plainWhitespace = void $ takeWhile1P Nothing isSpace
   where
     isSpace ' '  = True
     isSpace '\r' = True
     isSpace _    = False
 
-indentedNewline :: Parser ()
-indentedNewline = do
-  ParserState { minIndent, multiline } <- ask
-  if multiline then do
-    char '\n'
-    parseSpaces minIndent
-  else
-    fail "newline not allowed here"
+parseSomeNewlines :: Parser Bool
+parseSomeNewlines = fmap or $ hidden $ some $ choice
+  [ plainWhitespace >> return False
+  , char '\n' >> return True
+  , lineCmnt  >> return False
+  , blockCmnt  >> return False ]
 
-parseSpaces :: Int -> Parser ()
-parseSpaces minIndent = go 0
+data SpaceType
+  = NoSpace
+  | Whitespace
+  | LineBreak
+
+spaces :: Parser SpaceType
+spaces = (parseSomeNewlines >>= ifSpaces) <|> return NoSpace
   where
-    go :: Int -> Parser ()
-    go n = ((lineCmnt <|> blockCmnt) >> go 0) <|> (token cont Set.empty >>= id) <|> stop
-      where
-        cont ' '  = Just $ go (n+1)
-        cont '\n' = Just $ go 0
-        cont '\r' = Just $ go n
-        cont _    = Nothing
-        stop
-          | n == minIndent = return ()
-          | otherwise =
-            fail ("expected indent of " ++ show minIndent ++ ", found " ++ show n)
-
-spaceChunk :: Parser ()
-spaceChunk = choice [whitespace, indentedNewline, lineCmnt, blockCmnt]
-
-anySpaceChunk :: Parser Bool
-anySpaceChunk = fmap (foldr (||) False) $ hidden $ many $ choice
-  [ whitespace >> return False,
-    char '\n' >> return True,
-    lineCmnt  >> return False,
-    blockCmnt  >> return False ]
+    ifSpaces False =
+      return Whitespace
+    ifSpaces True = do
+      ParserState { minIndent, multiline } <- ask
+      if multiline then do
+        level <- getLevel
+        case level - minIndent of
+          0 ->
+            return LineBreak
+          2 ->
+            return Whitespace
+          n ->
+            if n < 0 then
+              fail "unexpected end of indented block"
+            else
+              fail "line continuation should be indented exactly 2 spaces more than its enclosing block"
+      else
+        fail "line continuation not allowed unless inside of a block"
 
 lookAheadSpace :: Parser ()
-lookAheadSpace = choice [whitespace, void $ char '\n', lineCmnt, blockCmnt]
+lookAheadSpace = choice [plainWhitespace, void $ char '\n', lineCmnt, blockCmnt]
 
 lineCmnt :: Parser ()
 lineCmnt = hidden $ L.skipLineComment "--"
@@ -132,11 +141,23 @@ lineCmnt = hidden $ L.skipLineComment "--"
 blockCmnt :: Parser ()
 blockCmnt = hidden $ L.skipBlockCommentNested "{-" "-}"
 
-sc :: Parser ()
-sc = label "whitespace" $ skipSome spaceChunk
+nbsc :: Parser SpaceType
+nbsc = spaces >>= \case
+  LineBreak ->
+    fail "unexpected line break in indented block"
+  other ->
+    return other
 
-sc' :: Parser ()
-sc' = hidden $ skipMany spaceChunk
+lineBreak :: Parser ()
+lineBreak = spaces >>= \case
+  LineBreak ->
+    return ()
+  _ ->
+    fail "expected line break in indented block"
+
+isSpace :: SpaceType -> Bool
+isSpace NoSpace = False
+isSpace _ = True
 
 word :: Parser String
 word = do
@@ -148,9 +169,36 @@ word = do
     isIdentRest x = (isAlpha x || isDigit x || x == '_') && isAscii x
 
 identifier :: Parser String
-identifier = label "identifier" $ symbol $ do
+identifier = label "identifier" $ do
   ident <- word
-  if ident `elem` keywords then
-    fail "expected identifier"
+  if isKeyword ident then
+    fail ("expected identifier, found keyword `" ++ ident ++ "`")
   else
     return ident
+
+data SpecialOp
+  = Assignment
+  | FunctionArrow
+  | TypeAscription
+
+instance Show SpecialOp where
+  show Assignment = "="
+  show FunctionArrow = "->"
+  show TypeAscription = ":"
+
+anyOperator :: Parser (Either SpecialOp String)
+anyOperator = label "operator" $ do
+  op <- some $ oneOf ("+-*/%^!=<>:?|&~$." :: String)
+  guard $ not $ isReservedOp op
+  return $ case op of
+    "=" -> Left Assignment
+    "->" -> Left FunctionArrow
+    ":" -> Left TypeAscription
+    _ -> Right op
+
+operator :: Parser String
+operator = anyOperator >>= \case
+  Right op ->
+    return op
+  Left op ->
+    fail ("unexpected special operator `" ++ show op ++ "`")

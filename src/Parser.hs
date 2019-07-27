@@ -7,46 +7,151 @@ import Text.Megaparsec
 import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as L
 
+import Data.Char hiding (isSpace)
 import Control.Monad.State.Strict
-import Control.Monad.Reader
 
-class Parsable a where
+parseName :: Parser Name
+parseName = label "name" $
+  Identifier <$> identifier <|> (char '(' *> nbsc *> (unaryOp <|> pure Operator) <*> operator <* nbsc <* char ')')
+  where
+    unaryOp = string "unary" *> nbsc *> pure Unary
+
+parsePath :: Parser Path
+parsePath = label "path" $
+  Path <$> ((:) <$> try parseName <*> many (char '.' *> parseName))
+
+data InfixOp = InfixOp
+  { infixBacktick :: Bool
+  , infixPath :: Meta Path }
+
+infixOp :: Parser (Either SpecialOp InfixOp)
+infixOp = label "operator" (backtickOp <|> normalOp)
+  where
+    backtickOp =
+      Right . InfixOp True <$> parseMeta (char '`' *> parsePath <* char '`')
+    normalOp =
+      getSpan anyOperator <&> \case
+        (span, Right op) ->
+          Right $ InfixOp False $ metaWithSpan span $ Local $ Operator op
+        (_, Left op) ->
+          Left op
+
+class (Show a, ExprLike a) => Parsable a where
   parseOne :: Parser a
-  parseApp :: Meta a -> Parser a
-  parseUnit :: a
+  parseSpecial :: SpecialOp -> Maybe (Prec -> Meta a -> Parser (Meta a))
+  parseSpecial _ = Nothing
 
 paren :: Parsable a => Parser (Meta a)
 paren =
-  getSpan (char '(' *> optional (blockOf parser) <* sc' <* char ')') <&> \case
-    (_, Just res) -> res
-    (span, Nothing) -> metaWithSpan span parseUnit
+  parseMeta (char '(' *> (emptyParen <|> fullParen))
+  where
+    emptyParen = char ')' >> return opUnit
+    fullParen = opParen <$> parser <* spaces <* char ')'
 
-parsePartial :: Parsable a => Parser (Meta a)
-parsePartial = hidden paren <|> parseMeta parseOne
+parserNoPrefix :: Parsable a => Parser (Meta a)
+parserNoPrefix = hidden paren <|> parseMeta parseOne
+
+parserPartial :: Parsable a => Parser (Meta a)
+parserPartial = parseMeta parsePrefix <|> parserNoPrefix
+  where
+    parsePrefix = do
+      path <- try $ do
+        path <- parseMeta (Local . Unary <$> operator)
+        spaceAfter <- isSpace <$> nbsc
+        guard (not spaceAfter)
+        return path
+      opUnary path <$> parserPrec applyPrec
+
+type Prec = Int
+
+minPrec, normalPrec, applyPrec, compactPrec :: Prec
+minPrec     = 0
+normalPrec  = 1
+applyPrec   = 2
+compactPrec = 3
 
 parser :: Parsable a => Parser (Meta a)
-parser = try sc' >> parsePartial >>= parseBase
+parser = blockOf $ parserPrec minPrec
+
+parserNoSpace :: Parsable a => Parser (Meta a)
+parserNoSpace = parserPrec applyPrec
+
+parserPrec :: Parsable a => Prec -> Parser (Meta a)
+parserPrec prec = parserPartial >>= parserBase prec
+
+parserBase :: Parsable a => Prec -> Meta a -> Parser (Meta a)
+parserBase prec current =
+  ((seq <|> opOrApp) >>= parserBase prec) <|> return current
   where
-    parseBase current = try (sc' >> parseMeta (parseApp current) >>= parseBase) <|> return current
+    seq = do
+      guard (prec == minPrec)
+      try lineBreak
+      metaExtend eitherToFail (parserPrec prec) opSeq
+
+    opOrApp = join $ try $ do
+      spaceBefore <- isSpace <$> nbsc
+      Just x <- op spaceBefore <|> app
+      return x
+      where
+        op spaceBefore = try $ do
+          parsedOp <- infixOp
+          spaceAfter <- isSpace <$> nbsc
+          guard (spaceAfter || not spaceBefore)
+          let
+            isBacktick =
+              case parsedOp of
+                Right InfixOp { infixBacktick = True } -> True
+                _ -> False
+            opPrec =
+              if spaceAfter || isBacktick then
+                normalPrec
+              else
+                compactPrec
+          if prec <= opPrec then
+            case parsedOp of
+              Right path ->
+                return $ Just $ metaExtend return (parserPrec opPrec) $ opBinary $ infixPath path
+              Left op ->
+                case parseSpecial op of
+                  Nothing ->
+                    return Nothing
+                  Just p ->
+                    return $ Just $ p opPrec current
+          else
+            return Nothing
+
+        app = do
+          guard (prec < applyPrec)
+          return $ Just $ metaExtend eitherToFail (parserPrec applyPrec) opApply
+
+    metaExtend t p to = do
+      next <- p
+      metaWithEnds current next <$> t (to current next)
+
+eitherToFail :: Monad m => Either String a -> m a
+eitherToFail (Right x) = return x
+eitherToFail (Left err) = fail err
 
 instance Parsable Expr where
   parseOne = label "expression" $
-    parseExprIdent
-    <|> parseExprIndex
-    <|> parseFunction
+    parseExprIndex
     <|> parseLet
+    <|> parseFunction
     <|> parseMatch
-
-  parseApp a = EApp a <$> parsePartial
-
-  parseUnit = EValue VUnit
+    <|> parseExprIdent
 
 parseExprIdent :: Parser Expr
 parseExprIdent = do
-  name <- try identifier
-  findBindingFor name <&> \case
-    Nothing -> EGlobal name
-    Just index -> EIndex index (Just name)
+  path <- try parsePath
+  case extractLocalName path of
+    Just local ->
+      findBindingFor local <&> \case
+        Just n ->
+          EIndex n (Just local)
+        Nothing ->
+          EGlobal path
+    Nothing ->
+      return $ EGlobal path
 
 parseExprIndex :: Parser Expr
 parseExprIndex =
@@ -70,35 +175,40 @@ parseExprIndex =
 parseFunction :: Parser Expr
 parseFunction = do
   string "fun"
-  EValue . VFun <$> blockOf (some matchCase)
+  EValue . VFun <$> blockOf matchCases
 
 parseLet :: Parser Expr
 parseLet = do
   string "let"
-  pat <- blockOf parser
-  sc' >> string "="
-  val <- blockOf parser
-  expr <- blockOf $ withBindings (bindingsForPat pat) parser
+  pat <- parser
+  nbsc >> string "="
+  val <- parser
+  expr <- withBindings (bindingsForPat pat) parser
   return $ ELet pat val expr
 
 parseMatch :: Parser Expr
 parseMatch =
   pure EMatchIn
   <*  string "match"
-  <*> blockOf (some parsePartial)
-  <*  symbol (string "in")
-  <*> blockOf (some matchCase)
+  <*> blockOf (some (try spaces >> parserNoSpace))
+  <*> blockOf matchCases
+
+matchCases :: Parser [MatchCase]
+matchCases = (:) <$> matchCase <*> many (try lineBreak >> matchCase)
 
 matchCase :: Parser MatchCase
 matchCase = do
-  pats <- try somePatterns
-  expr <- withBindings (pats >>= bindingsForPat) $ blockOf parser
+  pats <- someUntil (string "->") parserNoSpace
+  expr <- withBindings (pats >>= bindingsForPat) parser
   return (pats, expr)
-  where
-    somePatterns = do
-      p <- symbol $ parsePartial
-      (p:) <$> manyPatterns
-    manyPatterns = symbol $ ((string "->" >> return []) <|> somePatterns)
+
+someUntil :: Parser a -> Parser b -> Parser [b]
+someUntil end p =
+  (:) <$> p <*> manyUntil end p
+
+manyUntil :: Parser a -> Parser b -> Parser [b]
+manyUntil end p =
+  spaces >> ((end >> return []) <|> someUntil end p)
 
 instance Parsable Pattern where
   parseOne = label "pattern" $
@@ -106,17 +216,20 @@ instance Parsable Pattern where
     <|> (char '?' >> return (PBind Nothing))
     <|> parsePatIdent
 
-  parseApp Meta { unmeta = PCons name xs } = parsePartial <&> \x -> PCons name (xs ++ [x])
-  parseApp other = fail ("pattern does not support parameters: " ++ show other)
-
-  parseUnit = PUnit
-
 parsePatIdent :: Parser Pattern
-parsePatIdent =
-  parseMeta identifier <&> \nameWithMeta ->
-    let name = unmeta nameWithMeta in
-    if isCap $ head name then
-      PCons nameWithMeta []
-    else
-      PBind $ Just name
+parsePatIdent = do
+  pathWithMeta <- parseMeta parsePath
+  let path = unmeta pathWithMeta
+  case extractLocalName path of
+    Just name ->
+      return $ PBind $ Just name
+    Nothing ->
+      let components = unpath path in
+      case last components of
+        Identifier name
+          | isLocalIdentifier name ->
+            let alt = Path $ init components ++ [Identifier $ toUpper (head name) : tail name] in
+            fail ("invalid path for binding, did you mean to capitalize it like `" ++ show alt ++ "`?")
+        _ ->
+          return $ PCons pathWithMeta []
 
