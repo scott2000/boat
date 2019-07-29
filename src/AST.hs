@@ -1,5 +1,6 @@
 module AST where
 
+import Data.Char (toUpper)
 import Data.Word
 import Data.List
 import Data.String
@@ -43,11 +44,32 @@ data CompileError = CompileError
   , errorMessage :: String }
   deriving (Ord, Eq)
 
+instance Show CompileError where
+  show CompileError { errorFile, errorSpan, errorKind, errorMessage } =
+    let
+      baseMsg = "[" ++ show errorKind ++ "] " ++ errorMessage
+    in
+      case errorFile of
+        Just path ->
+          case errorSpan of
+            Just Span { spanStart } ->
+              path ++ ":" ++ show spanStart ++ " " ++ baseMsg
+            Nothing ->
+              path ++ " " ++ baseMsg
+        Nothing ->
+          baseMsg
+
 data ErrorKind
   = Error
   | Warning
   | Info
   deriving (Ord, Eq)
+
+instance Show ErrorKind where
+  show = \case
+    Error -> "error"
+    Warning -> "warning"
+    Info -> "info"
 
 addError :: MonadState CompileState m => CompileError -> m ()
 addError err =
@@ -55,13 +77,14 @@ addError err =
     { compileErrors = Set.insert err $ compileErrors s
     , compileFailed = errorKind err == Error || compileFailed s }
 
-displayErrors :: Set CompileError -> IO ()
-displayErrors = error "unimplemented"
-
 data Position = Position
   { posLine :: Int
   , posColumn :: Int }
   deriving (Ord, Eq)
+
+instance Show Position where
+  show Position { posLine, posColumn } =
+    show posLine ++ ":" ++ show posColumn
 
 data Span = Span
   { spanStart :: Position
@@ -104,26 +127,39 @@ metaWithEnds _ _ x = meta x
 
 data File = File
   { filePath :: FilePath
-  , fileLets :: Map Name LetDecl }
+  , fileLets :: Map Name LetDecl
+  , fileDatas :: Map Name DataDecl }
 
 instance Show File where
-  show file =
-    "{- " ++ filePath file ++ " -}\n"
-    ++ intercalate "\n" (map showLet $ Map.toList $ fileLets file)
+  show file = intercalate "\n" $ concat
+      [ ["{- " ++ filePath file ++ " -}"]
+      , map showData $ Map.toList $ fileDatas file
+      , map showLet $ Map.toList $ fileLets file ]
     where
       showLet (name, LetDecl { letBody }) =
         "let " ++ show name ++ " =" ++ indent (show letBody)
+      showData (name, DataDecl { dataArgs, dataVariants }) =
+        "data " ++ unwords (show name : map unmeta dataArgs)
+        ++ " =" ++ indent (intercalate "\n" (map (showVariant . unmeta) dataVariants))
+      showVariant (name, types) =
+        show name ++ " " ++ unwords (map show types)
 
 defaultFile :: FilePath -> File
 defaultFile path = File
   { filePath = path
-  , fileLets = Map.empty }
+  , fileLets = Map.empty
+  , fileDatas = Map.empty }
 
 data LetDecl = LetDecl
   { letNameSpan :: Span
   , letBody :: Meta Expr }
 
-fileAddLet :: MonadState CompileState m => (Span, Name) -> Meta Expr -> File -> m File
+fileAddLet
+  :: MonadState CompileState m
+  => (Span, Name)
+  -> Meta Expr
+  -> File
+  -> m File
 fileAddLet (nameSpan, name) body file = do
   let
     oldLets = fileLets file
@@ -137,6 +173,35 @@ fileAddLet (nameSpan, name) body file = do
       , errorKind = Error
       , errorMessage = "duplicate let binding for name `" ++ show name ++ "`" }
   return file { fileLets = Map.insert name newDecl oldLets }
+
+type DataVariant = (Meta Name, [Meta Type])
+
+data DataDecl = DataDecl
+  { dataNameSpan :: Span
+  , dataArgs :: [Meta String]
+  , dataVariants :: [Meta DataVariant] }
+
+fileAddData
+  :: MonadState CompileState m
+  => (Span, Name)
+  -> [Meta String]
+  -> [Meta DataVariant]
+  -> File
+  -> m File
+fileAddData (nameSpan, name) args vars file = do
+  let
+    oldDatas = fileDatas file
+    newDecl = DataDecl
+      { dataNameSpan = nameSpan
+      , dataArgs = args
+      , dataVariants = vars }
+  when (Map.member name oldDatas) $
+    addError CompileError
+      { errorFile = Just (filePath file)
+      , errorSpan = Just nameSpan
+      , errorKind = Error
+      , errorMessage = "duplicate data type declaration for name `" ++ show name ++ "`" }
+  return file { fileDatas = Map.insert name newDecl oldDatas }
 
 data Of a = Of
 
@@ -461,10 +526,14 @@ bindingsForPat pat =
 isLocalIdentifier :: String -> Bool
 isLocalIdentifier = not . isCap . head
 
-extractLocalName :: Path -> Maybe String
-extractLocalName (Path [Identifier name])
+extractLocalName :: Name -> Maybe String
+extractLocalName (Identifier name)
   | isLocalIdentifier name = Just name
 extractLocalName _ = Nothing
+
+extractLocalPath :: Path -> Maybe String
+extractLocalPath (Path [name]) = extractLocalName name
+extractLocalPath _ = Nothing
 
 (<&>) :: Functor f => f a -> (a -> b) -> f b
 (<&>) = flip fmap
@@ -473,3 +542,7 @@ isCap :: Char -> Bool
 isCap ch
   | ch `elem` ['A'..'Z'] || ch == '_' = True
   | otherwise = False
+
+capFirst :: String -> String
+capFirst (x:xs) = toUpper x : xs
+

@@ -7,15 +7,17 @@ import Text.Megaparsec
 import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as L
 
-import Data.Char hiding (isSpace)
 import Data.Semigroup
 import Control.Monad.State.Strict
 
 parseName :: Parser Name
-parseName = label "name" $
-  Identifier <$> identifier <|> (char '(' *> nbsc *> (unaryOp <|> pure Operator) <*> operator <* nbsc <* char ')')
+parseName =
+  Identifier <$> identifier <|> parenOp
   where
-    unaryOp = string "unary" *> nbsc *> pure Unary
+    parenOp = label "parenthesized operator" $
+      char '(' *> nbsc *> (unaryOp <|> pure Operator) <*> operator <* nbsc <* char ')'
+    unaryOp = label "keyword \"unary\"" $
+      string "unary" *> nbsc *> pure Unary
 
 parsePath :: Parser Path
 parsePath = label "path" $
@@ -25,10 +27,10 @@ parseFile :: File -> Parser File
 parseFile file =
   spaces >> (parseAll >>= parseFile) <|> (file <$ eof)
   where
-    parseAll = parseLet
+    parseAll = parseLet <|> parseData
     parseLet = do
       string "let"
-      spanAndName <- nbsc *> getSpan parseName <* nbsc
+      nameWithSpan <- nbsc *> getSpan parseName <* nbsc
       maybeAscription <- optional (char ':' *> parser <* nbsc)
       body <- char '=' >> parser
       let
@@ -38,7 +40,36 @@ parseFile file =
               (meta $ ETypeAscribe body ascription) { metaSpan = metaSpan body }
             Nothing ->
               body
-      fileAddLet spanAndName bodyWithAscription file
+      fileAddLet nameWithSpan bodyWithAscription file
+    parseData = do
+      string "data"
+      nameWithSpan <- nbsc *> getSpan parseName <* nbsc
+      case extractLocalName $ snd nameWithSpan of
+        Just local ->
+          fail ("invalid data type name, did you mean to capitalize it like `" ++ capFirst local ++ "`?")
+        Nothing ->
+          return ()
+      args <- blockOf $ manyUntil (char '=') $ parseMeta $ do
+        name <- parseName
+        case extractLocalName name of
+          Just local ->
+            return local
+          Nothing ->
+            fail ("type parameters must start with a lowercase letter, instead found `" ++ show name ++ "`")
+      vars <- blockOf $ someBetweenLines $ parseMeta parseVariant
+      fileAddData nameWithSpan args vars file
+
+-- TODO: support for infix and unary operator parsing and parentheses (Type -> DataVariant)
+parseVariant :: Parser DataVariant
+parseVariant = do
+  name <- parseMeta parseName
+  case extractLocalName $ unmeta name of
+    Just local ->
+      fail ("invalid data variant name, did you mean to capitalize it like `" ++ capFirst local ++ "`?")
+    Nothing ->
+      return ()
+  types <- many (try nbsc >> parserNoSpace)
+  return (name, types)
 
 data InfixOp = InfixOp
   { infixBacktick :: Bool
@@ -199,7 +230,7 @@ instance Parsable Expr where
 parseExprIdent :: Parser Expr
 parseExprIdent = do
   path <- try parsePath
-  case extractLocalName path of
+  case extractLocalPath path of
     Just local ->
       findBindingFor local <&> \case
         Just n ->
@@ -250,13 +281,16 @@ parseMatch =
   <*> blockOf matchCases
 
 matchCases :: Parser [MatchCase]
-matchCases = (:) <$> matchCase <*> many (try lineBreak >> matchCase)
+matchCases = someBetweenLines matchCase
 
 matchCase :: Parser MatchCase
 matchCase = do
   pats <- someUntil (string "->") parserNoSpace
   expr <- withBindings (pats >>= bindingsForPat) parser
   return (pats, expr)
+
+someBetweenLines :: Parser a -> Parser [a]
+someBetweenLines p = (:) <$> p <*> many (try lineBreak >> p)
 
 someUntil :: Parser a -> Parser b -> Parser [b]
 someUntil end p =
@@ -280,7 +314,7 @@ parseCapIdent :: ExprLike a => String -> (String -> a) -> Parser a
 parseCapIdent kind localBind = do
   pathWithMeta <- parseMeta parsePath
   let path = unmeta pathWithMeta
-  case extractLocalName path of
+  case extractLocalPath path of
     Just name ->
       return $ localBind $ name
     Nothing ->
@@ -288,7 +322,7 @@ parseCapIdent kind localBind = do
       case last components of
         Identifier name
           | isLocalIdentifier name ->
-            let alt = Path $ init components ++ [Identifier $ toUpper (head name) : tail name] in
+            let alt = Path $ init components ++ [Identifier $ capFirst name] in
             fail ("invalid path for " ++ kind ++ ", did you mean to capitalize it like `" ++ show alt ++ "`?")
         _ ->
           return $ opNamed $ pathWithMeta

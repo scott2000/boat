@@ -19,6 +19,15 @@ startCompile :: CompileIO ()
 startCompile = do
   args <- lift $ getArgs
   mapM_ parseSingleFile args
+  exitIfErrors
+
+exitIfErrors :: CompileIO ()
+exitIfErrors = do
+  s <- get
+  when (compileFailed s) $ do
+    forM_ (compileErrors s) $ \err ->
+      lift $ putStrLn $ show err
+    lift exitFailure
 
 parseSingleFile :: FilePath -> CompileIO File
 parseSingleFile path = do
