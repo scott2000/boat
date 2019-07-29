@@ -4,18 +4,59 @@ import Data.Word
 import Data.List
 import Data.String
 
-data CompilerState = CompilerState
-  { anonTypes :: Word64 }
+import Data.Map (Map)
+import qualified Data.Map as Map
+
+import Data.Set (Set)
+import qualified Data.Set as Set
+
+import Control.Monad.Reader
+import Control.Monad.State.Strict
+
+type CompileIO = StateT CompileState IO
+
+data CompileState = CompileState
+  { anonTypes :: Word64
+  , compileErrors :: Set CompileError
+  , compileFailed :: Bool }
+
+defaultCompileState :: CompileState
+defaultCompileState = CompileState
+  { anonTypes = 0
+  , compileErrors = Set.empty
+  , compileFailed = False }
+
+data CompileError = CompileError
+  { errorFile :: Maybe FilePath
+  , errorSpan :: Maybe Span
+  , errorKind :: ErrorKind
+  , errorMessage :: String }
+  deriving (Ord, Eq)
+
+data ErrorKind
+  = Error
+  | Warning
+  | Info
+  deriving (Ord, Eq)
+
+addError :: MonadState CompileState m => CompileError -> m ()
+addError err =
+  modify $ \s -> s
+    { compileErrors = Set.insert err $ compileErrors s
+    , compileFailed = errorKind err == Error || compileFailed s }
+
+displayErrors :: Set CompileError -> IO ()
+displayErrors = error "unimplemented"
 
 data Position = Position
   { posLine :: Int
   , posColumn :: Int }
-  deriving Eq
+  deriving (Ord, Eq)
 
 data Span = Span
   { spanStart :: Position
   , spanEnd :: Position }
-  deriving Eq
+  deriving (Ord, Eq)
 
 data Meta a = Meta
   { unmeta :: a
@@ -47,6 +88,42 @@ metaWithEnds
   = (meta x) { metaSpan = Just Span { spanStart, spanEnd } }
 metaWithEnds _ _ x = meta x
 
+data File = File
+  { filePath :: FilePath
+  , fileLets :: Map Name LetDecl }
+
+instance Show File where
+  show file =
+    "{- " ++ filePath file ++ " -}\n"
+    ++ intercalate "\n" (map showLet $ Map.toList $ fileLets file)
+    where
+      showLet (name, LetDecl { letBody }) =
+        "let " ++ show name ++ " = " ++ indent (show letBody)
+
+defaultFile :: FilePath -> File
+defaultFile path = File
+  { filePath = path
+  , fileLets = Map.empty }
+
+data LetDecl = LetDecl
+  { letNameSpan :: Span
+  , letBody :: Meta Expr }
+
+fileAddLet :: MonadState CompileState m => (Span, Name) -> Meta Expr -> File -> m File
+fileAddLet (nameSpan, name) body file = do
+  let
+    oldLets = fileLets file
+    newDecl = LetDecl
+      { letNameSpan = nameSpan
+      , letBody = body }
+  when (Map.member name oldLets) $
+    addError CompileError
+      { errorFile = Just (filePath file)
+      , errorSpan = Just nameSpan
+      , errorKind = Error
+      , errorMessage = "duplicate let binding for name `" ++ show name ++ "`" }
+  return file { fileLets = Map.insert name newDecl oldLets }
+
 data Of a = Of
 
 of_ :: (Of a -> b) -> a -> b
@@ -68,7 +145,7 @@ data Name
   = Identifier String
   | Operator String
   | Unary String
-  deriving Eq
+  deriving (Ord, Eq)
 
 instance IsString Name where
   fromString = Identifier
@@ -81,7 +158,7 @@ instance Show Name where
 
 data Path = Path
   { unpath :: [Name] }
-  deriving Eq
+  deriving (Ord, Eq)
 
 instance Show Path where
   show = intercalate "." . map show . unpath

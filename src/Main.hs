@@ -13,16 +13,23 @@ import Text.Megaparsec (runParserT, errorBundlePretty)
 import Control.Monad.State.Strict
 
 main :: IO ()
-main = do
-  args <- getArgs
-  file <- readFile (args !! 0)
-  let
-    parserT = runCustomParser parser
-    parseResult = runParserT parserT "" file 
-    compilerState = CompilerState { anonTypes = 0 }
-  case evalState parseResult compilerState of
-    Left err -> putStr (errorBundlePretty err)
-    Right x -> do
-      putStrLn ("Parsed expr:\n" ++ show x ++ "\n")
-      putStrLn ("De Bruijn:\n" ++ show (toDeBruijn x) ++ "\n")
+main = evalStateT startCompile defaultCompileState
 
+startCompile :: CompileIO ()
+startCompile = do
+  args <- lift $ getArgs
+  mapM_ parseSingleFile args
+
+parseSingleFile :: FilePath -> CompileIO File
+parseSingleFile path = do
+  let file = defaultFile path
+  contents <- lift $ readFile path
+  let parserT = runCustomParser $ parseFile file
+  runParserT parserT path contents >>= \case
+    Left err -> lift $ do
+      putStr (errorBundlePretty err)
+      exitFailure
+    Right file -> do
+      lift $ putStrLn $ show file
+      return file
+  

@@ -11,7 +11,6 @@ import Data.List
 import Data.Char
 import Control.Monad.Reader
 import Control.Monad.State.Strict
-import qualified Data.Set as Set
 
 data Assoc
   = ALeft
@@ -23,7 +22,7 @@ data ParserState = ParserState
   , multiline :: Bool
   , exprBindings :: [Maybe String] }
 
-type InnerParser = ParsecT Void String (State CompilerState)
+type InnerParser = ParsecT Void String CompileIO
 type Parser = ReaderT ParserState InnerParser
 
 runCustomParser :: Parser a -> InnerParser a

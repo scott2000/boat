@@ -28,6 +28,7 @@ executable boat
                        PatternSynonyms,
                        LambdaCase,
                        KindSignatures,
+                       MultiParamTypeClasses,
                        DeriveFunctor,
                        DeriveFoldable,
                        DeriveTraversable

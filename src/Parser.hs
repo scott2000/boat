@@ -1,4 +1,4 @@
-module Parser (module Parser.Base, Parsable (..), parser) where
+module Parser (module Parser.Base, Parsable (..), parser, parseFile) where
 
 import Parser.Base
 import AST
@@ -19,6 +19,18 @@ parseName = label "name" $
 parsePath :: Parser Path
 parsePath = label "path" $
   Path <$> ((:) <$> try parseName <*> many (char '.' *> parseName))
+
+parseFile :: File -> Parser File
+parseFile file =
+  spaces >> (parseAll >>= parseFile) <|> (eof >> return file)
+  where
+    parseAll = parseLet
+    parseLet = do
+      string "let"
+      spanAndName <- nbsc >> getSpan parseName
+      nbsc >> string "="
+      body <- parser
+      fileAddLet spanAndName body file
 
 data InfixOp = InfixOp
   { infixBacktick :: Bool
