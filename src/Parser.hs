@@ -12,7 +12,7 @@ import Control.Monad.State.Strict
 
 parseName :: Parser Name
 parseName =
-  Identifier <$> identifier <|> parenOp
+  parenOp <|> Identifier <$> identifier
   where
     parenOp = label "parenthesized operator" $
       char '(' *> nbsc *> (unaryOp <|> pure Operator) <*> operator <* nbsc <* char ')'
@@ -37,7 +37,7 @@ parseFile file =
         bodyWithAscription =
           case maybeAscription of
             Just ascription ->
-              (meta $ ETypeAscribe body ascription) { metaSpan = metaSpan body }
+              copySpan body $ ETypeAscribe body ascription
             Nothing ->
               body
       fileAddLet nameWithSpan bodyWithAscription file
@@ -56,20 +56,12 @@ parseFile file =
             return local
           Nothing ->
             fail ("type parameters must start with a lowercase letter, instead found `" ++ show name ++ "`")
-      vars <- blockOf $ someBetweenLines $ parseMeta parseVariant
+      vars <- blockOf $ someBetweenLines parseVariant
       fileAddData nameWithSpan args vars file
 
--- TODO: support for infix and unary operator parsing and parentheses (Type -> DataVariant)
-parseVariant :: Parser DataVariant
-parseVariant = do
-  name <- parseMeta parseName
-  case extractLocalName $ unmeta name of
-    Just local ->
-      fail ("invalid data variant name, did you mean to capitalize it like `" ++ capFirst local ++ "`?")
-    Nothing ->
-      return ()
-  types <- many (try nbsc >> parserNoSpace)
-  return (name, types)
+parseVariant :: Parser (Meta DataVariant)
+parseVariant =
+  variantFromType <$> parserPrec minPrec >>= eitherToFail
 
 data InfixOp = InfixOp
   { infixBacktick :: Bool
@@ -100,7 +92,7 @@ paren =
     fullParen = opParen <$> parser <* spaces <* char ')'
 
 parserNoPrefix :: Parsable a => Parser (Meta a)
-parserNoPrefix = hidden paren <|> parseMeta parseOne
+parserNoPrefix = parseMeta parseOne <|> hidden paren
 
 parserPartial :: Parsable a => Parser (Meta a)
 parserPartial = parseMeta parsePrefix <|> parserNoPrefix
@@ -111,7 +103,7 @@ parserPartial = parseMeta parsePrefix <|> parserNoPrefix
         spaceAfter <- isSpace <$> nbsc
         guard (not spaceAfter)
         return path
-      opUnary path <$> parserPrec applyPrec
+      opUnary path <$> parserPrec compactPrec
 
 type Prec = Int
 
@@ -134,10 +126,12 @@ parserBase :: Parsable a => Prec -> Meta a -> Parser (Meta a)
 parserBase prec current =
   ((seq <|> opOrApp) >>= parserBase prec) <|> return current
   where
-    seq = do
-      guard (prec == minPrec)
-      try lineBreak
-      metaExtendFail opSeq prec current
+    seq =
+      case opSeq of
+        Just f | prec == minPrec -> do
+          try lineBreak
+          metaExtendPrec f prec current
+        _ -> empty
 
     opOrApp = join $ try $ do
       spaceBefore <- isSpace <$> nbsc
@@ -161,7 +155,12 @@ parserBase prec current =
           if prec <= opPrec then
             case parsedOp of
               Right path ->
-                return $ Just $ metaExtendPrec (opBinary $ infixPath path) opPrec current
+                return $ Just $ do
+                  bin <- metaExtendPrec (opBinary $ infixPath path) opPrec current
+                  if prec == opPrec then
+                    return bin
+                  else
+                    return $ copySpan bin $ opParen bin
               Left op ->
                 case parseSpecial op of
                   Nothing ->

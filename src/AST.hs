@@ -5,6 +5,7 @@ import Data.Word
 import Data.List
 import Data.String
 import Data.Semigroup
+import Data.Bifunctor
 
 import Data.Map (Map)
 import qualified Data.Map as Map
@@ -113,6 +114,10 @@ meta x = Meta
   , metaTy = Nothing
   , metaSpan = Nothing }
 
+copySpan :: Meta a -> b -> Meta b
+copySpan Meta { metaSpan } x =
+  (meta x) { metaSpan }
+
 metaWithSpan :: Span -> a -> Meta a
 metaWithSpan span x = (meta x)
   { metaSpan = Just span }
@@ -203,6 +208,21 @@ fileAddData (nameSpan, name) args vars file = do
       , errorMessage = "duplicate data type declaration for name `" ++ show name ++ "`" }
   return file { fileDatas = Map.insert name newDecl oldDatas }
 
+variantFromType :: Meta Type -> Either String (Meta DataVariant)
+variantFromType typeWithMeta = do
+  (f, xs) <- reduceApply typeWithMeta
+  case unmeta f of
+    TNamed (Path path) ->
+      case path of
+        [name] ->
+          Right $ copySpan typeWithMeta (copySpan f name, xs)
+        _ ->
+          Left ("data type variant names must be unqualified, did you mean `" ++ show (last path) ++ "`?")
+    TPoly local ->
+      Left ("data type variant names must be capitalized, did you mean `" ++ capFirst local ++ "`?")
+    other ->
+      Left ("expected a name for the data type variant, found " ++ show other ++ " instead")
+
 data Of a = Of
 
 of_ :: (Of a -> b) -> a -> b
@@ -216,9 +236,8 @@ class ExprLike a where
   opUnary :: Meta Path -> Meta a -> a
   opBinary :: Meta Path -> Meta a -> Meta a -> a
   opApply :: Meta a -> Meta a -> Either String a
-  opSeq :: Meta a -> Meta a -> Either String a
-  opSeq x _ =
-    Left ("line breaks not allowed in " ++ opKind `of_` unmeta x)
+  opSeq :: Maybe (Meta a -> Meta a -> a)
+  opSeq = Nothing
 
 data Name
   = Identifier String
@@ -287,6 +306,27 @@ instance Show Type where
     TApp a b ->
       "(" ++ show a ++ " " ++ show b ++ ")"
 
+reduceApply :: Meta Type -> Either String (Meta Type, [Meta Type])
+reduceApply typeWithMeta =
+  case unmeta typeWithMeta of
+    TParen ty ->
+      reduceApply ty
+    TUnaryOp path (Meta { unmeta = TBinOp _ _ _ }) ->
+      opError path
+    TBinOp path _ (Meta { unmeta = TBinOp _ _ _ }) ->
+      opError path
+    TUnaryOp path ty ->
+      Right (TNamed <$> path, [ty])
+    TBinOp path a b ->
+      Right (TNamed <$> path, [a, b])
+    TApp a b -> do
+      second (++ [b]) <$> reduceApply a
+    other ->
+      Right (typeWithMeta, [])
+  where
+    opError path =
+      Left ("cannot resolve relative operator precedence of `" ++ show path ++ "` without explicit parentheses")
+
 pattern Core :: Name -> Path
 pattern Core name = Path ["core", name]
 
@@ -348,7 +388,7 @@ instance ExprLike Expr where
   opUnary = EUnaryOp
   opBinary = EBinOp
   opApply a b = Right $ EApp a b
-  opSeq a b = Right $ ESeq a b
+  opSeq = Just ESeq
 
 instance Eq Expr where
   EValue v0 == EValue v1 =
