@@ -3,6 +3,7 @@ module AST where
 import Data.Word
 import Data.List
 import Data.String
+import Data.Semigroup
 
 import Data.Map (Map)
 import qualified Data.Map as Map
@@ -15,8 +16,10 @@ import Control.Monad.State.Strict
 
 type CompileIO = StateT CompileState IO
 
+type AnonCount = Word64
+
 data CompileState = CompileState
-  { anonTypes :: Word64
+  { anonTypes :: AnonCount
   , compileErrors :: Set CompileError
   , compileFailed :: Bool }
 
@@ -25,6 +28,13 @@ defaultCompileState = CompileState
   { anonTypes = 0
   , compileErrors = Set.empty
   , compileFailed = False }
+
+getNewAnon :: MonadState CompileState m => m AnonCount
+getNewAnon = do
+  s <- get
+  let oldCount = anonTypes s
+  put s { anonTypes = oldCount + 1 }
+  return oldCount
 
 data CompileError = CompileError
   { errorFile :: Maybe FilePath
@@ -58,6 +68,10 @@ data Span = Span
   , spanEnd :: Position }
   deriving (Ord, Eq)
 
+instance Semigroup Span where
+  Span { spanStart } <> Span { spanEnd } =
+    Span { spanStart, spanEnd }
+
 data Meta a = Meta
   { unmeta :: a
   , metaTy :: Maybe Type
@@ -82,10 +96,10 @@ metaWithSpan span x = (meta x)
 
 metaWithEnds :: Meta a -> Meta b -> c -> Meta c
 metaWithEnds
-    Meta { metaSpan = Just Span { spanStart } }
-    Meta { metaSpan = Just Span { spanEnd } }
+    Meta { metaSpan = Just span0 }
+    Meta { metaSpan = Just span1 }
     x
-  = (meta x) { metaSpan = Just Span { spanStart, spanEnd } }
+  = (meta x) { metaSpan = Just (span0 <> span1) }
 metaWithEnds _ _ x = meta x
 
 data File = File
@@ -98,7 +112,7 @@ instance Show File where
     ++ intercalate "\n" (map showLet $ Map.toList $ fileLets file)
     where
       showLet (name, LetDecl { letBody }) =
-        "let " ++ show name ++ " = " ++ indent (show letBody)
+        "let " ++ show name ++ " =" ++ indent (show letBody)
 
 defaultFile :: FilePath -> File
 defaultFile path = File
@@ -172,18 +186,41 @@ instance IsString Path where
         where
           (first:rest) = split cs
 
-data TBase
+data Type
   = TNamed Path
   | TPoly String
   | TAnon Word64
-  deriving Eq
-
-data Type
-  = TApp TBase [Meta Type]
   | TParen (Meta Type)
   | TUnaryOp (Meta Path) (Meta Type)
   | TBinOp (Meta Path) (Meta Type) (Meta Type)
+  | TApp (Meta Type) (Meta Type)
   deriving Eq
+
+instance ExprLike Type where
+  opKind _ = "type"
+  opUnit = TNamed $ Core $ Identifier "Unit"
+  opNamed = TNamed . unmeta
+  opParen = TParen
+  opUnary = TUnaryOp
+  opBinary = TBinOp
+  opApply a b = Right $ TApp a b
+
+instance Show Type where
+  show = \case
+    TNamed path -> show path
+    TPoly name -> name
+    TAnon _ -> "_"
+    TParen ty -> show ty
+    TUnaryOp Meta { unmeta = Path [Unary op] } ty ->
+      "(" ++ op ++ show ty ++ ")"
+    TUnaryOp op ty ->
+      "(" ++ show op ++ " " ++ show ty ++ ")"
+    TBinOp Meta { unmeta = Path [Operator op] } lhs rhs ->
+      "(" ++ show lhs ++ " " ++ op ++ " " ++ show rhs ++ ")"
+    TBinOp op lhs rhs ->
+      "(" ++ show op ++ " " ++ show lhs ++ " " ++ show rhs ++ ")"
+    TApp a b ->
+      "(" ++ show a ++ " " ++ show b ++ ")"
 
 pattern Core :: Name -> Path
 pattern Core name = Path ["core", name]
@@ -191,11 +228,17 @@ pattern Core name = Path ["core", name]
 pattern Local :: Name -> Path
 pattern Local name = Path [name]
 
-pattern TFunc :: Meta Type -> Meta Type -> Type
-pattern TFunc a b = TApp (TNamed (Core (Operator "->"))) [a, b]
+pattern DefaultMeta :: a -> Meta a
+pattern DefaultMeta x <- Meta { unmeta = x }
+  where DefaultMeta = meta
 
-tApp :: [Meta Type] -> Type -> Type
-tApp types (TApp base xs) = TApp base (xs ++ types)
+pattern TFuncArrow :: Type
+pattern TFuncArrow = TNamed (Core (Operator "->"))
+
+pattern TFunc :: Meta Type -> Meta Type -> Type
+pattern TFunc a b =
+  -- using TFuncArrow here triggers a GHC bug with pattern synonyms
+  TApp (DefaultMeta (TApp (DefaultMeta (TNamed (Core (Operator "->")))) a)) b
 
 data Value
   = VUnit
@@ -226,6 +269,7 @@ data Expr
   | ESeq (Meta Expr) (Meta Expr)
   | ELet (Meta Pattern) (Meta Expr) (Meta Expr)
   | EMatchIn [Meta Expr] [MatchCase]
+  | ETypeAscribe (Meta Expr) (Meta Type)
 
 instance ExprLike Expr where
   opKind _ = "expression"
@@ -257,6 +301,8 @@ instance Eq Expr where
     p0 == p1 && v0 == v1 && e0 == e1
   EMatchIn e0 c0 == EMatchIn e1 c1 =
     e0 == e1 && c0 == c1
+  ETypeAscribe e0 t0 == ETypeAscribe e1 t1 =
+    e0 == e1 && t0 == t1
   _ == _ = False
 
 instance Show Expr where
@@ -283,6 +329,8 @@ instance Show Expr where
       "(let " ++ show p ++ " =" ++ indent (show v) ++ "\n" ++ show e ++ ")"
     EMatchIn exprs cases ->
       "(match " ++ intercalate " " (map show exprs) ++ showCases False cases ++ ")"
+    ETypeAscribe expr ty ->
+      "(" ++ show expr ++ " : " ++ show ty ++ ")"
 
 indent :: String -> String
 indent = indentLines . lines
@@ -319,6 +367,8 @@ toDeBruijn = fmap $ \case
     ELet (toDeBruijnPat p) (toDeBruijn v) (toDeBruijn e)
   EMatchIn exprs cases ->
     EMatchIn (map toDeBruijn exprs) $ map toDeBruijnCase cases
+  ETypeAscribe expr ty ->
+    ETypeAscribe (toDeBruijn expr) ty
   where
     toDeBruijnVal = \case
       VFun cases ->
@@ -337,6 +387,8 @@ toDeBruijn = fmap $ \case
         PBinOp op (toDeBruijnPat lhs) (toDeBruijnPat rhs)
       PCons name pats ->
         PCons name $ map toDeBruijnPat pats
+      PTypeAscribe pat ty ->
+        PTypeAscribe (toDeBruijnPat pat) ty
 
 data Pattern
   = PUnit
@@ -346,6 +398,7 @@ data Pattern
   | PUnaryOp (Meta Path) (Meta Pattern)
   | PBinOp (Meta Path) (Meta Pattern) (Meta Pattern)
   | PCons (Meta Path) [Meta Pattern]
+  | PTypeAscribe (Meta Pattern) (Meta Type)
 
 instance ExprLike Pattern where
   opKind _ = "pattern"
@@ -363,11 +416,14 @@ instance ExprLike Pattern where
   opApply other _ = Left ("pattern does not support parameters: " ++ show other)
 
 instance Eq Pattern where
-  PUnit       == PUnit       = True
-  PAny        == PAny        = True
-  PBind _     == PBind _     = True
+  PUnit   == PUnit   = True
+  PAny    == PAny    = True
+  PBind _ == PBind _ = True
   -- PParen, PUnaryOp, and PBinOp are omitted as they will be removed by later passes
-  PCons n0 l0 == PCons n1 l1 = n0 == n1 && l0 == l1
+  PCons n0 l0 == PCons n1 l1 =
+    n0 == n1 && l0 == l1
+  PTypeAscribe p0 t0 == PTypeAscribe p1 t1 =
+    p0 == p1 && t0 == t1
   _ == _ = False
 
 instance Show Pattern where
@@ -387,6 +443,8 @@ instance Show Pattern where
     PCons name [] -> show name
     PCons name pats ->
       "(" ++ show name ++ " " ++ intercalate " " (map show pats) ++ ")"
+    PTypeAscribe pat ty ->
+      "(" ++ show pat ++ " : " ++ show ty ++ ")"
 
 bindingsForPat :: Meta Pattern -> [Maybe String]
 bindingsForPat pat =
@@ -398,6 +456,7 @@ bindingsForPat pat =
     PUnaryOp _ pat -> bindingsForPat pat
     PBinOp _ lhs rhs -> bindingsForPat lhs ++ bindingsForPat rhs
     PCons _ pats -> pats >>= bindingsForPat
+    PTypeAscribe pat _ -> bindingsForPat pat
 
 isLocalIdentifier :: String -> Bool
 isLocalIdentifier = not . isCap . head
