@@ -252,6 +252,7 @@ instance Parsable Expr where
     <|> parseLet
     <|> parseFunction
     <|> parseMatch
+    <|> parseExprUse
 
   parseSpecial (_, TypeAscription) =
     Just $ metaExtendPrec ETypeAscribe
@@ -309,6 +310,14 @@ parseMatch =
   <*  string "match"
   <*> blockOf (some (try spaces >> parserNoSpace))
   <*> blockOf matchCases
+
+parseExprUse :: Parser Expr
+parseExprUse =
+  pure EUse
+  <*  string "use"
+  <*  nbsc
+  <*> parseMeta parseUseModule
+  <*> parser  
 
 matchCases :: Parser [MatchCase]
 matchCases = someBetweenLines matchCase

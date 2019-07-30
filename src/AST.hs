@@ -411,6 +411,7 @@ data Expr
   | ESeq (Meta Expr) (Meta Expr)
   | ELet (Meta Pattern) (Meta Expr) (Meta Expr)
   | EMatchIn [Meta Expr] [MatchCase]
+  | EUse (Meta UseModule) (Meta Expr)
   | ETypeAscribe (Meta Expr) (Meta Type)
 
 instance ExprLike Expr where
@@ -443,6 +444,8 @@ instance Eq Expr where
     p0 == p1 && v0 == v1 && e0 == e1
   EMatchIn e0 c0 == EMatchIn e1 c1 =
     e0 == e1 && c0 == c1
+  EUse u0 e0 == EUse u1 e1 =
+    u0 == u1 && e0 == e1
   ETypeAscribe e0 t0 == ETypeAscribe e1 t1 =
     e0 == e1 && t0 == t1
   _ == _ = False
@@ -471,6 +474,8 @@ instance Show Expr where
       "(let " ++ show p ++ " =" ++ indent (show v) ++ "\n" ++ show e ++ ")"
     EMatchIn exprs cases ->
       "(match " ++ intercalate " " (map show exprs) ++ showCases False cases ++ ")"
+    EUse u e ->
+      "(use " ++ show u ++ "\n" ++ show e ++ ")"
     ETypeAscribe expr ty ->
       "(" ++ show expr ++ " : " ++ show ty ++ ")"
 
@@ -509,6 +514,8 @@ toDeBruijn = fmap $ \case
     ELet (toDeBruijnPat p) (toDeBruijn v) (toDeBruijn e)
   EMatchIn exprs cases ->
     EMatchIn (map toDeBruijn exprs) $ map toDeBruijnCase cases
+  EUse u e ->
+    EUse u $ toDeBruijn e
   ETypeAscribe expr ty ->
     ETypeAscribe (toDeBruijn expr) ty
   where
