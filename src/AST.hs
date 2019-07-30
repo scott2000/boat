@@ -8,7 +8,7 @@ import Data.Semigroup
 import Data.Bifunctor
 
 import Data.Map (Map)
-import qualified Data.Map as Map
+import qualified Data.Map.Strict as Map
 
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -102,6 +102,9 @@ data Meta a = Meta
   , metaSpan :: Maybe Span }
   deriving Functor
 
+instance Ord a => Ord (Meta a) where
+  a `compare` b = unmeta a `compare` unmeta b
+
 instance Eq a => Eq (Meta a) where
   m0 == m1 = unmeta m0 == unmeta m1 && metaTy m0 == metaTy m1
 
@@ -132,15 +135,19 @@ metaWithEnds _ _ x = meta x
 
 data File = File
   { filePath :: FilePath
-  , fileLets :: Map Name LetDecl
-  , fileDatas :: Map Name DataDecl }
+  , fileUses :: [Meta UseModule]
+  , fileDatas :: Map Name DataDecl
+  , fileLets :: Map Name LetDecl }
 
 instance Show File where
   show file = intercalate "\n" $ concat
       [ ["{- " ++ filePath file ++ " -}"]
+      , map showUse $ reverse $ fileUses file
       , map showData $ Map.toList $ fileDatas file
       , map showLet $ Map.toList $ fileLets file ]
     where
+      showUse use =
+        "use " ++ show use
       showLet (name, LetDecl { letBody }) =
         "let " ++ show name ++ " =" ++ indent (show letBody)
       showData (name, DataDecl { dataArgs, dataVariants }) =
@@ -152,8 +159,38 @@ instance Show File where
 defaultFile :: FilePath -> File
 defaultFile path = File
   { filePath = path
-  , fileLets = Map.empty
-  , fileDatas = Map.empty }
+  , fileUses = []
+  , fileDatas = Map.empty
+  , fileLets = Map.empty }
+
+data UseModule
+  = UseAny
+  | UseModule (Meta Name) (Maybe UseContents)
+  deriving (Ord, Eq)
+
+instance Show UseModule where
+  show = \case
+    UseAny -> "_"
+    UseModule name Nothing ->
+      show name
+    UseModule name (Just contents) ->
+      show name ++ show contents
+
+data UseContents
+  = UseDot (Meta UseModule)
+  | UseAll [Meta UseModule]
+  deriving (Ord, Eq)
+
+instance Show UseContents where
+  show = \case
+    UseDot rest ->
+      '.' : show rest
+    UseAll rest ->
+      " (" ++ intercalate ", " (map show rest) ++ ")"
+
+fileAddUse :: Meta UseModule -> File -> File
+fileAddUse use file = file
+  { fileUses = use : fileUses file }
 
 data LetDecl = LetDecl
   { letNameSpan :: Span
@@ -328,7 +365,7 @@ reduceApply typeWithMeta =
       Left ("cannot resolve relative operator precedence of `" ++ show path ++ "` without explicit parentheses")
 
 pattern Core :: Name -> Path
-pattern Core name = Path ["core", name]
+pattern Core name = Path ["Core", name]
 
 pattern Local :: Name -> Path
 pattern Local name = Path [name]

@@ -38,8 +38,8 @@ defaultParserState = ParserState
   , exprBindings = [] }
 
 isKeyword, isReservedOp :: String -> Bool
-isKeyword    w = w `elem` ["_", "fun", "let", "let", "match", "in", "unary"]
-isReservedOp w = w `elem` [".", "?", ",", ";"]
+isKeyword    w = w `elem` ["_", "fun", "let", "match", "in", "unary"]
+isReservedOp w = w `elem` [".", "?", ","]
 
 getPos :: Parser Position
 getPos = toPosition . pstateSourcePos . statePosState <$> getParserState

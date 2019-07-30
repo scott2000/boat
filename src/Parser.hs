@@ -7,7 +7,7 @@ import Text.Megaparsec
 import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as L
 
-import Data.Semigroup
+import Data.Semigroup ((<>))
 import Control.Monad.State.Strict
 
 parseName :: Parser Name
@@ -27,7 +27,10 @@ parseFile :: File -> Parser File
 parseFile file =
   spaces >> (parseAll >>= parseFile) <|> (file <$ eof)
   where
-    parseAll = parseLet <|> parseData
+    parseAll = parseUse <|> parseLet <|> parseData
+    parseUse =
+      parseMeta (string "use" *> nbsc *> parseUseModule) <&> \use ->
+        fileAddUse use file
     parseLet = do
       string "let"
       nameWithSpan <- nbsc *> getSpan parseName <* nbsc
@@ -58,6 +61,34 @@ parseFile file =
             fail ("type parameters must start with a lowercase letter, instead found `" ++ show name ++ "`")
       vars <- blockOf $ someBetweenLines parseVariant
       fileAddData nameWithSpan args vars file
+
+parseUseModule :: Parser UseModule
+parseUseModule =
+  (UseModule <$> try (parseMeta parseName) <*> parseUseContents)
+  <|> (UseAny <$ char '_')
+
+parseUseContents :: Parser (Maybe UseContents)
+parseUseContents =
+  (char '.' >> Just . UseDot <$> parseMeta parseUseModule)
+  <|> (Just . UseAll <$> parseParen)
+  <|> return Nothing
+  where
+    parseParen =
+      nbsc *> char '(' *> parenInner <* spaces <* char ')'
+    parenInner =
+      blockOf $ parseCommaList $ parseMeta parseUseModule
+
+parseCommaList :: Parser a -> Parser [a]
+parseCommaList p =
+  parseSomeCommaList p <|> return []
+
+parseSomeCommaList :: Parser a -> Parser [a]
+parseSomeCommaList p =
+  (:) <$> p <*> manyCommas
+  where
+    manyCommas = option [] $ do
+      try (spaces >> char ',') >> spaces
+      option [] ((:) <$> p <*> manyCommas)
 
 parseVariant :: Parser (Meta DataVariant)
 parseVariant =
