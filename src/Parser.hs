@@ -25,15 +25,24 @@ parsePath = label "path" $
 
 parseFile :: File -> Parser File
 parseFile file =
-  spaces >> (parseAll >>= parseFile) <|> (file <$ eof)
+  option file (try spaces >> (parseAll >>= parseFile) <|> (file <$ eof))
   where
-    parseAll = parseUse <|> parseLet <|> parseData
+    parseAll =
+      parseUse
+      <|> parseMod
+      <|> parseLet
+      <|> parseData
     parseUse =
       parseMeta (string "use" *> nbsc *> parseUseModule) <&> \use ->
         fileAddUse use file
+    parseMod = do
+      string "mod"
+      name <- nbsc >> parseMeta parseName
+      mod <- blockOf $ parseFile $ subFileOf file
+      return $ fileAddMod name mod file
     parseLet = do
       string "let"
-      nameWithSpan <- nbsc *> getSpan parseName <* nbsc
+      name <- nbsc *> parseMeta parseName <* nbsc
       maybeAscription <- optional (char ':' *> parser <* nbsc)
       body <- char '=' >> parser
       let
@@ -43,11 +52,11 @@ parseFile file =
               copySpan body $ ETypeAscribe body ascription
             Nothing ->
               body
-      fileAddLet nameWithSpan bodyWithAscription file
+      fileAddLet name bodyWithAscription file
     parseData = do
       string "data"
-      nameWithSpan <- nbsc *> getSpan parseName <* nbsc
-      case extractLocalName $ snd nameWithSpan of
+      name <- nbsc *> parseMeta parseName <* nbsc
+      case extractLocalName $ unmeta name of
         Just local ->
           fail ("invalid data type name, did you mean to capitalize it like `" ++ capFirst local ++ "`?")
         Nothing ->
@@ -60,7 +69,9 @@ parseFile file =
           Nothing ->
             fail ("type parameters must start with a lowercase letter, instead found `" ++ show name ++ "`")
       vars <- blockOf $ someBetweenLines parseVariant
-      fileAddData nameWithSpan args vars file
+      fileAddData name args vars file
+
+-- TODO: remove all uses of `try` with `parseName` after finding another solution to `_` keyword parsing
 
 parseUseModule :: Parser UseModule
 parseUseModule =

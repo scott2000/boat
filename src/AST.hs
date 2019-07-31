@@ -136,18 +136,22 @@ metaWithEnds _ _ x = meta x
 data File = File
   { filePath :: FilePath
   , fileUses :: [Meta UseModule]
-  , fileDatas :: Map Name DataDecl
-  , fileLets :: Map Name LetDecl }
+  , fileMods :: [(Meta Name, File)]
+  , fileDatas :: Map (Meta Name) DataDecl
+  , fileLets :: Map (Meta Name) LetDecl }
 
 instance Show File where
   show file = intercalate "\n" $ concat
       [ ["{- " ++ filePath file ++ " -}"]
       , map showUse $ reverse $ fileUses file
+      , map showMod $ reverse $ fileMods file
       , map showData $ Map.toList $ fileDatas file
       , map showLet $ Map.toList $ fileLets file ]
     where
       showUse use =
         "use " ++ show use
+      showMod (name, mod) =
+        "mod " ++ show name ++ indent (show mod)
       showLet (name, LetDecl { letBody }) =
         "let " ++ show name ++ " =" ++ indent (show letBody)
       showData (name, DataDecl { dataArgs, dataVariants }) =
@@ -160,8 +164,12 @@ defaultFile :: FilePath -> File
 defaultFile path = File
   { filePath = path
   , fileUses = []
+  , fileMods = []
   , fileDatas = Map.empty
   , fileLets = Map.empty }
+
+subFileOf :: File -> File
+subFileOf = defaultFile . filePath
 
 data UseModule
   = UseAny
@@ -192,26 +200,28 @@ fileAddUse :: Meta UseModule -> File -> File
 fileAddUse use file = file
   { fileUses = use : fileUses file }
 
+fileAddMod :: Meta Name -> File -> File -> File
+fileAddMod name mod file = file
+  { fileMods = (name, mod) : fileMods file }
+
 data LetDecl = LetDecl
-  { letNameSpan :: Span
-  , letBody :: Meta Expr }
+  { letBody :: Meta Expr }
 
 fileAddLet
   :: MonadState CompileState m
-  => (Span, Name)
+  => Meta Name
   -> Meta Expr
   -> File
   -> m File
-fileAddLet (nameSpan, name) body file = do
+fileAddLet name body file = do
   let
     oldLets = fileLets file
     newDecl = LetDecl
-      { letNameSpan = nameSpan
-      , letBody = body }
+      { letBody = body }
   when (Map.member name oldLets) $
     addError CompileError
-      { errorFile = Just (filePath file)
-      , errorSpan = Just nameSpan
+      { errorFile = Just $ filePath file
+      , errorSpan = metaSpan name
       , errorKind = Error
       , errorMessage = "duplicate let binding for name `" ++ show name ++ "`" }
   return file { fileLets = Map.insert name newDecl oldLets }
@@ -219,28 +229,26 @@ fileAddLet (nameSpan, name) body file = do
 type DataVariant = (Meta Name, [Meta Type])
 
 data DataDecl = DataDecl
-  { dataNameSpan :: Span
-  , dataArgs :: [Meta String]
+  { dataArgs :: [Meta String]
   , dataVariants :: [Meta DataVariant] }
 
 fileAddData
   :: MonadState CompileState m
-  => (Span, Name)
+  => Meta Name
   -> [Meta String]
   -> [Meta DataVariant]
   -> File
   -> m File
-fileAddData (nameSpan, name) args vars file = do
+fileAddData name args vars file = do
   let
     oldDatas = fileDatas file
     newDecl = DataDecl
-      { dataNameSpan = nameSpan
-      , dataArgs = args
+      { dataArgs = args
       , dataVariants = vars }
   when (Map.member name oldDatas) $
     addError CompileError
-      { errorFile = Just (filePath file)
-      , errorSpan = Just nameSpan
+      { errorFile = Just $ filePath file
+      , errorSpan = metaSpan name
       , errorKind = Error
       , errorMessage = "duplicate data type declaration for name `" ++ show name ++ "`" }
   return file { fileDatas = Map.insert name newDecl oldDatas }

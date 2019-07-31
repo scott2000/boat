@@ -29,7 +29,7 @@ runCustomParser :: Parser a -> InnerParser a
 runCustomParser p = runReaderT (followedByEnd p) defaultParserState
 
 followedByEnd :: Parser a -> Parser a
-followedByEnd p = p <* spaces <* eof
+followedByEnd p = p <* many spaceAnyIndent <* eof
 
 defaultParserState :: ParserState
 defaultParserState = ParserState
@@ -131,8 +131,8 @@ spaces = (parseSomeNewlines >>= ifSpaces) <|> return NoSpace
       else
         fail "line continuation not allowed unless inside of a block"
 
-lookAheadSpace :: Parser ()
-lookAheadSpace = choice [plainWhitespace, void $ char '\n', lineCmnt, blockCmnt]
+spaceAnyIndent :: Parser ()
+spaceAnyIndent = choice [plainWhitespace, void $ char '\n', lineCmnt, blockCmnt]
 
 lineCmnt :: Parser ()
 lineCmnt = hidden $ L.skipLineComment "--"
@@ -185,6 +185,11 @@ instance Show SpecialOp where
   show FunctionArrow = "->"
   show TypeAscription = ":"
 
+isAllowedInParen :: SpecialOp -> Bool
+isAllowedInParen = \case
+  FunctionArrow -> True
+  _ -> False
+
 anyOperator :: Parser (Either SpecialOp String)
 anyOperator = label "operator" $ do
   op <- some $ oneOf ("+-*/%^!=<>:?|&~$." :: String)
@@ -200,4 +205,7 @@ operator = anyOperator >>= \case
   Right op ->
     return op
   Left op ->
-    fail ("unexpected special operator `" ++ show op ++ "`")
+    if isAllowedInParen op then
+      return $ show op
+    else
+      fail ("unexpected special operator `" ++ show op ++ "`")

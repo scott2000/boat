@@ -41,4 +41,4 @@ parseSingleFile path = do
     Right file -> do
       lift $ putStrLn $ show file
       return file
-  
+
