@@ -17,10 +17,10 @@ parseName =
     parenOp = label "parenthesized operator" $
       char '(' *> nbsc *> (unaryOp <|> pure Operator) <*> operator <* nbsc <* char ')'
     unaryOp = label "keyword \"unary\"" $
-      string "unary" *> nbsc *> pure Unary
+      keyword "unary" *> nbsc *> pure Unary
 
 parsePath :: Parser Path
-parsePath = label "path" $
+parsePath =
   Path <$> ((:) <$> try parseName <*> many (char '.' *> parseName))
 
 parseFile :: File -> Parser File
@@ -33,18 +33,18 @@ parseFile file =
       <|> parseLet
       <|> parseData
     parseUse =
-      parseMeta (string "use" *> nbsc *> parseUseModule) <&> \use ->
+      parseMeta (keyword "use" *> nbsc *> parseUseModule) <&> \use ->
         fileAddUse use file
     parseMod = do
-      string "mod"
+      keyword "mod"
       name <- nbsc >> parseMeta parseName
       mod <- blockOf $ parseFile $ subFileOf file
       return $ fileAddMod name mod file
     parseLet = do
-      string "let"
+      keyword "let"
       name <- nbsc *> parseMeta parseName <* nbsc
-      maybeAscription <- optional (char ':' *> parser <* nbsc)
-      body <- char '=' >> parser
+      maybeAscription <- optional (specialOp TypeAscription *> blockOf parserExpectEnd <* nbsc)
+      body <- specialOp Assignment >> parser
       let
         bodyWithAscription =
           case maybeAscription of
@@ -54,14 +54,14 @@ parseFile file =
               body
       fileAddLet name bodyWithAscription file
     parseData = do
-      string "data"
+      keyword "data"
       name <- nbsc *> parseMeta parseName <* nbsc
       case extractLocalName $ unmeta name of
         Just local ->
           fail ("invalid data type name, did you mean to capitalize it like `" ++ capFirst local ++ "`?")
         Nothing ->
           return ()
-      args <- blockOf $ manyUntil (char '=') $ parseMeta $ do
+      args <- blockOf $ manyUntil (specialOp Assignment) $ parseMeta $ do
         name <- parseName
         case extractLocalName name of
           Just local ->
@@ -103,7 +103,7 @@ parseSomeCommaList p =
 
 parseVariant :: Parser (Meta DataVariant)
 parseVariant =
-  variantFromType <$> parserPrec minPrec >>= eitherToFail
+  variantFromType <$> parserExpectEnd >>= eitherToFail
 
 data InfixOp = InfixOp
   { infixBacktick :: Bool
@@ -139,15 +139,23 @@ parserNoPrefix = parseMeta parseOne <|> hidden paren
 parserPartial :: Parsable a => Parser (Meta a)
 parserPartial = parseMeta parsePrefix <|> parserNoPrefix
   where
+    parsePrefix :: forall a. Parsable a => Parser a
     parsePrefix = do
       path <- try $ do
+        offset <- getOffset
         path <- parseMeta (Local . Unary <$> operator)
         spaceAfter <- isSpace <$> nbsc
-        guard (not spaceAfter)
-        return path
+        if spaceAfter then do
+          setOffset offset
+          fail ("operator not allowed at start of " ++ opKind (Of :: Of a))
+        else
+          return path
       opUnary path <$> parserPrec compactPrec
 
 type Prec = Int
+
+expectEndPrec :: Prec
+expectEndPrec = -1
 
 minPrec, normalPrec, applyPrec, compactPrec :: Prec
 minPrec     = 0
@@ -158,31 +166,65 @@ compactPrec = 3
 parser :: Parsable a => Parser (Meta a)
 parser = blockOf $ parserPrec minPrec
 
+parserExpectEnd :: Parsable a => Parser (Meta a)
+parserExpectEnd = parserPrec expectEndPrec
+
 parserNoSpace :: Parsable a => Parser (Meta a)
 parserNoSpace = parserPrec applyPrec
 
 parserPrec :: Parsable a => Prec -> Parser (Meta a)
 parserPrec prec = parserPartial >>= parserBase prec
 
-parserBase :: Parsable a => Prec -> Meta a -> Parser (Meta a)
+parserBase :: forall a. Parsable a => Prec -> Meta a -> Parser (Meta a)
 parserBase prec current =
-  ((seq <|> opOrApp) >>= parserBase prec) <|> return current
+  join (seqOpApp <|> return (return current))
   where
-    seq =
-      case opSeq of
-        Just f | prec == minPrec -> do
-          try lineBreak
-          metaExtendPrec f prec current
-        _ -> empty
+    seqOpApp =
+      try $ do
+        offset <- getOffset
+        trySpaces >>= \case
+          Right NoSpace -> opOrApp False
+          Right Whitespace -> opOrApp True
+          Right LineBreak ->
+            if prec == minPrec then
+              return $
+                case opSeq of
+                  Just f ->
+                    metaExtendPrec f prec current
+                  Nothing -> do
+                    setOffset offset
+                    fail "line breaks are only allowed in expressions"
+            else
+              empty
+          Left err ->
+            return $ fail $ show err
 
-    opOrApp = join $ try $ do
-      spaceBefore <- isSpace <$> nbsc
-      Just x <- op spaceBefore <|> app
-      return x
+    opOrApp spaceBefore =
+      op <|> app >>= \case
+        Just x ->
+          return x
+        Nothing ->
+          empty
       where
-        op spaceBefore = try $ do
+        op = try $ do
+          offset <- getOffset
           parsedOp <- infixOp
-          spaceAfter <- isSpace <$> nbsc
+          offsetAfterOp <- getOffset
+          trySpaces >>= \case
+            Right NoSpace ->
+              opAfterSpace offset parsedOp False
+            Right Whitespace ->
+              opAfterSpace offset parsedOp True
+            Right LineBreak ->
+              return $ Just $ do
+                setOffset offsetAfterOp
+                fail "line break never allowed after operator"
+            Left err ->
+              return $ Just $ do
+                setOffset offsetAfterOp
+                fail $ show err
+
+        opAfterSpace offset parsedOp spaceAfter = do
           guard (spaceAfter || not spaceBefore)
           let
             isBacktick =
@@ -202,11 +244,16 @@ parserBase prec current =
                   if prec == opPrec then
                     return bin
                   else
-                    return $ copySpan bin $ opParen bin
+                    parserBase prec $ copySpan bin $ opParen bin
               Left op ->
                 case parseSpecial op of
                   Nothing ->
-                    return Nothing
+                    if prec == minPrec then
+                      return $ Just $ do
+                        setOffset offset
+                        fail ("special operator `" ++ show (snd op) ++ "` not allowed in " ++ opKind (Of :: Of a))
+                    else
+                      return Nothing
                   Just p ->
                     return $ Just $ p opPrec current
           else
@@ -214,7 +261,9 @@ parserBase prec current =
 
         app = do
           guard (prec < applyPrec)
-          return $ Just $ metaExtendFail opApply applyPrec current
+          return $ Just $
+            (metaExtendFail opApply applyPrec current >>= parserBase prec)
+            <|> (return current)
 
 eitherToFail :: Monad m => Either String a -> m a
 eitherToFail (Right x) = return x
@@ -303,14 +352,14 @@ parseExprIndex =
 
 parseFunction :: Parser Expr
 parseFunction = do
-  string "fun"
+  keyword "fun"
   EValue . VFun <$> blockOf matchCases
 
 parseLet :: Parser Expr
 parseLet = do
-  string "let"
-  pat <- parser
-  nbsc >> char '='
+  keyword "let"
+  pat <- blockOf parserExpectEnd
+  nbsc >> specialOp Assignment
   val <- parser
   expr <- withBindings (bindingsForPat pat) parser
   return $ ELet pat val expr
@@ -318,14 +367,14 @@ parseLet = do
 parseMatch :: Parser Expr
 parseMatch =
   pure EMatchIn
-  <*  string "match"
+  <*  keyword "match"
   <*> blockOf (some (try spaces >> parserNoSpace))
   <*> blockOf matchCases
 
 parseExprUse :: Parser Expr
 parseExprUse =
   pure EUse
-  <*  string "use"
+  <*  keyword "use"
   <*  nbsc
   <*> parseMeta parseUseModule
   <*> parser  
@@ -335,7 +384,7 @@ matchCases = someBetweenLines matchCase
 
 matchCase :: Parser MatchCase
 matchCase = do
-  pats <- someUntil (string "->") parserNoSpace
+  pats <- someUntil (specialOp FunctionArrow) parserNoSpace
   expr <- withBindings (pats >>= bindingsForPat) parser
   return (pats, expr)
 

@@ -270,9 +270,6 @@ variantFromType typeWithMeta = do
 
 data Of a = Of
 
-of_ :: (Of a -> b) -> a -> b
-of_ f x = f Of
-
 class ExprLike a where
   opKind :: Of a -> String
   opUnit :: a

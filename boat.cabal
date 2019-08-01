@@ -29,6 +29,7 @@ executable boat
                        LambdaCase,
                        KindSignatures,
                        MultiParamTypeClasses,
+                       ScopedTypeVariables,
                        DeriveFunctor,
                        DeriveFoldable,
                        DeriveTraversable
