@@ -10,9 +10,6 @@ import Data.Void
 import Data.List
 import Data.Char
 import Control.Monad.Reader
-import Control.Monad.State.Strict
-
-import qualified Data.Set as Set
 import qualified Data.List.NonEmpty as NonEmpty
 
 data ParserState = ParserState 
@@ -35,13 +32,12 @@ defaultParserState = ParserState
   , multiline = True
   , exprBindings = [] }
 
-isKeyword, isReservedOp :: String -> Bool
-isKeyword    w = w `elem` ["_", "use", "mod", "data", "let", "fun", "match", "in", "unary"]
-isReservedOp w = w `elem` [".", "?", ","]
+isKeyword :: String -> Bool
+isKeyword w = w `elem` ["_", "use", "mod", "data", "let", "fun", "match", "in", "unary"]
 
 isIdentFirst, isIdentRest :: Char -> Bool
 isIdentFirst x = (isAlpha x || x == '_') && isAscii x
-isIdentRest x = (isAlpha x || isDigit x || x == '_') && isAscii x
+isIdentRest  x = (isAlpha x || isDigit x || x == '_') && isAscii x
 
 isOperatorChar :: Char -> Bool
 isOperatorChar w = w `elem` ("+-*/%^!=<>:?|&~$." :: String)
@@ -212,6 +208,16 @@ keyword expected =
       setOffset offset
       unexpectedStr ident
 
+data ReservedOp
+  = PathDot
+  | QuestionMark
+  deriving Eq
+
+instance Show ReservedOp where
+  show = \case
+    PathDot      -> "."
+    QuestionMark -> "?"
+
 data SpecialOp
   = Assignment
   | FunctionArrow
@@ -219,57 +225,96 @@ data SpecialOp
   deriving Eq
 
 instance Show SpecialOp where
-  show Assignment = "="
-  show FunctionArrow = "->"
-  show TypeAscription = ":"
+  show = \case
+    Assignment     -> "="
+    FunctionArrow  -> "->"
+    TypeAscription -> ":"
 
-isAllowedInParen :: SpecialOp -> Bool
-isAllowedInParen = \case
-  FunctionArrow -> True
-  _ -> False
+type PlainOp = String
 
--- TODO: better parse errors for reserved operators, function for parsing reserved operators directly
+data AnyOperator
+  = ReservedOp ReservedOp
+  | NonReservedOp NonReservedOp
+  deriving Eq
 
-anyOperatorOrReserved :: Parser String
-anyOperatorOrReserved =
-  takeWhile1P Nothing isOperatorChar
+instance Show AnyOperator where
+  show = \case
+    ReservedOp op    -> show op
+    NonReservedOp op -> show op
 
-anyOperator :: Parser (Either SpecialOp String)
+data NonReservedOp
+  = SpecialOp SpecialOp
+  | PlainOp PlainOp
+  deriving Eq
+
+instance Show NonReservedOp where
+  show = \case
+    SpecialOp op -> show op
+    PlainOp op   -> op
+
+anyOperator :: Parser AnyOperator
 anyOperator = do
-  op <- anyOperatorOrReserved
-  if isReservedOp op then
-    unexpectedStr op
-  else
-    return $ case op of
-      "=" -> Left Assignment
-      "->" -> Left FunctionArrow
-      ":" -> Left TypeAscription
-      _ -> Right op
+  op <- takeWhile1P Nothing isOperatorChar
+  return $
+    case op of
+      "."  -> ReservedOp PathDot
+      "?"  -> ReservedOp QuestionMark
+      "="  -> NonReservedOp $ SpecialOp Assignment
+      "->" -> NonReservedOp $ SpecialOp FunctionArrow
+      ":"  -> NonReservedOp $ SpecialOp TypeAscription
+      _    -> NonReservedOp $ PlainOp op
 
-operator :: Parser String
-operator = label "operator" $
+reservedOp :: ReservedOp -> Parser ()
+reservedOp expected = label (show $ show expected) $ try $ do
+  offset <- getOffset
   anyOperator >>= \case
-    Right op ->
+    ReservedOp op | op == expected ->
+      return ()
+    op -> do
+      setOffset offset
+      unexpectedStr $ show op
+
+nonReservedOp :: Parser NonReservedOp
+nonReservedOp = label "operator" $ try $ do
+  offset <- getOffset
+  anyOperator >>= \case
+    ReservedOp op -> do
+      setOffset offset
+      unexpectedStr $ show op
+    NonReservedOp op ->
       return op
-    Left op ->
-      if isAllowedInParen op then
-        return $ show op
-      else
-        unexpectedStr $ show op
 
 specialOp :: SpecialOp -> Parser ()
-specialOp expected =
-  expectStr (show expected) $ try $ do
-    offset <- getOffset
-    anyOperator >>= \case
-      Left op | op == expected ->
-        return ()
-      Left op -> do
-        setOffset offset
-        unexpectedStr $ show op
-      Right op -> do
-        setOffset offset
-        unexpectedStr op
+specialOp expected = label (show $ show expected) $ try $ do
+  offset <- getOffset
+  nonReservedOp >>= \case
+    SpecialOp op | op == expected ->
+      return ()
+    op -> do
+      setOffset offset
+      unexpectedStr $ show op
+
+plainOrArrowOp :: Parser PlainOp
+plainOrArrowOp = label "operator" $ try $ do
+  offset <- getOffset
+  nonReservedOp >>= \case
+    SpecialOp FunctionArrow ->
+      return $ show FunctionArrow
+    SpecialOp op -> do
+      setOffset offset
+      unexpectedStr $ show op
+    PlainOp op ->
+      return op
+
+unaryOp :: Parser PlainOp
+unaryOp = label "plain operator" $ try $ do
+  offset <- getOffset
+  nonReservedOp >>= \case
+    SpecialOp op -> do
+      setOffset offset
+      unexpectedStr $ show op
+    PlainOp op ->
+      return op
 
 expectStr :: String -> Parser a -> Parser a
 expectStr s = label $ show s

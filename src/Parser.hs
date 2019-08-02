@@ -12,16 +12,16 @@ import Control.Monad.State.Strict
 
 parseName :: Parser Name
 parseName =
-  parenOp <|> Identifier <$> identifier
+  parseParen <|> Identifier <$> identifier
   where
-    parenOp = label "parenthesized operator" $
-      char '(' *> nbsc *> (unaryOp <|> pure Operator) <*> operator <* nbsc <* char ')'
-    unaryOp = label "keyword \"unary\"" $
-      keyword "unary" *> nbsc *> pure Unary
+    parseParen = label "parenthesized operator" $
+      char '(' *> nbsc *> (parseUnary <|> Operator <$> plainOrArrowOp) <* nbsc <* char ')'
+    parseUnary = label "keyword \"unary\"" $
+      keyword "unary" >> nbsc >> Unary <$> unaryOp
 
 parsePath :: Parser Path
 parsePath =
-  Path <$> ((:) <$> try parseName <*> many (char '.' *> parseName))
+  Path <$> ((:) <$> try parseName <*> many (reservedOp PathDot *> parseName))
 
 parseFile :: File -> Parser File
 parseFile file =
@@ -76,11 +76,11 @@ parseFile file =
 parseUseModule :: Parser UseModule
 parseUseModule =
   (UseModule <$> try (parseMeta parseName) <*> parseUseContents)
-  <|> (UseAny <$ char '_')
+  <|> (UseAny <$ keyword "_")
 
 parseUseContents :: Parser (Maybe UseContents)
 parseUseContents =
-  (char '.' >> Just . UseDot <$> parseMeta parseUseModule)
+  (reservedOp PathDot >> Just . UseDot <$> parseMeta parseUseModule)
   <|> (Just . UseAll <$> parseParen)
   <|> return Nothing
   where
@@ -115,11 +115,11 @@ infixOp = label "operator" (backtickOp <|> normalOp)
     backtickOp =
       Right . InfixOp True <$> parseMeta (char '`' *> parsePath <* char '`')
     normalOp =
-      getSpan anyOperator <&> \case
-        (span, Right op) ->
-          Right $ InfixOp False $ metaWithSpan span $ Local $ Operator op
-        (span, Left op) ->
+      getSpan nonReservedOp <&> \case
+        (span, SpecialOp op) ->
           Left (span, op)
+        (span, PlainOp op) ->
+          Right $ InfixOp False $ metaWithSpan span $ Local $ Operator op
 
 class (Show a, ExprLike a) => Parsable a where
   parseOne :: Parser a
@@ -137,13 +137,13 @@ parserNoPrefix :: Parsable a => Parser (Meta a)
 parserNoPrefix = parseMeta parseOne <|> hidden paren
 
 parserPartial :: Parsable a => Parser (Meta a)
-parserPartial = parseMeta parsePrefix <|> parserNoPrefix
+parserPartial = hidden parsePrefix <|> parserNoPrefix
   where
-    parsePrefix :: forall a. Parsable a => Parser a
-    parsePrefix = do
+    parsePrefix :: forall a. Parsable a => Parser (Meta a)
+    parsePrefix = parseMeta $ do
       path <- try $ do
         offset <- getOffset
-        path <- parseMeta (Local . Unary <$> operator)
+        path <- parseMeta (Local . Unary <$> unaryOp)
         spaceAfter <- isSpace <$> nbsc
         if spaceAfter then do
           setOffset offset
@@ -287,7 +287,7 @@ metaExtendFail f prec current = do
 instance Parsable Type where
   parseOne = label "type" $
     parseCapIdent "type" TPoly
-    <|> (char '_' >> TAnon <$> getNewAnon)
+    <|> (keyword "_" >> TAnon <$> getNewAnon)
 
   parseSpecial (span, FunctionArrow) =
     Just $ metaExtendPrec $ \a b ->
@@ -333,7 +333,7 @@ parseExprIdent = do
 
 parseExprIndex :: Parser Expr
 parseExprIndex =
-  char '?' >> (try L.decimal <|> return 0) >>= index
+  reservedOp QuestionMark >> (try L.decimal <|> return 0) >>= index
   where
     index num = do
       count <- countBindings
@@ -402,8 +402,8 @@ manyUntil end p =
 instance Parsable Pattern where
   parseOne = label "pattern" $
     parseCapIdent "pattern" (PBind . Just)
-    <|> (PAny <$ char '_')
-    <|> (PBind Nothing <$ char '?')
+    <|> (PAny <$ keyword "_")
+    <|> (PBind Nothing <$ reservedOp QuestionMark)
 
   parseSpecial (_, TypeAscription) =
     Just $ metaExtendPrec PTypeAscribe
