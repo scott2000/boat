@@ -43,11 +43,20 @@ isOperatorChar :: Char -> Bool
 isOperatorChar w = w `elem` ("+-*/%^!=<>:?|&~$." :: String)
 
 getPos :: Parser Position
-getPos = toPosition . pstateSourcePos . statePosState <$> getParserState
-  where
-    toPosition s = Position
-      { posLine = unPos $ sourceLine s
-      , posColumn = unPos $ sourceColumn s }
+getPos = do
+  -- The current state's position may fall behind the true position, but
+  -- we always update state in `spaces` whenever there's a newline so the
+  -- drift can only occur in one column. Therefore, we can easily adjust
+  -- for the drift by subtracting the current offset from the state's.
+  pstate <- statePosState <$> getParserState
+  offset <- getOffset
+  let
+    pos = pstateSourcePos pstate
+    baseOffset = pstateOffset pstate
+    columnDiff = offset - baseOffset
+  return Position
+    { posLine = unPos (sourceLine pos)
+    , posColumn = unPos (sourceColumn pos) + columnDiff }
 
 getSpan :: Parser a -> Parser (Span, a)
 getSpan p = andSpan <$> getPos <*> p <*> getPos
@@ -127,8 +136,9 @@ trySpaces =
       return $ Right Whitespace
     ifSpaces True = do
       ParserState { minIndent, multiline } <- ask
+      -- getting the level here ensures that getting the position in a span is safe
+      level <- getLevel
       if multiline then do
-        level <- getLevel
         case level - minIndent of
           0 ->
             return $ Right LineBreak

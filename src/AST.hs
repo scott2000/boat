@@ -53,8 +53,8 @@ instance Show CompileError where
       case errorFile of
         Just path ->
           case errorSpan of
-            Just Span { spanStart } ->
-              path ++ ":" ++ show spanStart ++ " " ++ baseMsg
+            Just span ->
+              path ++ ":" ++ show span ++ " " ++ baseMsg
             Nothing ->
               path ++ " " ++ baseMsg
         Nothing ->
@@ -87,10 +87,15 @@ instance Show Position where
   show Position { posLine, posColumn } =
     show posLine ++ ":" ++ show posColumn
 
+-- location is the interval [spanStart, spanEnd)
 data Span = Span
   { spanStart :: Position
   , spanEnd :: Position }
   deriving (Ord, Eq)
+
+instance Show Span where
+  show Span { spanStart, spanEnd } =
+    show spanStart ++ "-" ++ show spanEnd
 
 instance Semigroup Span where
   Span { spanStart } <> Span { spanEnd } =
@@ -245,6 +250,16 @@ fileAddData name args vars file = do
     newDecl = DataDecl
       { dataArgs = args
       , dataVariants = vars }
+  when (unmeta name /= Operator "->") $
+    case find ((Operator "->" ==) . unmeta) $ map (fst . unmeta) vars of
+      Just Meta { metaSpan = arrowSpan } ->
+        addError CompileError
+          { errorFile = Just $ filePath file
+          , errorSpan = arrowSpan
+          , errorKind = Warning
+          , errorMessage = "data type `" ++ show name ++ "` contains type constructor named (->)" }
+      Nothing ->
+        return ()
   when (Map.member name oldDatas) $
     addError CompileError
       { errorFile = Just $ filePath file
@@ -353,9 +368,9 @@ reduceApply typeWithMeta =
   case unmeta typeWithMeta of
     TParen ty ->
       reduceApply ty
-    TUnaryOp path (Meta { unmeta = TBinOp _ _ _ }) ->
+    TUnaryOp path Meta { unmeta = TBinOp _ _ _ } ->
       opError path
-    TBinOp path _ (Meta { unmeta = TBinOp _ _ _ }) ->
+    TBinOp path _ Meta { unmeta = TBinOp _ _ _ } ->
       opError path
     TUnaryOp path ty ->
       Right (TNamed <$> path, [ty])

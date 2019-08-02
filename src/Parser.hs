@@ -293,7 +293,8 @@ instance Parsable Type where
     Just $ metaExtendPrec $ \a b ->
       let
         innerWithoutSpan =
-          meta $ TApp (metaWithSpan span TFuncArrow) a
+          -- use the unqualified (->) instead of Core.(->) just in case a custom prelude is used
+          meta $ TApp (metaWithSpan span $ TNamed $ Local $ Operator $ "->") a
         innerWithSpan =
           case metaSpan a of
             Just aSpan ->

@@ -6,7 +6,7 @@ import Parser
 import System.FilePath
 import System.Directory
 import System.IO (hFlush, stdout, readFile)
-import System.Exit (exitFailure)
+import System.Exit (exitSuccess, exitFailure)
 import System.Environment (getArgs)
 
 import Text.Megaparsec (runParserT, errorBundlePretty)
@@ -20,14 +20,22 @@ startCompile = do
   args <- lift $ getArgs
   mapM_ parseSingleFile args
   exitIfErrors
+  printErrors
 
 exitIfErrors :: CompileIO ()
 exitIfErrors = do
   s <- get
-  when (compileFailed s) $ do
-    forM_ (compileErrors s) $ \err ->
-      lift $ putStrLn $ show err
-    lift exitFailure
+  when (compileFailed s) printErrors
+
+printErrors :: CompileIO ()
+printErrors = do
+  s <- get
+  lift $ do
+    forM_ (compileErrors s) (putStrLn . show)
+    if compileFailed s then
+      exitFailure
+    else
+      exitSuccess
 
 parseSingleFile :: FilePath -> CompileIO File
 parseSingleFile path = do
