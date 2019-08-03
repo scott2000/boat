@@ -1,6 +1,6 @@
 module AST where
 
-import Data.Char (toUpper)
+import Data.Char
 import Data.Word
 import Data.List
 import Data.String
@@ -18,24 +18,66 @@ import Control.Monad.State.Strict
 
 type CompileIO = StateT CompileState IO
 
+data CompileOptions = CompileOptions
+  { compileTarget :: !FilePath
+  , compilePackageName :: !Name }
+  deriving Show
+
+parseIdentIn :: String -> Bool -> String -> Either String Name
+parseIdentIn kind requireUpper name =
+  case name of
+    [] ->
+      Left (kind ++ " cannot be empty")
+    (first:rest) ->
+      if not $ all isAlphaNumAscii name then
+        Left (kind ++ " can only contain alphanumeric ascii characters and underscores")
+      else if isDigit first then
+        Left (kind ++ " cannot start with a number")
+      else if requireUpper then
+        if first == '_' then
+          let
+            suggestion =
+              case rest of
+                (x:_) | isAlpha x ->
+                  ", did you mean `" ++ capFirst rest ++ "`?"
+                _ -> ""
+          in
+            Left (kind ++ " cannot start with an underscore" ++ suggestion)
+        else if requireUpper && not (isUpper first) then
+          Left (kind ++ " must start with an uppercase letter, did you mean `" ++ capFirst name ++ "`?")
+        else
+          Right $ Identifier name
+      else
+        Right $ Identifier name
+  where
+    isAlphaNumAscii x = (x == '_' || isAlpha x || isDigit x) && isAscii x
+
+parsePackageName :: String -> Either String Name
+parsePackageName = parseIdentIn "package name" True
+
+parseModuleName :: String -> Either String Name
+parseModuleName = parseIdentIn "module folder name" False
+
 type AnonCount = Word64
 
 data CompileState = CompileState
-  { anonTypes :: AnonCount
-  , compileErrors :: Set CompileError
-  , compileFailed :: Bool }
+  { compileOptions :: !CompileOptions
+  , compileErrors :: !(Set CompileError)
+  , compileFailed :: !Bool
+  , compileAnonTypes :: !AnonCount }
 
-defaultCompileState :: CompileState
-defaultCompileState = CompileState
-  { anonTypes = 0
+compileStateFromOptions :: CompileOptions -> CompileState
+compileStateFromOptions opts = CompileState
+  { compileOptions = opts
   , compileErrors = Set.empty
-  , compileFailed = False }
+  , compileFailed = False
+  , compileAnonTypes = 0 }
 
 getNewAnon :: MonadState CompileState m => m AnonCount
 getNewAnon = do
   s <- get
-  let oldCount = anonTypes s
-  put s { anonTypes = oldCount + 1 }
+  let oldCount = compileAnonTypes s
+  put s { compileAnonTypes = oldCount + 1 }
   return oldCount
 
 data CompileError = CompileError
@@ -61,16 +103,16 @@ instance Show CompileError where
           baseMsg
 
 data ErrorKind
-  = Error
+  = Info
   | Warning
-  | Info
+  | Error
   deriving (Ord, Eq)
 
 instance Show ErrorKind where
   show = \case
-    Error -> "error"
-    Warning -> "warning"
     Info -> "info"
+    Warning -> "warning"
+    Error -> "error"
 
 addError :: MonadState CompileState m => CompileError -> m ()
 addError err =
@@ -79,8 +121,8 @@ addError err =
     , compileFailed = errorKind err == Error || compileFailed s }
 
 data Position = Position
-  { posLine :: Int
-  , posColumn :: Int }
+  { posLine :: !Int
+  , posColumn :: !Int }
   deriving (Ord, Eq)
 
 instance Show Position where
@@ -89,8 +131,8 @@ instance Show Position where
 
 -- location is the interval [spanStart, spanEnd)
 data Span = Span
-  { spanStart :: Position
-  , spanEnd :: Position }
+  { spanStart :: !Position
+  , spanEnd :: !Position }
   deriving (Ord, Eq)
 
 instance Show Span where
@@ -103,8 +145,8 @@ instance Semigroup Span where
 
 data Meta a = Meta
   { unmeta :: a
-  , metaTy :: Maybe Type
-  , metaSpan :: Maybe Span }
+  , metaTy :: !(Maybe Type)
+  , metaSpan :: !(Maybe Span) }
   deriving Functor
 
 instance Ord a => Ord (Meta a) where
@@ -138,43 +180,59 @@ metaWithEnds
   = (meta x) { metaSpan = Just (span0 <> span1) }
 metaWithEnds _ _ x = meta x
 
-data File = File
-  { filePath :: FilePath
-  , fileUses :: [Meta UseModule]
-  , fileMods :: [(Meta Name, File)]
-  , fileDatas :: Map (Meta Name) DataDecl
-  , fileLets :: Map (Meta Name) LetDecl }
+data InFile a = (:/:)
+  { getFile :: FilePath
+  , unfile :: a }
 
-instance Show File where
-  show file = intercalate "\n" $ concat
-      [ ["{- " ++ filePath file ++ " -}"]
-      , map showUse $ reverse $ fileUses file
-      , map showMod $ reverse $ fileMods file
-      , map showData $ Map.toList $ fileDatas file
-      , map showLet $ Map.toList $ fileLets file ]
+instance Ord a => Ord (InFile a) where
+  (_ :/: a) `compare` (_ :/: b) =
+    a `compare` b
+
+instance Eq a => Eq (InFile a) where
+  (_ :/: a) == (_ :/: b) = a == b
+
+instance Show a => Show (InFile a) where
+  show (_ :/: x) = show x
+
+data Module = Module
+  { modUses :: ![InFile (Meta UseModule)]
+  , modSubs :: !(Map Name [Module])
+  , modDatas :: !(Map (Meta Name) (InFile DataDecl))
+  , modLets :: !(Map (Meta Name) (InFile LetDecl)) }
+
+instance Show Module where
+  show mod = intercalate "\n" $ concat
+      [ map showUse $ reverse $ modUses mod
+      , map showMod $ Map.toList $ modSubs mod
+      , map showData $ Map.toList $ modDatas mod
+      , map showLet $ Map.toList $ modLets mod ]
     where
       showUse use =
         "use " ++ show use
-      showMod (name, mod) =
-        "mod " ++ show name ++ indent (show mod)
-      showLet (name, LetDecl { letBody }) =
+      showMod (name, mods) =
+        intercalate "\n" $ mods <&> \mod ->
+          "mod " ++ show name ++ indent (show mod)
+      showLet (name, _ :/: LetDecl { letBody }) =
         "let " ++ show name ++ " =" ++ indent (show letBody)
-      showData (name, DataDecl { dataArgs, dataVariants }) =
+      showData (name, _ :/: DataDecl { dataArgs, dataVariants }) =
         "data " ++ unwords (show name : map unmeta dataArgs)
         ++ " =" ++ indent (intercalate "\n" (map (showVariant . unmeta) dataVariants))
       showVariant (name, types) =
         show name ++ " " ++ unwords (map show types)
 
-defaultFile :: FilePath -> File
-defaultFile path = File
-  { filePath = path
-  , fileUses = []
-  , fileMods = []
-  , fileDatas = Map.empty
-  , fileLets = Map.empty }
+defaultModule :: Module
+defaultModule = Module
+  { modUses = []
+  , modSubs = Map.empty
+  , modDatas = Map.empty
+  , modLets = Map.empty }
 
-subFileOf :: File -> File
-subFileOf = defaultFile . filePath
+modIsEmpty :: Module -> Bool
+modIsEmpty m =
+  null (modUses m)
+  && Map.null (modSubs m)
+  && Map.null (modDatas m)
+  && Map.null (modLets m)
 
 data UseModule
   = UseAny
@@ -201,35 +259,37 @@ instance Show UseContents where
     UseAll rest ->
       " (" ++ intercalate ", " (map show rest) ++ ")"
 
-fileAddUse :: Meta UseModule -> File -> File
-fileAddUse use file = file
-  { fileUses = use : fileUses file }
+modAddUse :: Meta UseModule -> FilePath -> Module -> Module
+modAddUse use path mod = mod
+  { modUses = path :/: use : modUses mod }
 
-fileAddMod :: Meta Name -> File -> File -> File
-fileAddMod name mod file = file
-  { fileMods = (name, mod) : fileMods file }
+modAddSub :: Name -> Module -> Module -> Module
+modAddSub name sub mod =
+  if modIsEmpty sub then mod else mod
+    { modSubs = Map.insertWith (flip (++)) name [sub] $ modSubs mod }
 
 data LetDecl = LetDecl
   { letBody :: Meta Expr }
 
-fileAddLet
+modAddLet
   :: MonadState CompileState m
   => Meta Name
   -> Meta Expr
-  -> File
-  -> m File
-fileAddLet name body file = do
+  -> FilePath
+  -> Module
+  -> m Module
+modAddLet name body path mod = do
   let
-    oldLets = fileLets file
-    newDecl = LetDecl
+    oldLets = modLets mod
+    newDecl = path :/: LetDecl
       { letBody = body }
   when (Map.member name oldLets) $
     addError CompileError
-      { errorFile = Just $ filePath file
+      { errorFile = Just path
       , errorSpan = metaSpan name
       , errorKind = Error
       , errorMessage = "duplicate let binding for name `" ++ show name ++ "`" }
-  return file { fileLets = Map.insert name newDecl oldLets }
+  return mod { modLets = Map.insert name newDecl oldLets }
 
 type DataVariant = (Meta Name, [Meta Type])
 
@@ -237,24 +297,25 @@ data DataDecl = DataDecl
   { dataArgs :: [Meta String]
   , dataVariants :: [Meta DataVariant] }
 
-fileAddData
+modAddData
   :: MonadState CompileState m
   => Meta Name
   -> [Meta String]
   -> [Meta DataVariant]
-  -> File
-  -> m File
-fileAddData name args vars file = do
+  -> FilePath
+  -> Module
+  -> m Module
+modAddData name args vars path mod = do
   let
-    oldDatas = fileDatas file
-    newDecl = DataDecl
+    oldDatas = modDatas mod
+    newDecl = path :/: DataDecl
       { dataArgs = args
       , dataVariants = vars }
   when (unmeta name /= Operator "->") $
     case find ((Operator "->" ==) . unmeta) $ map (fst . unmeta) vars of
       Just Meta { metaSpan = arrowSpan } ->
         addError CompileError
-          { errorFile = Just $ filePath file
+          { errorFile = Just path
           , errorSpan = arrowSpan
           , errorKind = Warning
           , errorMessage = "data type `" ++ show name ++ "` contains type constructor named (->)" }
@@ -262,11 +323,11 @@ fileAddData name args vars file = do
         return ()
   when (Map.member name oldDatas) $
     addError CompileError
-      { errorFile = Just $ filePath file
+      { errorFile = Just path
       , errorSpan = metaSpan name
       , errorKind = Error
       , errorMessage = "duplicate data type declaration for name `" ++ show name ++ "`" }
-  return file { fileDatas = Map.insert name newDecl oldDatas }
+  return mod { modDatas = Map.insert name newDecl oldDatas }
 
 variantFromType :: Meta Type -> Either String (Meta DataVariant)
 variantFromType typeWithMeta = do

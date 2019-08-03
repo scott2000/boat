@@ -23,53 +23,59 @@ parsePath :: Parser Path
 parsePath =
   Path <$> ((:) <$> try parseName <*> many (reservedOp PathDot *> parseName))
 
-parseFile :: File -> Parser File
-parseFile file =
-  option file (try spaces >> (parseAll >>= parseFile) <|> (file <$ eof))
+parseFile :: FilePath -> Module -> Parser Module
+parseFile path = parseModule
   where
-    parseAll =
-      parseUse
-      <|> parseMod
-      <|> parseLet
-      <|> parseData
-    parseUse =
-      parseMeta (keyword "use" *> nbsc *> parseUseModule) <&> \use ->
-        fileAddUse use file
-    parseMod = do
-      keyword "mod"
-      name <- nbsc >> parseMeta parseName
-      mod <- blockOf $ parseFile $ subFileOf file
-      return $ fileAddMod name mod file
-    parseLet = do
-      keyword "let"
-      name <- nbsc *> parseMeta parseName <* nbsc
-      maybeAscription <- optional (specialOp TypeAscription *> blockOf parserExpectEnd <* nbsc)
-      body <- specialOp Assignment >> parser
-      let
-        bodyWithAscription =
-          case maybeAscription of
-            Just ascription ->
-              copySpan body $ ETypeAscribe body ascription
+    parseModule m =
+      option m (try spaces >> (parseAll >>= parseModule) <|> (m <$ eof))
+      where
+        parseAll =
+          parseUse
+          <|> parseMod
+          <|> parseLet
+          <|> parseData
+
+        parseUse =
+          parseMeta (keyword "use" *> nbsc *> parseUseModule) <&> \use ->
+            modAddUse use path m
+
+        parseMod = do
+          keyword "mod"
+          name <- nbsc >> parseName
+          sub <- blockOf $ parseModule defaultModule
+          return $ modAddSub name sub m
+
+        parseLet = do
+          keyword "let"
+          name <- nbsc *> parseMeta parseName <* nbsc
+          maybeAscription <- optional (specialOp TypeAscription *> blockOf parserExpectEnd <* nbsc)
+          body <- specialOp Assignment >> parser
+          let
+            bodyWithAscription =
+              case maybeAscription of
+                Just ascription ->
+                  copySpan body $ ETypeAscribe body ascription
+                Nothing ->
+                  body
+          modAddLet name bodyWithAscription path m
+
+        parseData = do
+          keyword "data"
+          name <- nbsc *> parseMeta parseName <* nbsc
+          case extractLocalName $ unmeta name of
+            Just local ->
+              fail ("invalid data type name, did you mean to capitalize it like `" ++ capFirst local ++ "`?")
             Nothing ->
-              body
-      fileAddLet name bodyWithAscription file
-    parseData = do
-      keyword "data"
-      name <- nbsc *> parseMeta parseName <* nbsc
-      case extractLocalName $ unmeta name of
-        Just local ->
-          fail ("invalid data type name, did you mean to capitalize it like `" ++ capFirst local ++ "`?")
-        Nothing ->
-          return ()
-      args <- blockOf $ manyUntil (specialOp Assignment) $ parseMeta $ do
-        name <- parseName
-        case extractLocalName name of
-          Just local ->
-            return local
-          Nothing ->
-            fail ("type parameters must start with a lowercase letter, instead found `" ++ show name ++ "`")
-      vars <- blockOf $ someBetweenLines parseVariant
-      fileAddData name args vars file
+              return ()
+          args <- blockOf $ manyUntil (specialOp Assignment) $ parseMeta $ do
+            name <- parseName
+            case extractLocalName name of
+              Just local ->
+                return local
+              Nothing ->
+                fail ("type parameters must start with a lowercase letter, instead found `" ++ show name ++ "`")
+          vars <- blockOf $ someBetweenLines parseVariant
+          modAddData name args vars path m
 
 -- TODO: remove all uses of `try` with `parseName` after finding another solution to `_` keyword parsing
 
