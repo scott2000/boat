@@ -56,21 +56,21 @@ parsePackageName :: String -> Either String Name
 parsePackageName = parseIdentIn "package name" True
 
 parseModuleName :: String -> Either String Name
-parseModuleName = parseIdentIn "module folder name" False
+parseModuleName = parseIdentIn "module names" False
 
 type AnonCount = Word64
 
 data CompileState = CompileState
   { compileOptions :: !CompileOptions
   , compileErrors :: !(Set CompileError)
-  , compileFailed :: !Bool
+  , compileErrorCount :: !ErrorCount
   , compileAnonTypes :: !AnonCount }
 
 compileStateFromOptions :: CompileOptions -> CompileState
 compileStateFromOptions opts = CompileState
   { compileOptions = opts
   , compileErrors = Set.empty
-  , compileFailed = False
+  , compileErrorCount = ErrorCount 0 0
   , compileAnonTypes = 0 }
 
 getNewAnon :: MonadState CompileState m => m AnonCount
@@ -85,40 +85,63 @@ data CompileError = CompileError
   , errorSpan :: Maybe Span
   , errorKind :: ErrorKind
   , errorMessage :: String }
-  deriving (Ord, Eq)
+  deriving Eq
 
-instance Show CompileError where
-  show CompileError { errorFile, errorSpan, errorKind, errorMessage } =
-    let
-      baseMsg = "[" ++ show errorKind ++ "] " ++ errorMessage
-    in
-      case errorFile of
-        Just path ->
-          case errorSpan of
-            Just span ->
-              path ++ ":" ++ show span ++ " " ++ baseMsg
-            Nothing ->
-              path ++ " " ++ baseMsg
-        Nothing ->
-          baseMsg
+instance Ord CompileError where
+  a `compare` b =
+    errorFile a `reversedMaybe` errorFile b
+    <> errorFile a `reversedMaybe` errorFile b
+    <> errorKind a `compare` errorKind b
+    <> errorMessage a `compare` errorMessage b
+    where
+      Nothing `reversedMaybe` Nothing = EQ
+      Nothing `reversedMaybe` Just _  = GT
+      Just _  `reversedMaybe` Nothing = LT
+      Just a  `reversedMaybe` Just b  = a `compare` b
+
+data ErrorCount = ErrorCount
+  { errorCount :: !Int
+  , warningCount :: !Int }
+
+instance Show ErrorCount where
+  show = \case
+    ErrorCount e 0 -> plural e "error"
+    ErrorCount 0 w -> plural w "warning"
+    ErrorCount e w ->
+      plural e "error" ++ " (and " ++ plural w "warning" ++ ")"
+
+plural :: Int -> String -> String
+plural 0 w = "no " ++ w ++ "s"
+plural 1 w = "1 " ++ w
+plural n w = show n ++ " " ++ w ++ "s"
+
+updateErrorCount :: ErrorKind -> ErrorCount -> ErrorCount
+updateErrorCount Error c = c
+  { errorCount = errorCount c + 1 }
+updateErrorCount Warning c = c
+  { warningCount = warningCount c + 1 }
+updateErrorCount _ c = c
 
 data ErrorKind
   = Info
   | Warning
   | Error
+  | Done
   deriving (Ord, Eq)
 
 instance Show ErrorKind where
   show = \case
-    Info -> "info"
+    Info    -> "info"
     Warning -> "warning"
-    Error -> "error"
+    Error   -> "error"
+    Done    -> "done"
 
 addError :: MonadState CompileState m => CompileError -> m ()
 addError err =
   modify $ \s -> s
     { compileErrors = Set.insert err $ compileErrors s
-    , compileFailed = errorKind err == Error || compileFailed s }
+    , compileErrorCount =
+      updateErrorCount (errorKind err) $ compileErrorCount s }
 
 data Position = Position
   { posLine :: !Int
@@ -136,8 +159,7 @@ data Span = Span
   deriving (Ord, Eq)
 
 instance Show Span where
-  show Span { spanStart, spanEnd } =
-    show spanStart ++ "-" ++ show spanEnd
+  show = show . spanStart
 
 instance Semigroup Span where
   Span { spanStart } <> Span { spanEnd } =

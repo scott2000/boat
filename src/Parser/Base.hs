@@ -83,6 +83,10 @@ blockOf p = do
 getLevel :: Parser Int
 getLevel = subtract 1 . unPos <$> L.indentLevel
 
+getFilePath :: Parser FilePath
+getFilePath =
+  sourceName . pstateSourcePos . statePosState <$> getParserState
+
 withBindings :: [Maybe String] -> Parser a -> Parser a
 withBindings bindings = local $ \s -> s { exprBindings = reverse bindings ++ exprBindings s }
 

@@ -91,7 +91,7 @@ parseUseContents =
   <|> return Nothing
   where
     parseParen =
-      nbsc *> char '(' *> parenInner <* spaces <* char ')'
+      try nbsc *> char '(' *> parenInner <* spaces <* char ')'
     parenInner =
       blockOf $ parseCommaList $ parseMeta parseUseModule
 
