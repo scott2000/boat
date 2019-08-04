@@ -47,7 +47,7 @@ main =
 
 startCompile :: CompileIO ()
 startCompile = do
-  fullModule <- do
+  mods <- do
     path <- gets (compileTarget . compileOptions)
     isDir <- lift $ doesDirectoryExist path
     if isDir then
@@ -57,7 +57,7 @@ startCompile = do
       if isFile then
         case takeExtension path of
           ".boat" ->
-            parseSingleFile path defaultModule
+            (:[]) <$> parseSingleFile path
           other -> lift $ do
             let ext = if null other then "no extension" else other
             putStrLn ("Error: expected extension of .boat for file, found " ++ ext)
@@ -66,7 +66,7 @@ startCompile = do
         putStrLn ("Error: cannot find file or directory at `" ++ path ++ "`")
         exitFailure
   exitIfErrors
-  lift $ putStrLn ("\n" ++ show fullModule)
+  lift $ putStrLn ("\n" ++ intercalate "\n" (map show mods))
   finishAndCheckErrors
 
 exitIfErrors :: CompileIO ()
@@ -210,14 +210,13 @@ containsBoatFiles path = do
       else
         checkAll rest
 
-parseAll :: FilePath -> Module -> CompileIO Module
-parseAll path m = do
+parseAll :: FilePath -> CompileIO (Maybe Module)
+parseAll path = do
   isDir <- lift $ doesDirectoryExist path
   if isDir then
     case parseModuleName $ takeFileName path of
       Right name ->
-        parseDirectory path <&> \sub ->
-          modAddSub name sub m
+        Just . moduleFromSubs name <$> parseDirectory path
       Left err -> do
         shouldWarn <- lift $ containsBoatFiles path
         when shouldWarn $
@@ -228,29 +227,30 @@ parseAll path m = do
             , errorMessage =
               "folder contains .boat files but doesn't have a valid module name"
               ++ "\n(" ++ err ++ ")" }
-        return m
+        return Nothing
   else if isBoatExtension path then
-    parseSingleFile path m
+    Just <$> parseSingleFile path
   else
-    return m
+    return Nothing
 
-parseDirectory :: FilePath -> CompileIO Module
+parseDirectory :: FilePath -> CompileIO [Module]
 parseDirectory path = do
   files <- lift $ sort <$> listDirectory path
-  parseEach files defaultModule
+  forEach files []
   where
-    parseEach []          m = return m
-    parseEach (file:rest) m =
-      parseAll (path </> file) m >>= parseEach rest
+    forEach []          mods = return mods
+    forEach (file:rest) mods = do
+      parseAll (path </> file) >>= \case
+        Just mod ->
+          forEach rest (mod:mods)
+        Nothing ->
+          forEach rest mods
 
--- TODO: consider whether all files in a folder being grouped together into
--- a single module without any separation at all is a bug or a feature
-
-parseSingleFile :: FilePath -> Module -> CompileIO Module
-parseSingleFile path m = do
+parseSingleFile :: FilePath -> CompileIO Module
+parseSingleFile path = do
   lift $ putStrLn ("{- parsing: " ++ path ++ " -}")
   file <- lift $ readFile path
-  let parserT = runCustomParser $ parseFile path m
+  let parserT = runCustomParser $ parseFile path
   runParserT parserT path file >>= \case
     Left err -> lift $ do
       putStr (errorBundlePretty err)

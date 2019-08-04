@@ -23,8 +23,8 @@ parsePath :: Parser Path
 parsePath =
   Path <$> ((:) <$> try parseName <*> many (reservedOp PathDot *> parseName))
 
-parseFile :: FilePath -> Module -> Parser Module
-parseFile path = parseModule
+parseFile :: FilePath -> Parser Module
+parseFile path = parseModule defaultModule
   where
     parseModule m =
       option m (try spaces >> (parseAll >>= parseModule) <|> (m <$ eof))

@@ -249,6 +249,10 @@ defaultModule = Module
   , modDatas = Map.empty
   , modLets = Map.empty }
 
+moduleFromSubs :: Name -> [Module] -> Module
+moduleFromSubs name mods = defaultModule
+  { modSubs = Map.singleton name mods }
+
 modIsEmpty :: Module -> Bool
 modIsEmpty m =
   null (modUses m)
