@@ -84,20 +84,15 @@ parseUseModule =
   (UseModule <$> try (parseMeta parseName) <*> parseUseContents)
   <|> (UseAny <$ keyword "_")
 
-parseUseContents :: Parser (Maybe UseContents)
+parseUseContents :: Parser UseContents
 parseUseContents =
-  (reservedOp PathDot >> Just . UseDot <$> parseMeta parseUseModule)
-  <|> (Just . UseAll <$> parseParen)
-  <|> return Nothing
+  (reservedOp PathDot >> UseDot <$> parseMeta parseUseModule)
+  <|> (UseAll <$> (parseParen <|> return []))
   where
     parseParen =
       try nbsc *> char '(' *> parenInner <* spaces <* char ')'
     parenInner =
-      blockOf $ parseCommaList $ parseMeta parseUseModule
-
-parseCommaList :: Parser a -> Parser [a]
-parseCommaList p =
-  parseSomeCommaList p <|> return []
+      blockOf $ parseSomeCommaList $ parseMeta parseUseModule
 
 parseSomeCommaList :: Parser a -> Parser [a]
 parseSomeCommaList p =

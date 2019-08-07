@@ -90,7 +90,7 @@ data CompileError = CompileError
 instance Ord CompileError where
   a `compare` b =
     errorFile a `reversedMaybe` errorFile b
-    <> errorFile a `reversedMaybe` errorFile b
+    <> errorSpan a `reversedMaybe` errorSpan b
     <> errorKind a `compare` errorKind b
     <> errorMessage a `compare` errorMessage b
     where
@@ -169,7 +169,7 @@ data Meta a = Meta
   { unmeta :: a
   , metaTy :: !(Maybe Type)
   , metaSpan :: !(Maybe Span) }
-  deriving Functor
+  deriving (Functor, Foldable, Traversable)
 
 instance Ord a => Ord (Meta a) where
   a `compare` b = unmeta a `compare` unmeta b
@@ -205,6 +205,7 @@ metaWithEnds _ _ x = meta x
 data InFile a = (:/:)
   { getFile :: FilePath
   , unfile :: a }
+  deriving (Functor, Foldable, Traversable)
 
 instance Ord a => Ord (InFile a) where
   (_ :/: a) `compare` (_ :/: b) =
@@ -215,6 +216,23 @@ instance Eq a => Eq (InFile a) where
 
 instance Show a => Show (InFile a) where
   show (_ :/: x) = show x
+
+data AllDecls = AllDecls
+  { allDatas :: !(Map (Meta Path) (InFile DataDecl))
+  , allLets :: !(Map (Meta Path) (InFile LetDecl)) }
+
+instance Show AllDecls where
+  show AllDecls { allDatas, allLets } =
+    intercalate "\n"
+      [ "datas: " ++ intercalate ", " (map show $ Map.keys allDatas)
+      , "lets: " ++ intercalate ", " (map show $ Map.keys allLets) ]
+
+emptyDecls :: AllDecls
+emptyDecls = AllDecls
+  { allDatas = Map.empty
+  , allLets = Map.empty }
+
+-- TODO: consider removing strictness annotation?
 
 data Module = Module
   { modUses :: ![InFile (Meta UseModule)]
@@ -262,15 +280,13 @@ modIsEmpty m =
 
 data UseModule
   = UseAny
-  | UseModule (Meta Name) (Maybe UseContents)
+  | UseModule (Meta Name) UseContents
   deriving (Ord, Eq)
 
 instance Show UseModule where
   show = \case
     UseAny -> "_"
-    UseModule name Nothing ->
-      show name
-    UseModule name (Just contents) ->
+    UseModule name contents ->
       show name ++ show contents
 
 data UseContents
@@ -282,6 +298,8 @@ instance Show UseContents where
   show = \case
     UseDot rest ->
       '.' : show rest
+    UseAll [] ->
+      ""
     UseAll rest ->
       " (" ++ intercalate ", " (map show rest) ++ ")"
 
@@ -294,7 +312,7 @@ modAddSub name sub mod =
   if modIsEmpty sub then mod else mod
     { modSubs = Map.insertWith (flip (++)) name [sub] $ modSubs mod }
 
-data LetDecl = LetDecl
+newtype LetDecl = LetDecl
   { letBody :: Meta Expr }
 
 modAddLet
@@ -383,6 +401,8 @@ class ExprLike a where
   opSeq :: Maybe (Meta a -> Meta a -> a)
   opSeq = Nothing
 
+-- TODO: visitPath, visitType, visitAll?
+
 data Name
   = Identifier String
   | Operator String
@@ -398,7 +418,7 @@ instance Show Name where
     Operator op -> "(" ++ op ++ ")"
     Unary u -> "(unary " ++ u ++ ")"
 
-data Path = Path
+newtype Path = Path
   { unpath :: [Name] }
   deriving (Ord, Eq)
 
@@ -413,6 +433,9 @@ instance IsString Path where
       split (c:cs) = (c : first) : rest
         where
           (first:rest) = split cs
+
+(.|.) :: Path -> Name -> Path
+(Path p) .|. name = Path (p ++ [name])
 
 data Type
   = TNamed Path
@@ -476,6 +499,9 @@ pattern Core name = Path ["Core", name]
 
 pattern Local :: Name -> Path
 pattern Local name = Path [name]
+
+pattern EmptyPath :: Path
+pattern EmptyPath = Path []
 
 pattern DefaultMeta :: a -> Meta a
 pattern DefaultMeta x <- Meta { unmeta = x }
@@ -736,4 +762,3 @@ isCap ch
 
 capFirst :: String -> String
 capFirst (x:xs) = toUpper x : xs
-

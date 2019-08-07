@@ -2,6 +2,7 @@ module Main where
 
 import AST
 import Parser
+import NameResolve
 
 import System.FilePath
 import System.Directory
@@ -27,10 +28,10 @@ main =
       where
         parsePath :: String -> Either String FilePath
         parsePath path =
-          if not $ isValid path then
-            Left ("invalid path: " ++ path)
-          else
+          if isValid path then
             Right $ makeRelative currentDirectory $ normalise path
+          else
+            Left ("invalid path: " ++ path)
         
         parseOptions = CompileOptions
           <$> argument (eitherReader parsePath)
@@ -67,6 +68,9 @@ startCompile = do
         exitFailure
   exitIfErrors
   lift $ putStrLn ("\n" ++ intercalate "\n" (map show mods))
+  allDecls <- nameResolve mods
+  exitIfErrors
+  lift $ print allDecls
   finishAndCheckErrors
 
 exitIfErrors :: CompileIO ()
