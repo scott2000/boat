@@ -494,6 +494,11 @@ reduceApply typeWithMeta =
     opError path =
       Left ("cannot resolve relative operator precedence of `" ++ show path ++ "` without explicit parentheses")
 
+expandFunction :: [Meta Type] -> Meta Type -> Meta Type
+expandFunction [] ty = ty
+expandFunction (ty:types) ret =
+  meta $ TFunc ty $ expandFunction types ret
+
 pattern Core :: Name -> Path
 pattern Core name = Path ["Core", name]
 
@@ -507,6 +512,9 @@ pattern DefaultMeta :: a -> Meta a
 pattern DefaultMeta x <- Meta { unmeta = x }
   where DefaultMeta = meta
 
+pattern Generated :: FilePath
+pattern Generated = "<compiler-generated>"
+
 pattern TFuncArrow :: Type
 pattern TFuncArrow = TNamed (Core (Operator "->"))
 
@@ -518,12 +526,17 @@ pattern TFunc a b =
 data Value
   = VUnit
   | VFun [MatchCase]
+  | VDataCons Path Name [Value]
 
 instance Show Value where
   show = \case
     VUnit -> "()"
     VFun cases -> 
       "(fun" ++ showCases True cases ++ ")"
+    VDataCons _ name [] ->
+      show name
+    VDataCons _ name vals ->
+      "(" ++ show name ++ " " ++ intercalate " " (map show vals) ++ ")"
 
 instance Eq Value where
   VUnit == VUnit = True
@@ -546,6 +559,7 @@ data Expr
   | EMatchIn [Meta Expr] [MatchCase]
   | EUse (Meta UseModule) (Meta Expr)
   | ETypeAscribe (Meta Expr) (Meta Type)
+  | EDataCons Path Name [Meta Expr]
 
 instance ExprLike Expr where
   opKind _ = "expression"
@@ -581,6 +595,8 @@ instance Eq Expr where
     u0 == u1 && e0 == e1
   ETypeAscribe e0 t0 == ETypeAscribe e1 t1 =
     e0 == e1 && t0 == t1
+  EDataCons p0 n0 e0 == EDataCons p1 n1 e1 =
+    e0 == e1 && n0 == n1 && p0 == p1
   _ == _ = False
 
 instance Show Expr where
@@ -611,6 +627,10 @@ instance Show Expr where
       "(use " ++ show u ++ "\n" ++ show e ++ ")"
     ETypeAscribe expr ty ->
       "(" ++ show expr ++ " : " ++ show ty ++ ")"
+    EDataCons _ name [] ->
+      show name
+    EDataCons _ name exprs ->
+      "(" ++ show name ++ " " ++ intercalate " " (map show exprs) ++ ")"
 
 indent :: String -> String
 indent = indentLines . lines
@@ -651,6 +671,8 @@ toDeBruijn = fmap $ \case
     EUse u $ toDeBruijn e
   ETypeAscribe expr ty ->
     ETypeAscribe (toDeBruijn expr) ty
+  EDataCons path name exprs ->
+    EDataCons path name $ map toDeBruijn exprs
   where
     toDeBruijnVal = \case
       VFun cases ->

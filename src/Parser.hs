@@ -36,7 +36,7 @@ parseFile path = parseModule defaultModule
           <|> parseData
 
         parseUse =
-          parseMeta (keyword "use" *> nbsc *> parseUseModule) <&> \use ->
+          keyword "use" *> nbsc *> parseMeta parseUseModule <&> \use ->
             modAddUse use path m
 
         parseMod = do
