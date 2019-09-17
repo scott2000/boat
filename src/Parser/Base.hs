@@ -33,7 +33,18 @@ defaultParserState = ParserState
   , exprBindings = [] }
 
 isKeyword :: String -> Bool
-isKeyword w = w `elem` ["_", "use", "mod", "data", "let", "fun", "match", "in", "unary"]
+isKeyword w = w `elem`
+  [ "_"
+  , "use"
+  , "mod"
+  , "operator"
+  , "type"
+  , "data"
+  , "let"
+  , "fun"
+  , "match"
+  , "in"
+  , "unary"]
 
 isIdentFirst, isIdentRest :: Char -> Bool
 isIdentFirst x = (isAlpha x || x == '_') && isAscii x
@@ -329,6 +340,14 @@ unaryOp = label "plain operator" $ try $ do
       unexpectedStr $ show op
     PlainOp op ->
       return op
+
+parseLabel :: Parser String
+parseLabel = label "label" $
+  char '<' *> word <* char '>'
+
+expectLabel :: String -> Parser ()
+expectLabel str =
+  void $ string ("<" ++ str ++ ">")
 
 expectStr :: String -> Parser a -> Parser a
 expectStr s = label $ show s

@@ -34,6 +34,7 @@ parseFile path = parseModule defaultModule
           <|> parseMod
           <|> parseLet
           <|> parseData
+          <|> parseOperator
 
         parseUse =
           keyword "use" *> nbsc *> parseMeta parseUseModule <&> \use ->
@@ -44,6 +45,26 @@ parseFile path = parseModule defaultModule
           name <- nbsc >> parseName
           sub <- blockOf $ parseModule defaultModule
           return $ modAddSub name sub m
+
+        parseOperator = do
+          keyword "operator"
+          nbsc >> (keyword "type" >> blockOf operatorType) <|> operatorDecl
+          where
+            operatorType = do
+              ops <- parseSomeSeparatedList '<' operatorPart
+              return $ modAddOpType ops path m
+            operatorPart =
+              (OpLink <$> parseMeta (char '(' *> parsePath <* spaces <* char ')'))
+              <|> (OpDeclare <$> parseMeta parseName)
+            operatorDecl = do
+              opAssoc <- option ANon (operatorAssoc <* nbsc)
+              names <- someUntil (specialOp TypeAscription) $ parseMeta parseName
+              opType <- nbsc >> parseMeta parsePath
+              let decl = OpDecl { opAssoc, opType }
+              modAddOpDecls names decl path m
+            operatorAssoc =
+              (ALeft <$ expectLabel "left")
+              <|> (ARight <$ expectLabel "right")
 
         parseLet = do
           keyword "let"
@@ -95,11 +116,14 @@ parseUseContents =
       blockOf $ parseSomeCommaList $ parseMeta parseUseModule
 
 parseSomeCommaList :: Parser a -> Parser [a]
-parseSomeCommaList p =
+parseSomeCommaList = parseSomeSeparatedList ','
+
+parseSomeSeparatedList :: Char -> Parser a -> Parser [a]
+parseSomeSeparatedList sep p =
   (:) <$> p <*> manyCommas
   where
     manyCommas = option [] $ do
-      try (spaces >> char ',') >> spaces
+      try (spaces >> char sep) >> spaces
       option [] ((:) <$> p <*> manyCommas)
 
 parseVariant :: Parser (Meta DataVariant)

@@ -3,7 +3,6 @@ module NameResolve (nameResolve) where
 import AST
 
 import Data.List
-import Data.Semigroup
 import Data.Foldable
 import Data.Map (Map)
 import qualified Data.Map as Map
@@ -50,7 +49,8 @@ data Item = Item
   { itemSub :: Maybe NameTable
   , isType :: Bool
   , isValue :: Bool
-  , isPattern :: Bool }
+  , isPattern :: Bool
+  , isOperatorType :: Bool }
   deriving (Show, Ord, Eq)
 
 instance Semigroup Item where
@@ -58,14 +58,16 @@ instance Semigroup Item where
     { itemSub = itemSub a <> itemSub b
     , isType = isType a || isType b
     , isValue = isValue a || isValue b
-    , isPattern = isPattern a || isPattern b }
+    , isPattern = isPattern a || isPattern b
+    , isOperatorType = isOperatorType a || isOperatorType b }
 
 instance Monoid Item where
   mempty = Item
     { itemSub = Nothing
     , isType = False
     , isValue = False
-    , isPattern = False }
+    , isPattern = False
+    , isOperatorType = False }
   mappend = (<>)
 
 modItem :: NameTable -> Item
@@ -83,6 +85,10 @@ valueItem = mempty
 patternItem :: Item
 patternItem = mempty
   { isPattern = True }
+
+operatorTypeItem :: Item
+operatorTypeItem = mempty
+  { isOperatorType = True }
 
 newtype NameTable = NameTable
   { getNameTable :: Map Name Item }
@@ -103,12 +109,16 @@ toNameTable =
 addModule :: Module -> NameTable -> NameTable
 addModule mod nt = nt
   <> toNameTable (modSubs mod)
+  <> foldMap opTypeItem (modOpTypes mod)
   <> convert typeItem (modDatas mod)
   <> convert valueItem (modLets mod)
   <> foldMap patternsForData (Map.elems $ modDatas mod)
   where
     convert k m =
       NameTable $ k <$ Map.mapKeysMonotonic unmeta m
+    opTypeItem (_ :/: ops) =
+      NameTable $ Map.fromList $ opTypeDeclarations ops <&> \name ->
+        (name, operatorTypeItem)
     patternsForData (_ :/: DataDecl { dataVariants }) =
       NameTable $ Map.fromList $ dataVariants <&> \
         Meta { unmeta = (name, _) } ->
@@ -301,6 +311,35 @@ insertLet path decl = do
         { allDecls = decls
           { allLets = Map.insert path decl lets } }
 
+insertOpType :: Meta Path -> OpTypeEnds -> NR ()
+insertOpType path newOp = do
+  s <- get
+  let
+    decls = allDecls s
+    ops = allOpTypes decls
+  case Map.lookupIndex path ops of
+    Just i ->
+      lift $ lift $ addError CompileError
+        { errorFile = Just $ getFile newOp
+        , errorSpan = metaSpan path
+        , errorKind = Error
+        , errorMessage =
+          let
+            baseMessage = "duplicate operator type declaration for path `" ++ show path ++ "`\n"
+            (otherPath, otherFile :/: _) = Map.elemAt i ops
+          in case metaSpan otherPath of
+            Just otherSpan ->
+              baseMessage ++ "(other at " ++ otherFile ++ ":" ++ show otherSpan ++ ")"
+            Nothing ->
+              baseMessage ++ "(other in " ++ otherFile ++ ")" }
+    Nothing ->
+      put s
+        { allDecls = decls
+          { allOpTypes = Map.insert path newOp ops } }
+  where
+    setLookup x set =
+      Set.lookupIndex x set <&> \i -> Set.elemAt i set
+
 nameResolve :: [Module] -> CompileIO AllDecls
 nameResolve mods = do
   baseModule <- gets (compilePackageName . compileOptions)
@@ -329,8 +368,65 @@ nameResolveEach path mod =
     go = do
       forM_ (Map.toList $ modSubs mod) $ \(name, mods) ->
         forM_ mods $ nameResolveEach (path .|. name)
+      mapM_ nameResolveOpType $ modOpTypes mod
       mapM_ nameResolveData $ Map.toList $ modDatas mod
       mapM_ nameResolveLet $ Map.toList $ modLets mod
+
+    nameResolveOpType (file :/: ops) =
+      case ops of
+        OpLink path : [] ->
+          lift $ lift $ addError CompileError
+            { errorFile = Just file
+            , errorSpan = metaSpan path
+            , errorKind = Warning
+            , errorMessage =
+              "useless operator type declaration" ++
+              case unpath $ unmeta path of
+                [name] -> "\n(did you mean `operator type " ++ show name ++ "`?)"
+                _ -> "" }
+        OpLink path : rest -> do
+          resolvedPath <- resMetaPath path
+          afterLink (Just resolvedPath) rest
+        other ->
+          afterDeclare Nothing other
+      where
+        resPath = nameResolvePath file isOperatorType "operator type"
+        resMetaPath path = forM path $ resPath $ metaSpan path
+
+        afterLink lower = \case
+          OpDeclare name : rest -> do
+            next <- getNext rest
+            insertOpType ((path .|.) <$> name) (file :/: (lower, next))
+            afterDeclare lower rest
+          OpLink path : _ ->
+            lift $ lift $ addError CompileError
+              { errorFile = Just file
+              , errorSpan = metaSpan path
+              , errorKind = Error
+              , errorMessage =
+                "expected operator type declaration after link" ++
+                case unpath $ unmeta path of
+                  [name] -> "\n(did you mean `" ++ show name ++ "`, without parentheses?)"
+                  _ -> "" }
+          [] -> return ()
+
+        afterDeclare lower = \case
+          OpDeclare name : rest -> do
+            next <- getNext rest
+            insertOpType ((path .|.) <$> name) (file :/: (lower, next))
+            afterDeclare lower rest
+          OpLink path : rest -> do
+            resolvedPath <- resMetaPath path
+            afterLink (Just resolvedPath) rest
+          [] -> return ()
+
+        getNext = \case
+          [] ->
+            return Nothing
+          (OpDeclare name : _) ->
+            return $ Just ((path .|.) <$> name)
+          (OpLink path : _) ->
+            Just <$> resMetaPath path
 
     nameResolveData (name, file :/: decl) = do
       variants <- mapM (mapM nameResolveVariant) $ dataVariants decl
@@ -361,26 +457,31 @@ nameResolveEach path mod =
 
 nameResolvePath :: FilePath -> (Item -> Bool) -> String -> Maybe Span -> Path -> NR Path
 nameResolvePath file check kind span path@(Path parts@(head:rest)) = do
-  Names { finalNames, otherNames } <- ask
-  case Map.lookup head finalNames of
-    Just (Right (path, item, id)) ->
-      checkRec path item $ do
-        clearId id
-        return $ Path (unpath path ++ parts)
-    Just (Left paths) ->
-      oneOfMany paths
-    Nothing ->
-      if null rest then
-        notFound
-      else
-        case Map.lookup head otherNames of
-          Just (Right (path, item, ())) ->
-            checkRec path item $
-              return $ Path (unpath path ++ parts)
-          Just (Left paths) ->
-            oneOfMany paths
-          Nothing ->
+  nt <- gets nameTable
+  case nameTableEntry head nt of
+    Just item ->
+      checkRec EmptyPath item $ return path
+    Nothing -> do
+      Names { finalNames, otherNames } <- ask
+      case Map.lookup head finalNames of
+        Just (Right (path, item, id)) ->
+          checkRec path item $ do
+            clearId id
+            return $ Path (unpath path ++ parts)
+        Just (Left paths) ->
+          oneOfMany paths
+        Nothing ->
+          if null rest then
             notFound
+          else
+            case Map.lookup head otherNames of
+              Just (Right (path, item, ())) ->
+                checkRec path item $
+                  return $ Path (unpath path ++ parts)
+              Just (Left paths) ->
+                oneOfMany paths
+              Nothing ->
+                notFound
   where
     checkRec basePath item ifRight =
       go (basePath .|. head) rest item
