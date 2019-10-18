@@ -1,5 +1,6 @@
 module Parser.Base where
 
+import Basics
 import AST
 
 import Text.Megaparsec hiding (State)
@@ -12,7 +13,7 @@ import Data.Char
 import Control.Monad.Reader
 import qualified Data.List.NonEmpty as NonEmpty
 
-data ParserState = ParserState 
+data ParserState = ParserState
   { minIndent :: Int
   , multiline :: Bool
   , exprBindings :: [Maybe String] }

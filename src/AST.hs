@@ -1,168 +1,12 @@
 module AST where
 
-import Data.Char
+import Basics
+
 import Data.Word
 import Data.List
-import Data.String
 import Data.Bifunctor
 
-import Data.Map (Map)
-import qualified Data.Map.Strict as Map
-
-import Data.Set (Set)
-import qualified Data.Set as Set
-
-import Control.Monad.Reader
-import Control.Monad.State.Strict
-
-type CompileIO = StateT CompileState IO
-
-data CompileOptions = CompileOptions
-  { compileTarget :: !FilePath
-  , compilePackageName :: !Name }
-  deriving Show
-
-parseIdentIn :: String -> Bool -> String -> Either String Name
-parseIdentIn kind requireUpper name =
-  case name of
-    [] ->
-      Left (kind ++ " cannot be empty")
-    (first:rest) ->
-      if not $ all isAlphaNumAscii name then
-        Left (kind ++ " can only contain alphanumeric ascii characters and underscores")
-      else if isDigit first then
-        Left (kind ++ " cannot start with a number")
-      else if requireUpper then
-        if first == '_' then
-          let
-            suggestion =
-              case rest of
-                (x:_) | isAlpha x ->
-                  ", did you mean `" ++ capFirst rest ++ "`?"
-                _ -> ""
-          in
-            Left (kind ++ " cannot start with an underscore" ++ suggestion)
-        else if requireUpper && not (isUpper first) then
-          Left (kind ++ " must start with an uppercase letter, did you mean `" ++ capFirst name ++ "`?")
-        else
-          Right $ Identifier name
-      else
-        Right $ Identifier name
-  where
-    isAlphaNumAscii x = (x == '_' || isAlpha x || isDigit x) && isAscii x
-
-parsePackageName :: String -> Either String Name
-parsePackageName = parseIdentIn "package name" True
-
-parseModuleName :: String -> Either String Name
-parseModuleName = parseIdentIn "module names" False
-
-type AnonCount = Word64
-
-data CompileState = CompileState
-  { compileOptions :: !CompileOptions
-  , compileErrors :: !(Set CompileError)
-  , compileErrorCount :: !ErrorCount
-  , compileAnonTypes :: !AnonCount }
-
-compileStateFromOptions :: CompileOptions -> CompileState
-compileStateFromOptions opts = CompileState
-  { compileOptions = opts
-  , compileErrors = Set.empty
-  , compileErrorCount = ErrorCount 0 0
-  , compileAnonTypes = 0 }
-
-getNewAnon :: MonadState CompileState m => m AnonCount
-getNewAnon = do
-  s <- get
-  let oldCount = compileAnonTypes s
-  put s { compileAnonTypes = oldCount + 1 }
-  return oldCount
-
-data CompileError = CompileError
-  { errorFile :: Maybe FilePath
-  , errorSpan :: Maybe Span
-  , errorKind :: ErrorKind
-  , errorMessage :: String }
-  deriving Eq
-
-instance Ord CompileError where
-  a `compare` b =
-    errorFile a `reversedMaybe` errorFile b
-    <> errorSpan a `reversedMaybe` errorSpan b
-    <> errorKind a `compare` errorKind b
-    <> errorMessage a `compare` errorMessage b
-    where
-      Nothing `reversedMaybe` Nothing = EQ
-      Nothing `reversedMaybe` Just _  = GT
-      Just _  `reversedMaybe` Nothing = LT
-      Just a  `reversedMaybe` Just b  = a `compare` b
-
-data ErrorCount = ErrorCount
-  { errorCount :: !Int
-  , warningCount :: !Int }
-
-instance Show ErrorCount where
-  show = \case
-    ErrorCount e 0 -> plural e "error"
-    ErrorCount 0 w -> plural w "warning"
-    ErrorCount e w ->
-      plural e "error" ++ " (and " ++ plural w "warning" ++ ")"
-
-plural :: Int -> String -> String
-plural 0 w = "no " ++ w ++ "s"
-plural 1 w = "1 " ++ w
-plural n w = show n ++ " " ++ w ++ "s"
-
-updateErrorCount :: ErrorKind -> ErrorCount -> ErrorCount
-updateErrorCount Error c = c
-  { errorCount = errorCount c + 1 }
-updateErrorCount Warning c = c
-  { warningCount = warningCount c + 1 }
-updateErrorCount _ c = c
-
-data ErrorKind
-  = Info
-  | Warning
-  | Error
-  | Done
-  deriving (Ord, Eq)
-
-instance Show ErrorKind where
-  show = \case
-    Info    -> "info"
-    Warning -> "warning"
-    Error   -> "error"
-    Done    -> "done"
-
-addError :: MonadState CompileState m => CompileError -> m ()
-addError err =
-  modify $ \s -> s
-    { compileErrors = Set.insert err $ compileErrors s
-    , compileErrorCount =
-      updateErrorCount (errorKind err) $ compileErrorCount s }
-
-data Position = Position
-  { posLine :: !Int
-  , posColumn :: !Int }
-  deriving (Ord, Eq)
-
-instance Show Position where
-  show Position { posLine, posColumn } =
-    show posLine ++ ":" ++ show posColumn
-
--- location is the interval [spanStart, spanEnd)
-data Span = Span
-  { spanStart :: !Position
-  , spanEnd :: !Position }
-  deriving (Ord, Eq)
-
-instance Show Span where
-  show = show . spanStart
-
-instance Semigroup Span where
-  Span { spanStart } <> Span { spanEnd } =
-    Span { spanStart, spanEnd }
+import Control.Monad.Identity
 
 data Meta a = Meta
   { unmeta :: a
@@ -177,7 +21,7 @@ instance Eq a => Eq (Meta a) where
   m0 == m1 = unmeta m0 == unmeta m1 && metaTy m0 == metaTy m1
 
 instance Show a => Show (Meta a) where
-  show = show . unmeta
+  showsPrec i = showsPrec i . unmeta
 
 meta :: a -> Meta a
 meta x = Meta
@@ -200,105 +44,6 @@ metaWithEnds
     x
   = (meta x) { metaSpan = Just (span0 <> span1) }
 metaWithEnds _ _ x = meta x
-
-data InFile a = (:/:)
-  { getFile :: FilePath
-  , unfile :: a }
-  deriving (Functor, Foldable, Traversable)
-
-instance Ord a => Ord (InFile a) where
-  (_ :/: a) `compare` (_ :/: b) =
-    a `compare` b
-
-instance Eq a => Eq (InFile a) where
-  (_ :/: a) == (_ :/: b) = a == b
-
-instance Show a => Show (InFile a) where
-  show (_ :/: x) = show x
-
-type OpTypeEnds = InFile (Maybe (Meta Path), Maybe (Meta Path))
-
-data AllDecls = AllDecls
-  { allOpTypes :: !(Map (Meta Path) OpTypeEnds)
-  , allDatas :: !(Map (Meta Path) (InFile DataDecl))
-  , allLets :: !(Map (Meta Path) (InFile LetDecl)) }
-
-instance Show AllDecls where
-  show AllDecls { allOpTypes, allDatas, allLets } =
-    intercalate "\n"
-      [ "ops: " ++ intercalate ", " (map show $ Map.keys allOpTypes)
-      , "datas: " ++ intercalate ", " (map show $ Map.keys allDatas)
-      , "lets: " ++ intercalate ", " (map show $ Map.keys allLets) ]
-
-emptyDecls :: AllDecls
-emptyDecls = AllDecls
-  { allOpTypes = Map.empty
-  , allDatas = Map.empty
-  , allLets = Map.empty }
-
--- TODO: consider removing strictness annotation?
-
-data Module = Module
-  { modUses :: ![InFile (Meta UseModule)]
-  , modSubs :: !(Map Name [Module])
-  , modOpTypes :: ![InFile OpType]
-  , modOpDecls :: !(Map (Meta Name) (InFile OpDecl))
-  , modDatas :: !(Map (Meta Name) (InFile DataDecl))
-  , modLets :: !(Map (Meta Name) (InFile LetDecl)) }
-
-instance Show Module where
-  show mod = intercalate "\n" $ concat
-      [ map showUse $ reverse $ modUses mod
-      , map showMod $ Map.toList $ modSubs mod
-      , map showOpType $ reverse $ modOpTypes mod
-      , map showOpDecl $ Map.toList $ modOpDecls mod
-      , map showData $ Map.toList $ modDatas mod
-      , map showLet $ Map.toList $ modLets mod ]
-    where
-      showUse use =
-        "use " ++ show use
-      showMod (name, mods) =
-        intercalate "\n" $ mods <&> \mod ->
-          "mod " ++ show name ++ indent (show mod)
-      showOpType (_ :/: ops) =
-        "operator type " ++ intercalate " < " (map show ops)
-      showOpDecl (name, _ :/: op) =
-        "operator" ++ assoc ++ " " ++ show name ++ " : " ++ show (opType op)
-        where
-          assoc =
-            case opAssoc op of
-              ANon -> ""
-              ALeft -> " <left>"
-              ARight -> " <right>"
-      showLet (name, _ :/: LetDecl { letBody }) =
-        "let " ++ show name ++ " =" ++ indent (show letBody)
-      showData (name, _ :/: DataDecl { dataArgs, dataVariants }) =
-        "data " ++ unwords (show name : map unmeta dataArgs)
-        ++ " =" ++ indent (intercalate "\n" (map (showVariant . unmeta) dataVariants))
-      showVariant (name, types) =
-        show name ++ " " ++ unwords (map show types)
-
-defaultModule :: Module
-defaultModule = Module
-  { modUses = []
-  , modSubs = Map.empty
-  , modOpTypes = []
-  , modOpDecls = Map.empty
-  , modDatas = Map.empty
-  , modLets = Map.empty }
-
-moduleFromSubs :: Name -> [Module] -> Module
-moduleFromSubs name mods = defaultModule
-  { modSubs = Map.singleton name mods }
-
-modIsEmpty :: Module -> Bool
-modIsEmpty m =
-  null (modUses m)
-  && Map.null (modSubs m)
-  && null (modOpTypes m)
-  && Map.null (modOpDecls m)
-  && Map.null (modDatas m)
-  && Map.null (modLets m)
 
 data UseModule
   = UseAny
@@ -325,196 +70,7 @@ instance Show UseContents where
     UseAll rest ->
       " (" ++ intercalate ", " (map show rest) ++ ")"
 
-modAddUse :: Meta UseModule -> FilePath -> Module -> Module
-modAddUse use path mod = mod
-  { modUses = path :/: use : modUses mod }
-
-modAddSub :: Name -> Module -> Module -> Module
-modAddSub name sub mod =
-  if modIsEmpty sub then mod else mod
-    { modSubs = Map.insertWith (flip (++)) name [sub] $ modSubs mod }
-
-type OpType = [OpPart]
-
-data OpPart
-  = OpDeclare (Meta Name)
-  | OpLink (Meta Path)
-  deriving (Ord, Eq)
-
-instance Show OpPart where
-  show = \case
-    OpDeclare name ->
-      show name
-    OpLink path ->
-      "(" ++ show path ++ ")"
-
-modAddOpType :: OpType -> FilePath -> Module -> Module
-modAddOpType ops path mod = mod
-  { modOpTypes = path :/: ops : modOpTypes mod }
-
-opTypeDeclarations :: OpType -> [Name]
-opTypeDeclarations ops = do
-  op <- ops
-  case op of
-    OpDeclare name ->
-      return $ unmeta name
-    OpLink _ ->
-      mempty
-
-data Associativity
-  = ANon
-  | ALeft
-  | ARight
-
-data OpDecl = OpDecl
-  { opAssoc :: Associativity
-  , opType :: Meta Path }
-
-modAddOpDecls
-  :: MonadState CompileState m
-  => [Meta Name]
-  -> OpDecl
-  -> FilePath
-  -> Module
-  -> m Module
-modAddOpDecls names op path mod = do
-  let
-    oldOps = modOpDecls mod
-    opDecl = path :/: op
-    newOps = names <&> \name -> (name, opDecl)
-  forM_ names $ \name ->
-    when (Map.member name oldOps) $
-      addError CompileError
-        { errorFile = Just path
-        , errorSpan = metaSpan name
-        , errorKind = Error
-        , errorMessage = "duplicate operator declaration for name `" ++ show name ++ "`" }
-  return mod { modOpDecls = Map.union (Map.fromList newOps) oldOps }
-
-newtype LetDecl = LetDecl
-  { letBody :: Meta Expr }
-
-modAddLet
-  :: MonadState CompileState m
-  => Meta Name
-  -> Meta Expr
-  -> FilePath
-  -> Module
-  -> m Module
-modAddLet name body path mod = do
-  let
-    oldLets = modLets mod
-    newDecl = path :/: LetDecl
-      { letBody = body }
-  when (Map.member name oldLets) $
-    addError CompileError
-      { errorFile = Just path
-      , errorSpan = metaSpan name
-      , errorKind = Error
-      , errorMessage = "duplicate let binding for name `" ++ show name ++ "`" }
-  return mod { modLets = Map.insert name newDecl oldLets }
-
-type DataVariant = (Meta Name, [Meta Type])
-
-data DataDecl = DataDecl
-  { dataArgs :: [Meta String]
-  , dataVariants :: [Meta DataVariant] }
-
-modAddData
-  :: MonadState CompileState m
-  => Meta Name
-  -> [Meta String]
-  -> [Meta DataVariant]
-  -> FilePath
-  -> Module
-  -> m Module
-modAddData name args vars path mod = do
-  let
-    oldDatas = modDatas mod
-    newDecl = path :/: DataDecl
-      { dataArgs = args
-      , dataVariants = vars }
-  when (unmeta name /= Operator "->") $
-    case find ((Operator "->" ==) . unmeta) $ map (fst . unmeta) vars of
-      Just Meta { metaSpan = arrowSpan } ->
-        addError CompileError
-          { errorFile = Just path
-          , errorSpan = arrowSpan
-          , errorKind = Warning
-          , errorMessage = "data type `" ++ show name ++ "` contains type constructor named (->)" }
-      Nothing ->
-        return ()
-  when (Map.member name oldDatas) $
-    addError CompileError
-      { errorFile = Just path
-      , errorSpan = metaSpan name
-      , errorKind = Error
-      , errorMessage = "duplicate data type declaration for name `" ++ show name ++ "`" }
-  return mod { modDatas = Map.insert name newDecl oldDatas }
-
-variantFromType :: Meta Type -> Either String (Meta DataVariant)
-variantFromType typeWithMeta = do
-  (f, xs) <- reduceApply typeWithMeta
-  case unmeta f of
-    TNamed (Path path) ->
-      case path of
-        [name] ->
-          Right $ copySpan typeWithMeta (copySpan f name, xs)
-        _ ->
-          Left ("data type variant names must be unqualified, did you mean `" ++ show (last path) ++ "`?")
-    TPoly local ->
-      Left ("data type variant names must be capitalized, did you mean `" ++ capFirst local ++ "`?")
-    other ->
-      Left ("expected a name for the data type variant, found " ++ show other ++ " instead")
-
-data Of a = Of
-
-class ExprLike a where
-  opKind :: Of a -> String
-  opUnit :: a
-  opNamed :: Meta Path -> a
-  opParen :: Meta a -> a
-  opUnary :: Meta Path -> Meta a -> a
-  opBinary :: Meta Path -> Meta a -> Meta a -> a
-  opApply :: Meta a -> Meta a -> Either String a
-  opSeq :: Maybe (Meta a -> Meta a -> a)
-  opSeq = Nothing
-
 -- TODO: visitPath, visitType, visitAll?
-
-data Name
-  = Identifier String
-  | Operator String
-  | Unary String
-  deriving (Ord, Eq)
-
-instance IsString Name where
-  fromString = Identifier
-
-instance Show Name where
-  show = \case
-    Identifier ident -> ident
-    Operator op -> "(" ++ op ++ ")"
-    Unary u -> "(unary " ++ u ++ ")"
-
-newtype Path = Path
-  { unpath :: [Name] }
-  deriving (Ord, Eq)
-
-instance Show Path where
-  show = intercalate "." . map show . unpath
-
-instance IsString Path where
-  fromString = Path . map fromString . split
-    where
-      split "" = [""]
-      split ('.':cs) = "" : split cs
-      split (c:cs) = (c : first) : rest
-        where
-          (first:rest) = split cs
-
-(.|.) :: Path -> Name -> Path
-(Path p) .|. name = Path (p ++ [name])
 
 data Type
   = TNamed Path
@@ -526,14 +82,29 @@ data Type
   | TApp (Meta Type) (Meta Type)
   deriving Eq
 
-instance ExprLike Type where
-  opKind _ = "type"
-  opUnit = TNamed $ Core $ Identifier "Unit"
-  opNamed = TNamed . unmeta
-  opParen = TParen
-  opUnary = TUnaryOp
-  opBinary = TBinOp
-  opApply a b = Right $ TApp a b
+afterType :: Monad m
+          => (Meta Type -> m (Meta Type))
+          -> (Meta Path -> m Path)
+          -> Meta Type
+          -> m (Meta Type)
+afterType t h = go
+  where
+    h' path = (<$ path) <$> h path
+    go x = do
+      x' <- t x
+      forM x' $ \case
+        TNamed path ->
+          TNamed <$> h (path <$ x')
+        TParen a ->
+          TParen <$> go a
+        TUnaryOp path a ->
+          TUnaryOp <$> h' path <*> go a
+        TBinOp path a b ->
+          TBinOp <$> h' path <*> go a <*> go b
+        TApp a b ->
+          TApp <$> go a <*> go b
+        other ->
+          return other
 
 instance Show Type where
   show = \case
@@ -542,13 +113,13 @@ instance Show Type where
     TAnon _ -> "_"
     TParen ty -> show ty
     TUnaryOp Meta { unmeta = Path [Unary op] } ty ->
-      "(" ++ op ++ show ty ++ ")"
+      "{" ++ op ++ show ty ++ "}"
     TUnaryOp op ty ->
-      "(" ++ show op ++ " " ++ show ty ++ ")"
+      "{" ++ show op ++ " " ++ show ty ++ "}"
     TBinOp Meta { unmeta = Path [Operator op] } lhs rhs ->
-      "(" ++ show lhs ++ " " ++ op ++ " " ++ show rhs ++ ")"
+      "{" ++ show lhs ++ " " ++ op ++ " " ++ show rhs ++ "}"
     TBinOp op lhs rhs ->
-      "(" ++ show op ++ " " ++ show lhs ++ " " ++ show rhs ++ ")"
+      "{" ++ show op ++ " " ++ show lhs ++ " " ++ show rhs ++ "}"
     TApp a b ->
       "(" ++ show a ++ " " ++ show b ++ ")"
 
@@ -578,21 +149,9 @@ expandFunction [] ty = ty
 expandFunction (ty:types) ret =
   meta $ TFunc ty $ expandFunction types ret
 
-pattern Core :: Name -> Path
-pattern Core name = Path ["Core", name]
-
-pattern Local :: Name -> Path
-pattern Local name = Path [name]
-
-pattern EmptyPath :: Path
-pattern EmptyPath = Path []
-
 pattern DefaultMeta :: a -> Meta a
 pattern DefaultMeta x <- Meta { unmeta = x }
   where DefaultMeta = meta
-
-pattern Generated :: FilePath
-pattern Generated = "<compiler-generated>"
 
 pattern TFuncArrow :: Type
 pattern TFuncArrow = TNamed (Core (Operator "->"))
@@ -610,7 +169,7 @@ data Value
 instance Show Value where
   show = \case
     VUnit -> "()"
-    VFun cases -> 
+    VFun cases ->
       "(fun" ++ showCases True cases ++ ")"
     VDataCons _ name [] ->
       show name
@@ -640,19 +199,49 @@ data Expr
   | ETypeAscribe (Meta Expr) (Meta Type)
   | EDataCons Path Name [Meta Expr]
 
-instance ExprLike Expr where
-  opKind _ = "expression"
-  opUnit = EValue VUnit
-  opNamed = EGlobal . unmeta
-  opParen expr =
-    case unmeta expr of
-      EUnaryOp _ _ -> EParen expr
-      EBinOp _ _ _ -> EParen expr
-      other -> other
-  opUnary = EUnaryOp
-  opBinary = EBinOp
-  opApply a b = Right $ EApp a b
-  opSeq = Just ESeq
+afterExpr :: Monad m
+          => (Meta Expr -> m (Meta Expr))
+          -> (Meta Pattern -> m (Meta Pattern))
+          -> (Meta Type -> m (Meta Type))
+          -> (Meta Path -> m Path)
+          -> Meta Expr
+          -> m (Meta Expr)
+afterExpr e p t h = go
+  where
+    h' path = (<$ path) <$> h path
+    go x = do
+      x' <- e x
+      forM x' $ \case
+        EValue (VFun cases) ->
+          EValue . VFun <$> afterCases cases
+        EGlobal path ->
+          EGlobal <$> h (path <$ x')
+        EParen a ->
+          EParen <$> go a
+        EUnaryOp path a ->
+          EUnaryOp <$> h' path <*> go a
+        EBinOp path a b ->
+          EBinOp <$> h' path <*> go a <*> go b
+        EApp a b ->
+          EApp <$> go a <*> go b
+        ESeq a b ->
+          ESeq <$> go a <*> go b
+        ELet pat val expr ->
+          ELet <$> afterPattern p t h pat <*> go val <*> go expr
+        EMatchIn exprs cases ->
+          EMatchIn <$> mapM go exprs <*> afterCases cases
+        EUse m a ->
+          EUse m <$> go a
+        ETypeAscribe a ty ->
+          ETypeAscribe <$> go a <*> afterType t h ty
+        EDataCons path name exprs ->
+          (\p s -> EDataCons p name s)
+          <$> h (path <$ x') <*> mapM go exprs
+        other ->
+          return other
+    afterCases =
+      mapM $ \(pats, expr) ->
+        (,) <$> forM pats (afterPattern p t h) <*> go expr
 
 instance Eq Expr where
   EValue v0 == EValue v1 =
@@ -687,13 +276,13 @@ instance Show Expr where
     EIndex _ (Just name) -> name
     EParen expr -> show expr
     EUnaryOp Meta { unmeta = Path [Unary op] } expr ->
-      "(" ++ op ++ show expr ++ ")"
+      "{" ++ op ++ show expr ++ "}"
     EUnaryOp op expr ->
-      "(" ++ show op ++ " " ++ show expr ++ ")"
+      "{" ++ show op ++ " " ++ show expr ++ "}"
     EBinOp Meta { unmeta = Path [Operator op] } lhs rhs ->
-      "(" ++ show lhs ++ " " ++ op ++ " " ++ show rhs ++ ")"
+      "{" ++ show lhs ++ " " ++ op ++ " " ++ show rhs ++ "}"
     EBinOp op lhs rhs ->
-      "(" ++ show op ++ " " ++ show lhs ++ " " ++ show rhs ++ ")"
+      "{" ++ show op ++ " " ++ show lhs ++ " " ++ show rhs ++ "}"
     EApp a b ->
       "(" ++ show a ++ " " ++ show b ++ ")"
     ESeq a b ->
@@ -783,20 +372,30 @@ data Pattern
   | PCons (Meta Path) [Meta Pattern]
   | PTypeAscribe (Meta Pattern) (Meta Type)
 
-instance ExprLike Pattern where
-  opKind _ = "pattern"
-  opUnit = PUnit
-  opNamed name = PCons name []
-  opParen pat =
-    case unmeta pat of
-      PUnaryOp _ _ -> PParen pat
-      PBinOp _ _ _ -> PParen pat
-      other -> other
-  opUnary = PUnaryOp
-  opBinary = PBinOp
-  opApply Meta { unmeta = PParen p } x = opApply p x
-  opApply Meta { unmeta = PCons name xs } x = Right $ PCons name (xs ++ [x])
-  opApply other _ = Left ("pattern does not support parameters: " ++ show other)
+afterPattern :: forall m. Monad m
+             => (Meta Pattern -> m (Meta Pattern))
+             -> (Meta Type -> m (Meta Type))
+             -> (Meta Path -> m Path)
+             -> Meta Pattern
+             -> m (Meta Pattern)
+afterPattern p t h = go
+  where
+    h' path = (<$ path) <$> h path
+    go x = do
+      x' <- p x
+      forM x' $ \case
+        PParen a ->
+          PParen <$> go a
+        PUnaryOp path a ->
+          PUnaryOp <$> h' path <*> go a
+        PBinOp path a b ->
+          PBinOp <$> h' path <*> go a <*> go b
+        PCons path xs ->
+          PCons <$> h' path <*> mapM go xs
+        PTypeAscribe a ty ->
+          PTypeAscribe <$> go a <*> afterType t h ty
+        other ->
+          return other
 
 instance Eq Pattern where
   PUnit   == PUnit   = True
@@ -816,13 +415,13 @@ instance Show Pattern where
     PBind Nothing -> "?"
     PBind (Just name) -> name
     PUnaryOp Meta { unmeta = Path [Unary op] } pat ->
-      "(" ++ op ++ show pat ++ ")"
+      "{" ++ op ++ show pat ++ "}"
     PUnaryOp op pat ->
-      "(" ++ show op ++ " " ++ show pat ++ ")"
+      "{" ++ show op ++ " " ++ show pat ++ "}"
     PBinOp Meta { unmeta = Path [Operator op] } lhs rhs ->
-      "(" ++ show lhs ++ " " ++ op ++ " " ++ show rhs ++ ")"
+      "{" ++ show lhs ++ " " ++ op ++ " " ++ show rhs ++ "}"
     PBinOp op lhs rhs ->
-      "(" ++ show op ++ " " ++ show lhs ++ " " ++ show rhs ++ ")"
+      "{" ++ show op ++ " " ++ show lhs ++ " " ++ show rhs ++ "}"
     PCons name [] -> show name
     PCons name pats ->
       "(" ++ show name ++ " " ++ intercalate " " (map show pats) ++ ")"
@@ -853,13 +452,170 @@ extractLocalPath :: Path -> Maybe String
 extractLocalPath (Path [name]) = extractLocalName name
 extractLocalPath _ = Nothing
 
-(<&>) :: Functor f => f a -> (a -> b) -> f b
-(<&>) = flip fmap
+idPath :: Monad m => Meta Path -> m Path
+idPath = return . unmeta
 
-isCap :: Char -> Bool
-isCap ch
-  | ch `elem` ['A'..'Z'] || ch == '_' = True
-  | otherwise = False
+type Associator m = forall t. ContainsOp t => [UnOpOrExpr t] -> m (Meta t)
 
-capFirst :: String -> String
-capFirst (x:xs) = toUpper x : xs
+data UnOpOrExpr a
+  = UnOp (Meta Path)
+  | UnExpr (Meta a)
+
+instance Show a => Show (UnOpOrExpr a) where
+  show = \case
+    UnOp path -> "`" ++ show path ++ "`"
+    UnExpr expr -> show expr
+
+class Show a => ContainsOp a where
+  toUnOpList :: Meta a -> [UnOpOrExpr a]
+  applyUnary :: Meta Path -> Meta a -> Meta a
+  applyBinary :: Meta Path -> Meta a -> Meta a -> Meta a
+  reassociate :: Monad m => Associator m -> Meta a -> m (Meta a)
+
+instance ContainsOp Type where
+  toUnOpList x =
+    -- strip leading parentheses
+    case unmeta x of
+      TParen a ->
+        toUnOpList a
+      _ ->
+        go x
+    where
+      go x =
+        case unmeta x of
+          TParen a ->
+            [UnExpr a]
+          TUnaryOp path a ->
+            UnOp path : toUnOpList a
+          TBinOp path a b ->
+            UnExpr a : UnOp path : toUnOpList b
+          _ ->
+            [UnExpr x]
+
+  applyUnary path a =
+    metaWithEnds path a $ TApp (TNamed <$> path) a
+
+  applyBinary path a b =
+    metaWithEnds a b $
+      TApp (metaWithEnds a path $ TApp (TNamed <$> path) a) b
+
+  reassociate f =
+    afterType (f . toUnOpList) idPath
+
+instance ContainsOp Expr where
+  toUnOpList x =
+    -- strip leading parentheses
+    case unmeta x of
+      EParen a ->
+        toUnOpList a
+      _ ->
+        go x
+    where
+      go x =
+        case unmeta x of
+          EParen a ->
+            [UnExpr a]
+          EUnaryOp path a ->
+            UnOp path : toUnOpList a
+          EBinOp path a b ->
+            UnExpr a : UnOp path : toUnOpList b
+          _ ->
+            [UnExpr x]
+
+  applyUnary path a =
+    metaWithEnds path a $ EApp (EGlobal <$> path) a
+
+  applyBinary path a b =
+    metaWithEnds a b $
+      EApp (metaWithEnds a path $ EApp (EGlobal <$> path) a) b
+
+  reassociate f =
+    afterExpr
+      (f . toUnOpList)
+      (f . toUnOpList)
+      (f . toUnOpList)
+      idPath
+
+instance ContainsOp Pattern where
+  toUnOpList x =
+    -- strip leading parentheses
+    case unmeta x of
+      PParen a ->
+        toUnOpList a
+      _ ->
+        go x
+    where
+      go x =
+        case unmeta x of
+          PParen a ->
+            [UnExpr a]
+          PUnaryOp path a ->
+            UnOp path : toUnOpList a
+          PBinOp path a b ->
+            UnExpr a : UnOp path : toUnOpList b
+          _ ->
+            [UnExpr x]
+
+  applyUnary path a =
+    metaWithEnds path a $ PCons path [a]
+
+  applyBinary path a b =
+    metaWithEnds a b $ PCons path [a, b]
+
+  reassociate f =
+    afterPattern
+      (f . toUnOpList)
+      (f . toUnOpList)
+      idPath
+
+data Of a = Of
+
+class ExprLike a where
+  opKind :: Of a -> String
+  opUnit :: a
+  opNamed :: Meta Path -> a
+  opParen :: Meta a -> a
+  opUnary :: Meta Path -> Meta a -> a
+  opBinary :: Meta Path -> Meta a -> Meta a -> a
+  opApply :: Meta a -> Meta a -> Either String a
+  opSeq :: Maybe (Meta a -> Meta a -> a)
+  opSeq = Nothing
+
+instance ExprLike Type where
+  opKind _ = "type"
+  opUnit = TNamed $ Core $ Identifier "Unit"
+  opNamed = TNamed . unmeta
+  opParen = TParen
+  opUnary = TUnaryOp
+  opBinary = TBinOp
+  opApply a b = Right $ TApp a b
+
+instance ExprLike Expr where
+  opKind _ = "expression"
+  opUnit = EValue VUnit
+  opNamed = EGlobal . unmeta
+  opParen expr =
+    case unmeta expr of
+      EUnaryOp _ _ -> EParen expr
+      EBinOp _ _ _ -> EParen expr
+      other -> other
+  opUnary = EUnaryOp
+  opBinary = EBinOp
+  opApply a b = Right $ EApp a b
+  opSeq = Just ESeq
+
+instance ExprLike Pattern where
+  opKind _ = "pattern"
+  opUnit = PUnit
+  opNamed name = PCons name []
+  opParen pat =
+    case unmeta pat of
+      PUnaryOp _ _ -> PParen pat
+      PBinOp _ _ _ -> PParen pat
+      other -> other
+  opUnary = PUnaryOp
+  opBinary = PBinOp
+  opApply Meta { unmeta = PParen p } x = opApply p x
+  opApply Meta { unmeta = PCons name xs } x = Right $ PCons name (xs ++ [x])
+  opApply other _ = Left ("pattern does not support parameters: " ++ show other)
+

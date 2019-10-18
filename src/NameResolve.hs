@@ -1,6 +1,8 @@
 module NameResolve (nameResolve) where
 
+import Basics
 import AST
+import Program
 
 import Data.List
 import Data.Foldable
@@ -69,6 +71,12 @@ instance Monoid Item where
     , isPattern = False
     , isOperatorType = False }
   mappend = (<>)
+
+isInfixable :: Item -> Bool
+isInfixable item =
+  isType item
+  || isValue item
+  || isPattern item
 
 modItem :: NameTable -> Item
 modItem nt = mempty
@@ -311,7 +319,7 @@ insertLet path decl = do
         { allDecls = decls
           { allLets = Map.insert path decl lets } }
 
-insertOpType :: Meta Path -> OpTypeEnds -> NR ()
+insertOpType :: Meta Path -> InFile OpTypeEnds -> NR ()
 insertOpType path newOp = do
   s <- get
   let
@@ -336,9 +344,32 @@ insertOpType path newOp = do
       put s
         { allDecls = decls
           { allOpTypes = Map.insert path newOp ops } }
-  where
-    setLookup x set =
-      Set.lookupIndex x set <&> \i -> Set.elemAt i set
+
+insertOpDecl :: Meta Path -> InFile OpDecl -> NR ()
+insertOpDecl path decl = do
+  s <- get
+  let
+    decls = allDecls s
+    ops = allOpDecls decls
+  case Map.lookupIndex path ops of
+    Just i ->
+      lift $ lift $ addError CompileError
+        { errorFile = Just $ getFile decl
+        , errorSpan = metaSpan path
+        , errorKind = Error
+        , errorMessage =
+          let
+            baseMessage = "duplicate operator declaration for path `" ++ show path ++ "`\n"
+            (otherPath, otherFile :/: _) = Map.elemAt i ops
+          in case metaSpan otherPath of
+            Just otherSpan ->
+              baseMessage ++ "(other at " ++ otherFile ++ ":" ++ show otherSpan ++ ")"
+            Nothing ->
+              baseMessage ++ "(other in " ++ otherFile ++ ")" }
+    Nothing ->
+      put s
+        { allDecls = decls
+          { allOpDecls = Map.insert path decl ops } }
 
 nameResolve :: [Module] -> CompileIO AllDecls
 nameResolve mods = do
@@ -347,7 +378,7 @@ nameResolve mods = do
     nr = nameResolveAll (Local baseModule) mods
     nrState = runReaderT nr defaultNames
     nameTable = toNameTable $ Map.singleton baseModule mods
-  fmap allDecls $ execStateT nrState $ defaultNameState nameTable 
+  fmap allDecls $ execStateT nrState $ defaultNameState nameTable
 
 nameResolveAll :: Path -> [Module] -> NR ()
 nameResolveAll path mods = do
@@ -369,6 +400,7 @@ nameResolveEach path mod =
       forM_ (Map.toList $ modSubs mod) $ \(name, mods) ->
         forM_ mods $ nameResolveEach (path .|. name)
       mapM_ nameResolveOpType $ modOpTypes mod
+      mapM_ nameResolveOpDecl $ Map.toList $ modOpDecls mod
       mapM_ nameResolveData $ Map.toList $ modDatas mod
       mapM_ nameResolveLet $ Map.toList $ modLets mod
 
@@ -390,7 +422,7 @@ nameResolveEach path mod =
         other ->
           afterDeclare Nothing other
       where
-        resPath = nameResolvePath file isOperatorType "operator type"
+        resPath = nameResolvePath file isOperatorType "an operator type"
         resMetaPath path = forM path $ resPath $ metaSpan path
 
         afterLink lower = \case
@@ -428,6 +460,18 @@ nameResolveEach path mod =
           (OpLink path : _) ->
             Just <$> resMetaPath path
 
+    nameResolveOpDecl (name, file :/: decl) = do
+      opType' <- resMetaPath $ opType decl
+      let
+        decl' = decl { opType = opType' }
+        opPath = (path .|.) <$> name
+      -- check that something that can be used as an operator exists at the path
+      _ <- nameResolvePath file isInfixable "an operator" (metaSpan opPath) (unmeta opPath)
+      insertOpDecl opPath (file :/: decl')
+      where
+        resPath = nameResolvePath file isOperatorType "an operator type"
+        resMetaPath path = forM path $ resPath $ metaSpan path
+
     nameResolveData (name, file :/: decl) = do
       variants <- mapM (mapM nameResolveVariant) $ dataVariants decl
       let dataName = (path .|.) <$> name
@@ -445,7 +489,7 @@ nameResolveEach path mod =
                 EValue $ VFun [
                   ( replicate count $ meta $ PBind Nothing
                   , copySpan var $ EDataCons (unmeta dataName) (unmeta name) $
-                    [0 .. count-1] <&> \n -> meta $ EIndex n Nothing )] } 
+                    [0 .. count-1] <&> \n -> meta $ EIndex n Nothing )] }
       where
         nameResolveVariant (name, types) =
           (,) name <$> mapM (nameResolveType file) types
@@ -488,7 +532,7 @@ nameResolvePath file check kind span path@(Path parts@(head:rest)) = do
       where
         go _ [] item
           | check item = ifRight
-          | otherwise  = wrongKind path kind 
+          | otherwise  = wrongKind path kind
         go path (n:ns) item =
           let subPath = path .|. n in
           case itemSub item of
@@ -500,11 +544,11 @@ nameResolvePath file check kind span path@(Path parts@(head:rest)) = do
                   let
                     subKind = case ns of
                       [] -> kind
-                      _ -> "module"
+                      _ -> "a module"
                   in pathErr $
-                    "`" ++ show path ++ "` does not contain a " ++ subKind ++ " named `" ++ show n ++ "`"
+                    "`" ++ show path ++ "` does not contain " ++ subKind ++ " named `" ++ show n ++ "`"
             Nothing ->
-              wrongKind subPath "module"
+              wrongKind subPath "a module"
 
     clearId id =
       modify $ \s -> s
@@ -525,7 +569,7 @@ nameResolvePath file check kind span path@(Path parts@(head:rest)) = do
         showExt (Path start) = show $ Path (start ++ parts)
 
     wrongKind path kind = pathErr $
-      "`" ++ show path ++ "` is not a " ++ kind
+      "`" ++ show path ++ "` is not " ++ kind
 
     notFound = pathErr $
       "cannot find `" ++ show path ++ "` in scope, did you forget to `use` it?"
@@ -548,7 +592,7 @@ nameResolveType file = go
         other ->
           return other
       where
-        resPath = nameResolvePath file isType "type"
+        resPath = nameResolvePath file isType "a type"
         resMetaPath path = forM path $ resPath $ metaSpan path
 
 nameResolveExpr :: Path -> FilePath -> Meta Expr -> NR (Meta Expr)
@@ -581,7 +625,7 @@ nameResolveExpr path file = go
         other ->
           return other
       where
-        resPath = nameResolvePath file isValue "value"
+        resPath = nameResolvePath file isValue "a value"
         resMetaPath path = forM path $ resPath $ metaSpan path
         nameResolveCases cases =
           forM cases $ \(pats, expr) ->
@@ -605,5 +649,5 @@ nameResolvePat path file = go
         other ->
           return other
       where
-        resPath = nameResolvePath file isPattern "pattern"
+        resPath = nameResolvePath file isPattern "a pattern"
         resMetaPath path = forM path $ resPath $ metaSpan path

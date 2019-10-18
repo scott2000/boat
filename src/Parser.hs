@@ -1,7 +1,9 @@
 module Parser (module Parser.Base, Parsable (..), parser, parseFile) where
 
-import Parser.Base
+import Basics
 import AST
+import Program
+import Parser.Base
 
 import Text.Megaparsec
 import Text.Megaparsec.Char
@@ -43,6 +45,7 @@ parseFile path = parseModule defaultModule
         parseMod = do
           keyword "mod"
           name <- nbsc >> parseName
+          nbsc >> specialOp Assignment
           sub <- blockOf $ parseModule defaultModule
           return $ modAddSub name sub m
 
@@ -54,7 +57,7 @@ parseFile path = parseModule defaultModule
               ops <- parseSomeSeparatedList '<' operatorPart
               return $ modAddOpType ops path m
             operatorPart =
-              (OpLink <$> parseMeta (char '(' *> parsePath <* spaces <* char ')'))
+              try (OpLink <$> parseMeta (char '(' *> parsePath <* spaces <* char ')'))
               <|> (OpDeclare <$> parseMeta parseName)
             operatorDecl = do
               opAssoc <- option ANon (operatorAssoc <* nbsc)
@@ -403,7 +406,7 @@ parseExprUse =
   <*  keyword "use"
   <*  nbsc
   <*> parseMeta parseUseModule
-  <*> parser  
+  <*> parser
 
 matchCases :: Parser [MatchCase]
 matchCases = someBetweenLines matchCase

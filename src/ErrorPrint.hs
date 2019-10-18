@@ -1,6 +1,6 @@
 module ErrorPrint where
 
-import AST
+import Basics
 
 import System.IO (readFile)
 import System.Exit (exitFailure)

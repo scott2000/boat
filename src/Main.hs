@@ -1,6 +1,8 @@
 module Main where
 
+import Basics
 import AST
+import Program
 import ErrorPrint
 import Parser
 import NameResolve
@@ -32,7 +34,7 @@ main =
             Right $ makeRelative currentDirectory $ normalise path
           else
             Left ("invalid path: " ++ path)
-        
+
         parseOptions = CompileOptions
           <$> argument (eitherReader parsePath)
             (  metavar "TARGET"
@@ -71,14 +73,13 @@ startCompile = do
 
   allDecls <- nameResolve mods
   exitIfErrors
-  lift $ putStrLn ("\n" ++ show allDecls)
 
   allDecls <- assocOps allDecls
   exitIfErrors
   lift $ forM_ (Map.toList $ allLets allDecls) $
     \(name, _ :/: LetDecl { letBody }) ->
       putStrLn ("\n" ++ show name ++ " =" ++ indent (show letBody))
-  
+
   finishAndCheckErrors
 
 finishAndCheckErrors :: CompileIO ()
