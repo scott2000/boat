@@ -85,21 +85,16 @@ parseFile path = parseModule defaultModule
 
         parseData = do
           keyword "data"
-          name <- nbsc *> parseMeta parseName <* nbsc
-          case extractLocalName $ unmeta name of
-            Just local ->
-              fail ("invalid data type name, did you mean to capitalize it like `" ++ capFirst local ++ "`?")
-            Nothing ->
-              return ()
-          args <- blockOf $ manyUntil (specialOp Assignment) $ parseMeta $ do
-            name <- parseName
-            case extractLocalName name of
-              Just local ->
-                return local
-              Nothing ->
-                fail ("type parameters must start with a lowercase letter, instead found `" ++ show name ++ "`")
-          vars <- blockOf $ someBetweenLines parseVariant
-          modAddData name args vars path m
+          nameAndParams <-
+            nbsc >> parserExpectEnd >>= dataAndArgsFromType path
+          nbsc >> specialOp Assignment
+          vars <- blockOf $
+            someBetweenLines (parserExpectEnd >>= variantFromType path)
+          case (nameAndParams, sequence vars) of
+            (Just (name, params), Just vars) ->
+              modAddData name params vars path m
+            _ ->
+              return m
 
 -- TODO: remove all uses of `try` with `parseName` after finding another solution to `_` keyword parsing
 
@@ -128,10 +123,6 @@ parseSomeSeparatedList sep p =
     manyCommas = option [] $ do
       try (spaces >> char sep) >> spaces
       option [] ((:) <$> p <*> manyCommas)
-
-parseVariant :: Parser (Meta DataVariant)
-parseVariant =
-  variantFromType <$> parserExpectEnd >>= eitherToFail
 
 data InfixOp = InfixOp
   { infixBacktick :: Bool

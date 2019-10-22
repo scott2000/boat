@@ -4,6 +4,7 @@ import Basics
 import AST
 
 import Data.List
+import Data.Char
 
 import Data.Map (Map)
 import qualified Data.Map.Strict as Map
@@ -245,18 +246,104 @@ modAddData name args vars path mod = do
       , errorMessage = "duplicate data type declaration for name `" ++ show name ++ "`" }
   return mod { modDatas = Map.insert name newDecl oldDatas }
 
-variantFromType :: Meta Type -> Either String (Meta DataVariant)
-variantFromType typeWithMeta = do
-  (f, xs) <- reduceApply typeWithMeta
-  case unmeta f of
-    TNamed (Path path) ->
-      case path of
-        [name] ->
-          Right $ copySpan typeWithMeta (copySpan f name, xs)
-        _ ->
-          Left ("data type variant names must be unqualified, did you mean `" ++ show (last path) ++ "`?")
-    TPoly local ->
-      Left ("data type variant names must be capitalized, did you mean `" ++ capFirst local ++ "`?")
-    other ->
-      Left ("expected a name for the data type variant, found " ++ show other ++ " instead")
+variantFromType :: MonadState CompileState m => FilePath -> Meta Type -> m (Maybe (Meta DataVariant))
+variantFromType file typeWithMeta = do
+  case reduceApply typeWithMeta of
+    Left (a, b) -> do
+      addError CompileError
+        { errorFile = Just file
+        , errorSpan = metaSpan b
+        , errorKind = Error
+        , errorMessage =
+          if a == b then
+            "cannot resolve asoociativity of `" ++ show b ++ "` without explicit parentheses"
+          else
+            "cannot resolve relative operator precedence of `"
+            ++ show b ++ "` after `" ++ show a ++ "` without explicit parentheses" }
+      return Nothing
+    Right (f, xs) ->
+      let
+        err msg = do
+          addError CompileError
+            { errorFile = Just file
+            , errorSpan = metaSpan f
+            , errorKind = Error
+            , errorMessage = msg }
+          return Nothing
+      in
+        case unmeta f of
+          TNamed (Path path) ->
+            case path of
+              [name] ->
+                return $ Just $ copySpan typeWithMeta (copySpan f name, xs)
+              _ ->
+                err ("data type variant names must be unqualified, did you mean `" ++ show (last path) ++ "`?")
+          TPoly local ->
+            err ("data type variant names must be capitalized, did you mean `" ++ capFirst local ++ "`?")
+          other ->
+            err ("expected a name for the data type variant, found " ++ show other ++ " instead")
 
+dataAndArgsFromType :: MonadState CompileState m => FilePath -> Meta Type -> m (Maybe (Meta Name, [Meta String]))
+dataAndArgsFromType file typeWithMeta = do
+  case reduceApply typeWithMeta of
+    Left (_, b) -> do
+      addError CompileError
+        { errorFile = Just file
+        , errorSpan = metaSpan b
+        , errorKind = Error
+        , errorMessage =
+          "expected only a single operator for data type delcaration, found multiple instead" }
+      return Nothing
+    Right (f, xs) -> do
+      name <-
+        let
+          err msg = do
+            addError CompileError
+              { errorFile = Just file
+              , errorSpan = metaSpan f
+              , errorKind = Error
+              , errorMessage = msg }
+            return Nothing
+        in
+          case unmeta f of
+            TNamed (Path path) ->
+              case path of
+                [name] ->
+                  return $ Just $ copySpan f name
+                _ ->
+                  err ("data type name must be unqualified, did you mean `" ++ show (last path) ++ "`?")
+            TPoly local ->
+              err ("data type name must be capitalized, did you mean `" ++ capFirst local ++ "`?")
+            other ->
+              err ("expected a name for the data type, found " ++ show other ++ " instead")
+      vars <- forM xs $ \ty ->
+        let
+          err msg = do
+            addError CompileError
+              { errorFile = Just file
+              , errorSpan = metaSpan ty
+              , errorKind = Error
+              , errorMessage = msg }
+            return Nothing
+        in
+          case unmeta ty of
+            TNamed (Path path) ->
+              case path of
+                [Identifier ('_':rest)] ->
+                  let
+                    suggestion =
+                      case rest of
+                        (x:_) | isAlpha x ->
+                          ", did you mean `" ++ lowerFirst rest ++ "`?"
+                        _ -> ""
+                  in
+                    err ("type parameter name must start with a lowercase letter" ++ suggestion)
+                [Identifier name] ->
+                  err ("type parameter name must be lowercase, did you mean `" ++ lowerFirst name ++ "`?")
+                _ ->
+                  err ("type parameter name must be unqualified, did you mean `" ++ show (last path) ++ "`?")
+            TPoly local ->
+              return $ Just $ copySpan ty local
+            other ->
+              err ("expected name for type parameter, found " ++ show other ++ " instead")
+      return $ (,) <$> name <*> sequence vars

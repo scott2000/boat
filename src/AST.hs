@@ -123,15 +123,15 @@ instance Show Type where
     TApp a b ->
       "(" ++ show a ++ " " ++ show b ++ ")"
 
-reduceApply :: Meta Type -> Either String (Meta Type, [Meta Type])
+reduceApply :: Meta Type -> Either (Meta Path, Meta Path) (Meta Type, [Meta Type])
 reduceApply typeWithMeta =
   case unmeta typeWithMeta of
     TParen ty ->
       reduceApply ty
-    TUnaryOp path Meta { unmeta = TBinOp _ _ _ } ->
-      opError path
-    TBinOp path _ Meta { unmeta = TBinOp _ _ _ } ->
-      opError path
+    TUnaryOp a Meta { unmeta = TBinOp b _ _ } ->
+      Left (a, b)
+    TBinOp a _ Meta { unmeta = TBinOp b _ _ } ->
+      Left (a, b)
     TUnaryOp path ty ->
       Right (TNamed <$> path, [ty])
     TBinOp path a b ->
@@ -140,9 +140,6 @@ reduceApply typeWithMeta =
       second (++ [b]) <$> reduceApply a
     other ->
       Right (typeWithMeta, [])
-  where
-    opError path =
-      Left ("cannot resolve relative operator precedence of `" ++ show path ++ "` without explicit parentheses")
 
 expandFunction :: [Meta Type] -> Meta Type -> Meta Type
 expandFunction [] ty = ty
