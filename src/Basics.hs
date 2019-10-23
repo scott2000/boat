@@ -10,6 +10,8 @@ import qualified Data.Set as Set
 
 import Control.Monad.State.Strict
 
+import System.Console.ANSI.Types (Color (..))
+
 data Name
   = Identifier String
   | Operator String
@@ -182,6 +184,13 @@ addError err =
     { compileErrors = Set.insert err $ compileErrors s
     , compileErrorCount =
       updateErrorCount (errorKind err) $ compileErrorCount s }
+
+errorColor :: ErrorKind -> Color
+errorColor = \case
+  Info    -> Blue
+  Warning -> Yellow
+  Error   -> Red
+  Done    -> Green
 
 data Position = Position
   { posLine :: !Int

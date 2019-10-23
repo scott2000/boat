@@ -10,6 +10,8 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Control.Monad.State.Strict
 
+import System.Console.ANSI
+
 exitIfErrors :: CompileIO ()
 exitIfErrors = do
   count <- gets compileErrorCount
@@ -57,9 +59,16 @@ prettyCompileErrors = go peDefault . Set.toList
     go _ [] = return ()
     go s (e:es) = do
       let
-        tag = "[" ++ show (errorKind e) ++ "] "
+        kindStr = show $ errorKind e
+        color = errorColor $ errorKind e
+        boldColor color =
+          setSGRCode [SetConsoleIntensity BoldIntensity, SetColor Foreground Vivid color]
+        colorize str =
+          boldColor color
+          ++ str ++ setSGRCode [Reset]
+        tag = colorize ("[" ++ kindStr ++ "]") ++ " "
         messageLines = lines $ errorMessage e
-        indented = intercalate ("\n" ++ replicate (length tag) ' ') messageLines
+        indented = intercalate ("\n" ++ replicate (length kindStr + 3) ' ') messageLines
         errorSuffix = tag ++ indented
       case errorFile e of
         Just file ->
@@ -80,21 +89,25 @@ prettyCompileErrors = go peDefault . Set.toList
               let
                 endLineNumber = posLine spanEnd
                 endLineNumberStr = show endLineNumber
+                startColumn = posColumn spanStart
+                endColumn = posColumn spanEnd
                 numLen = length endLineNumberStr
-                lineSeparator = " |"
-                blankLinePrefix = replicate numLen ' ' ++ lineSeparator
+                lineNumberColor = boldColor Blue
+                lineSeparator = " |" ++ setSGRCode [Reset]
+                blankLinePrefix = lineNumberColor ++ replicate numLen ' ' ++ lineSeparator
                 lineCount = endLineNumber - startLineNumber + 1
               if lineCount == 1 then do
                 let
-                  line = head $ peRestOfLines s
-                  startColumn = posColumn spanStart
-                  endColumn = posColumn spanEnd
+                  line =
+                    case peRestOfLines s of
+                      [] -> "<end of file>"
+                      (line:_) -> line
                   count = endColumn - startColumn
-                  underline = replicate startColumn ' ' ++ replicate count '^' 
+                  underline = replicate startColumn ' ' ++ colorize (replicate count '^')
                 putStrLn $ intercalate "\n"
                   [ "\n" ++ file ++ ":" ++ show spanStart ++ ":"
                   , blankLinePrefix
-                  , endLineNumberStr ++ lineSeparator ++ " " ++ line
+                  , lineNumberColor ++ endLineNumberStr ++ lineSeparator ++ " " ++ line
                   , blankLinePrefix ++ underline
                   , errorSuffix ]
               else do
@@ -105,8 +118,17 @@ prettyCompileErrors = go peDefault . Set.toList
                     let
                       str = show n
                       padding = replicate (length str - numLen) ' '
+                      colorizedLine
+                        | n == startLineNumber =
+                          let (a, b) = splitAt (startColumn - 1) l in
+                          a ++ colorize b
+                        | n == endLineNumber =
+                          let (a, b) = splitAt (endColumn - 1) l in
+                          colorize a ++ b
+                        | otherwise = colorize l
                     in
-                      str ++ padding ++ lineSeparator ++ " " ++ l
+                      lineNumberColor ++ str ++ padding ++ lineSeparator
+                      ++ " " ++ colorize ">" ++ " " ++ colorizedLine
                 putStrLn $ intercalate "\n" $
                   [ "\n" ++ file ++ ":" ++ show spanStart ++ ":"
                   , blankLinePrefix ]

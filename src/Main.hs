@@ -15,7 +15,7 @@ import System.Exit (exitFailure)
 
 import Data.List (sort, intercalate)
 import qualified Data.Map as Map
-import Text.Megaparsec (runParserT, errorBundlePretty)
+import Text.Megaparsec (runParserT)
 import Control.Monad.State.Strict
 import Options.Applicative as Opt
 
@@ -60,7 +60,9 @@ startCompile = do
       if isFile then
         case takeExtension path of
           ".boat" ->
-            (:[]) <$> parseSingleFile path
+            parseSingleFile path <&> \case
+              Just mod -> [mod]
+              Nothing  -> []
           other -> lift $ do
             let ext = if null other then "no extension" else other
             putStrLn ("Error: expected extension of .boat for file, found " ++ ext)
@@ -131,7 +133,7 @@ parseAll path = do
               ++ "\n(" ++ err ++ ")" }
         return Nothing
   else if isBoatExtension path then
-    Just <$> parseSingleFile path
+    parseSingleFile path
   else
     return Nothing
 
@@ -148,15 +150,15 @@ parseDirectory path = do
         Nothing ->
           forEach rest mods
 
-parseSingleFile :: FilePath -> CompileIO Module
+parseSingleFile :: FilePath -> CompileIO (Maybe Module)
 parseSingleFile path = do
   lift $ putStrLn ("{- parsing: " ++ path ++ " -}")
   file <- lift $ readFile path
   let parserT = runCustomParser $ parseFile path
   runParserT parserT path file >>= \case
-    Left err -> lift $ do
-      putStr (errorBundlePretty err)
-      exitFailure
+    Left err -> do
+      convertParseErrors err
+      return Nothing
     Right m ->
-      return m
+      return $ Just m
 

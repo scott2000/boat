@@ -27,6 +27,43 @@ runCustomParser p = runReaderT (followedByEnd p) defaultParserState
 followedByEnd :: Parser a -> Parser a
 followedByEnd p = p <* label "end of file" (try $ many spaceAnyIndent >> eof)
 
+convertParseErrors :: ParseErrorBundle String Void -> CompileIO ()
+convertParseErrors bundle =
+  go initialPosState $ NonEmpty.toList $ bundleErrors bundle
+  where
+    initialPosState = bundlePosState bundle
+    file = Just $ sourceName $ pstateSourcePos initialPosState
+    go _ [] = return ()
+    go posState (err:rest) = do
+      let
+        o = errorOffset err
+        (startPos, posState') =
+          reachOffsetNoLine o posState
+        errText = parseErrorTextPretty err
+        endPos
+          | errLen == 1 = startPos
+          | otherwise = fst $ reachOffsetNoLine (o+errLen-1) posState'
+      addError CompileError
+        { errorFile = file
+        , errorSpan = Just $ Span
+          (Position (unPos $ sourceLine startPos) (unPos $ sourceColumn startPos))
+          (Position (unPos $ sourceLine endPos) (unPos (sourceColumn endPos) + 1))
+        , errorKind = Error
+        , errorMessage = errText }
+      go posState' rest
+      where
+        errLen =
+          case err of
+            TrivialError _ (Just (Tokens ts)) _ ->
+              NonEmpty.length ts
+            TrivialError _ _ _ -> 1
+            FancyError _ xs ->
+              foldl' fancyLenMax 1 xs
+    fancyLenMax a = \case
+      ErrorCustom b ->
+        max a $ errorComponentLen b
+      _ -> a
+
 defaultParserState :: ParserState
 defaultParserState = ParserState
   { minIndent = 0
@@ -165,8 +202,12 @@ trySpaces =
               fail "unexpected end of indented block"
             else
               return $ Left $ ContinuationIndent n
-      else
-        fail "line continuation not allowed unless directly inside indented block"
+      else do
+        isEOF <- atEnd
+        if isEOF then
+          fail "unexpected end of input, did you forget a closing parenthesis or bracket?"
+        else
+          fail "line continuation not allowed unless directly inside indented block"
 
 spaces :: Parser SpaceType
 spaces =
