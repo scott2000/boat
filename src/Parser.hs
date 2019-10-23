@@ -87,15 +87,16 @@ parseFile path = parseModule defaultModule
           modAddLet name bodyWithAscription path m
 
         parseData = do
-          keyword "data"
+          keyword "data" >> nbsc
+          isMod <- (keyword "mod" >> nbsc >> return True) <|> return False
           nameAndParams <-
-            nbsc >> parserExpectEnd >>= dataAndArgsFromType path
+            parserExpectEnd >>= dataAndArgsFromType path
           nbsc >> specialOp Assignment
           vars <- blockOf $
             someBetweenLines (parserExpectEnd >>= variantFromType path)
           case (nameAndParams, catMaybes vars) of
             ((Just name, params), vars) ->
-              modAddData name params vars path m
+              modAddData name isMod params vars path m
             _ ->
               return m
 

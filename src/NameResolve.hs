@@ -120,17 +120,25 @@ addModule mod nt = nt
   <> foldMap opTypeItem (modOpTypes mod)
   <> convert typeItem (modDatas mod)
   <> convert valueItem (modLets mod)
-  <> foldMap patternsForData (Map.elems $ modDatas mod)
+  <> foldMap patternsForData (Map.toList $ modDatas mod)
   where
     convert k m =
       NameTable $ k <$ Map.mapKeysMonotonic unmeta m
     opTypeItem (_ :/: ops) =
       NameTable $ Map.fromList $ opTypeDeclarations ops <&> \name ->
         (name, operatorTypeItem)
-    patternsForData (_ :/: DataDecl { dataVariants }) =
-      NameTable $ Map.fromList $ dataVariants <&> \
-        Meta { unmeta = (name, _) } ->
-          (unmeta name, valueItem <> patternItem)
+    patternsForData (dataName, _ :/: DataDecl { dataMod, dataVariants }) =
+      let
+        variantTable =
+          NameTable $ Map.fromList $ dataVariants <&> \
+            Meta { unmeta = (name, _) } ->
+              (unmeta name, valueItem <> patternItem)
+      in
+        if dataMod then
+          NameTable $ Map.singleton (unmeta dataName) mempty
+            { itemSub = Just variantTable }
+        else
+          variantTable
 
 nameTableToList :: NameTable -> [(Name, Item)]
 nameTableToList = Map.toList . getNameTable
@@ -478,18 +486,23 @@ nameResolveEach path mod =
       insertData dataName $ file :/: decl
         { dataVariants = variants }
       forM variants $ \var ->
-        let (name, types) = unmeta var in
-        insertLet ((path .|.) <$> name) $ file :/: LetDecl
-          { letBody =
-            copySpan var $
-              if null types then
-                EValue $ VDataCons (unmeta dataName) (unmeta name) []
-              else
-                let count = length types in
-                EValue $ VFun [
-                  ( replicate count $ meta $ PBind Nothing
-                  , copySpan var $ EDataCons (unmeta dataName) (unmeta name) $
-                    [0 .. count-1] <&> \n -> meta $ EIndex n Nothing )] }
+        let
+          (name, types) = unmeta var
+          constructorPath
+            | dataMod decl = unmeta dataName
+            | otherwise = path
+        in
+          insertLet ((constructorPath .|.) <$> name) $ file :/: LetDecl
+            { letBody =
+              copySpan var $
+                if null types then
+                  EValue $ VDataCons (unmeta dataName) (unmeta name) []
+                else
+                  let count = length types in
+                  EValue $ VFun [
+                    ( replicate count $ meta $ PBind Nothing
+                    , copySpan var $ EDataCons (unmeta dataName) (unmeta name) $
+                      [0 .. count-1] <&> \n -> meta $ EIndex n Nothing )] }
       where
         nameResolveVariant (name, types) =
           (,) name <$> mapM (nameResolveType file) types

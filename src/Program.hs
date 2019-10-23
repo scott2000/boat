@@ -86,8 +86,9 @@ instance Show Module where
               ARight -> " <right>"
       showLet (name, _ :/: LetDecl { letBody }) =
         "let " ++ show name ++ " =" ++ indent (show letBody)
-      showData (name, _ :/: DataDecl { dataArgs, dataVariants }) =
-        "data " ++ unwords (show name : map unmeta dataArgs)
+      showData (name, _ :/: DataDecl { dataMod, dataArgs, dataVariants }) =
+        let mod = if dataMod then "mod " else "" in
+        "data " ++ mod ++ unwords (show name : map unmeta dataArgs)
         ++ " =" ++ indent (intercalate "\n" (map (showVariant . unmeta) dataVariants))
       showVariant (name, types) =
         show name ++ " " ++ unwords (map show types)
@@ -212,22 +213,25 @@ modAddLet name body path mod = do
 type DataVariant = (Meta Name, [Meta Type])
 
 data DataDecl = DataDecl
-  { dataArgs :: [Meta String]
+  { dataMod :: Bool
+  , dataArgs :: [Meta String]
   , dataVariants :: [Meta DataVariant] }
 
 modAddData
   :: MonadState CompileState m
   => Meta Name
+  -> Bool
   -> [Meta String]
   -> [Meta DataVariant]
   -> FilePath
   -> Module
   -> m Module
-modAddData name args vars path mod = do
+modAddData name isMod args vars path mod = do
   let
     oldDatas = modDatas mod
     newDecl = path :/: DataDecl
-      { dataArgs = args
+      { dataMod = isMod
+      , dataArgs = args
       , dataVariants = vars }
   when (unmeta name /= Operator "->") $
     case find ((Operator "->" ==) . unmeta) $ map (fst . unmeta) vars of

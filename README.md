@@ -7,14 +7,14 @@ This is the compiler for the boat programming language
 ## An example program
 
 ```boat
-use Nat (_)
+use Nat (S, Z, (*))
 
 let fac = fun
   Z     -> S Z
   (S n) ->
     S n * fac n
 
-data Nat =
+data mod Nat =
   Z
   S Nat
 
