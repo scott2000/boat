@@ -199,7 +199,7 @@ trySpaces =
             return $ Right Whitespace
           n ->
             if n < 0 then
-              fail "unexpected end of indented block"
+              fail "unexpected end of indented block, is the indentation correct?"
             else
               return $ Left $ ContinuationIndent n
       else do

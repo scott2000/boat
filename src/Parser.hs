@@ -9,8 +9,11 @@ import Text.Megaparsec
 import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as L
 
+import Data.Maybe
 import Data.Semigroup ((<>))
 import Control.Monad.State.Strict
+
+-- TODO: replace mamy uses of `fail` with a `addError` followed by a custom, non-printed error type
 
 parseName :: Parser Name
 parseName =
@@ -90,8 +93,8 @@ parseFile path = parseModule defaultModule
           nbsc >> specialOp Assignment
           vars <- blockOf $
             someBetweenLines (parserExpectEnd >>= variantFromType path)
-          case (nameAndParams, sequence vars) of
-            (Just (name, params), Just vars) ->
+          case (nameAndParams, catMaybes vars) of
+            (Just (name, params), vars) ->
               modAddData name params vars path m
             _ ->
               return m
@@ -239,9 +242,7 @@ parserBase prec current =
                 setOffset offsetAfterOp
                 fail "line break never allowed after operator"
             Left err ->
-              return $ Just $ do
-                setOffset offsetAfterOp
-                fail $ show err
+              return $ Just $ fail $ show err
 
         opAfterSpace offset parsedOp spaceAfter = do
           guard (spaceAfter || not spaceBefore)

@@ -246,43 +246,6 @@ modAddData name args vars path mod = do
       , errorMessage = "duplicate data type declaration for name `" ++ show name ++ "`" }
   return mod { modDatas = Map.insert name newDecl oldDatas }
 
-variantFromType :: MonadState CompileState m => FilePath -> Meta Type -> m (Maybe (Meta DataVariant))
-variantFromType file typeWithMeta = do
-  case reduceApply typeWithMeta of
-    Left (a, b) -> do
-      addError CompileError
-        { errorFile = Just file
-        , errorSpan = metaSpan b
-        , errorKind = Error
-        , errorMessage =
-          if a == b then
-            "cannot resolve asoociativity of `" ++ show b ++ "` without explicit parentheses"
-          else
-            "cannot resolve relative operator precedence of `"
-            ++ show b ++ "` after `" ++ show a ++ "` without explicit parentheses" }
-      return Nothing
-    Right (f, xs) ->
-      let
-        err msg = do
-          addError CompileError
-            { errorFile = Just file
-            , errorSpan = metaSpan f
-            , errorKind = Error
-            , errorMessage = msg }
-          return Nothing
-      in
-        case unmeta f of
-          TNamed (Path path) ->
-            case path of
-              [name] ->
-                return $ Just $ copySpan typeWithMeta (copySpan f name, xs)
-              _ ->
-                err ("data type variant names must be unqualified, did you mean `" ++ show (last path) ++ "`?")
-          TPoly local ->
-            err ("data type variant names must be capitalized, did you mean `" ++ capFirst local ++ "`?")
-          other ->
-            err ("expected a name for the data type variant, found " ++ show other ++ " instead")
-
 dataAndArgsFromType :: MonadState CompileState m => FilePath -> Meta Type -> m (Maybe (Meta Name, [Meta String]))
 dataAndArgsFromType file typeWithMeta = do
   case reduceApply typeWithMeta of
@@ -347,3 +310,40 @@ dataAndArgsFromType file typeWithMeta = do
             other ->
               err ("expected name for type parameter, found " ++ show other ++ " instead")
       return $ (,) <$> name <*> sequence vars
+
+variantFromType :: MonadState CompileState m => FilePath -> Meta Type -> m (Maybe (Meta DataVariant))
+variantFromType file typeWithMeta = do
+  case reduceApply typeWithMeta of
+    Left (a, b) -> do
+      addError CompileError
+        { errorFile = Just file
+        , errorSpan = metaSpan b
+        , errorKind = Error
+        , errorMessage =
+          if a == b then
+            "cannot resolve asoociativity of `" ++ show b ++ "` without explicit parentheses"
+          else
+            "cannot resolve relative operator precedence of `"
+            ++ show b ++ "` after `" ++ show a ++ "` without explicit parentheses" }
+      return Nothing
+    Right (f, xs) ->
+      let
+        err msg = do
+          addError CompileError
+            { errorFile = Just file
+            , errorSpan = metaSpan f
+            , errorKind = Error
+            , errorMessage = msg }
+          return Nothing
+      in
+        case unmeta f of
+          TNamed (Path path) ->
+            case path of
+              [name] ->
+                return $ Just $ copySpan typeWithMeta (copySpan f name, xs)
+              _ ->
+                err ("data type variant names must be unqualified, did you mean `" ++ show (last path) ++ "`?")
+          TPoly local ->
+            err ("data type variant names must be capitalized, did you mean `" ++ capFirst local ++ "`?")
+          other ->
+            err ("expected a name for the data type variant, found " ++ show other ++ " instead")

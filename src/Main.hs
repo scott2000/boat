@@ -84,17 +84,6 @@ startCompile = do
 
   finishAndCheckErrors
 
-finishAndCheckErrors :: CompileIO ()
-finishAndCheckErrors = do
-  exitIfErrors
-  count <- gets compileErrorCount
-  addError CompileError
-    { errorFile = Nothing
-    , errorSpan = Nothing
-    , errorKind = Done
-    , errorMessage = "compiled successfully with " ++ show count }
-  printErrors
-
 isBoatExtension :: FilePath -> Bool
 isBoatExtension = (".boat" ==) . takeExtension
 
