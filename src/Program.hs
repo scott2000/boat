@@ -4,6 +4,7 @@ import Basics
 import AST
 
 import Data.List
+import Data.Maybe
 import Data.Char
 
 import Data.Map (Map)
@@ -246,7 +247,7 @@ modAddData name args vars path mod = do
       , errorMessage = "duplicate data type declaration for name `" ++ show name ++ "`" }
   return mod { modDatas = Map.insert name newDecl oldDatas }
 
-dataAndArgsFromType :: MonadState CompileState m => FilePath -> Meta Type -> m (Maybe (Meta Name, [Meta String]))
+dataAndArgsFromType :: MonadState CompileState m => FilePath -> Meta Type -> m (Maybe (Meta Name), [Meta String])
 dataAndArgsFromType file typeWithMeta = do
   case reduceApply typeWithMeta of
     Left (_, b) -> do
@@ -256,7 +257,7 @@ dataAndArgsFromType file typeWithMeta = do
         , errorKind = Error
         , errorMessage =
           "expected only a single operator for data type delcaration, found multiple instead" }
-      return Nothing
+      return (Nothing, [])
     Right (f, xs) -> do
       name <-
         let
@@ -309,7 +310,7 @@ dataAndArgsFromType file typeWithMeta = do
               return $ Just $ copySpan ty local
             other ->
               err ("expected name for type parameter, found " ++ show other ++ " instead")
-      return $ (,) <$> name <*> sequence vars
+      return (name, catMaybes vars)
 
 variantFromType :: MonadState CompileState m => FilePath -> Meta Type -> m (Maybe (Meta DataVariant))
 variantFromType file typeWithMeta = do

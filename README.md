@@ -7,21 +7,28 @@ This is the compiler for the boat programming language
 ## An example program
 
 ```boat
+use Nat (_)
+
+let fac = fun
+  Z     -> S Z
+  (S n) ->
+    S n * fac n
+
 data Nat =
   Z
   S Nat
 
-let (+) = fun
-  Z     y -> x
-  (S x) y -> x + S y
+mod Nat =
+  operator type Add < Mul
 
-let (*) = fun
-  Z     _ -> Z
-  _     Z -> Z
-  (S x) y -> y + x*y
+  operator <left> (+) : Add
+  operator <left> (*) : Add
 
-let fac = fun
-  Z     -> S Z
-  (S x) ->
-    S x * fac x
+  let (+) = fun
+    Z     y -> y
+    (S x) y -> x + S y
+
+  let (*) = fun
+    Z     _ -> Z
+    (S x) y -> y + x * y
 ```

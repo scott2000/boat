@@ -94,7 +94,7 @@ parseFile path = parseModule defaultModule
           vars <- blockOf $
             someBetweenLines (parserExpectEnd >>= variantFromType path)
           case (nameAndParams, catMaybes vars) of
-            (Just (name, params), vars) ->
+            ((Just name, params), vars) ->
               modAddData name params vars path m
             _ ->
               return m
