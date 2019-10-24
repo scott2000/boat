@@ -1,4 +1,4 @@
-module Parser (module Parser.Base, Parsable (..), parser, parseFile) where
+module Parser (module Parser.Base, Parsable (..), parseFile) where
 
 import Basics
 import AST
@@ -76,7 +76,7 @@ parseFile path = parseModule defaultModule
           keyword "let"
           name <- nbsc *> parseMeta parseName <* nbsc
           maybeAscription <- optional (specialOp TypeAscription *> blockOf parserExpectEnd <* nbsc)
-          body <- specialOp Assignment >> parser
+          body <- specialOp Assignment >> blockOf parser
           let
             bodyWithAscription =
               case maybeAscription of
@@ -154,7 +154,7 @@ paren =
   parseMeta (char '(' *> (emptyParen <|> fullParen))
   where
     emptyParen = opUnit <$ char ')'
-    fullParen = opParen <$> parser <* spaces <* char ')'
+    fullParen = opParen <$> blockOf parser <* spaces <* char ')'
 
 parserNoPrefix :: Parsable a => Parser (Meta a)
 parserNoPrefix = parseMeta parseOne <|> hidden paren
@@ -187,7 +187,7 @@ applyPrec   = 2
 compactPrec = 3
 
 parser :: Parsable a => Parser (Meta a)
-parser = blockOf $ parserPrec minPrec
+parser = parserPrec minPrec
 
 parserExpectEnd :: Parsable a => Parser (Meta a)
 parserExpectEnd = parserPrec expectEndPrec
@@ -382,7 +382,8 @@ parseLet = do
   keyword "let"
   pat <- blockOf parserExpectEnd
   nbsc >> specialOp Assignment
-  val <- parser
+  val <- blockOf parser
+  lineBreak
   expr <- withBindings (bindingsForPat pat) parser
   return $ ELet pat val expr
 
@@ -399,6 +400,7 @@ parseExprUse =
   <*  keyword "use"
   <*  nbsc
   <*> parseMeta parseUseModule
+  <*  lineBreak
   <*> parser
 
 matchCases :: Parser [MatchCase]
@@ -407,7 +409,7 @@ matchCases = someBetweenLines matchCase
 matchCase :: Parser MatchCase
 matchCase = do
   pats <- someUntil (specialOp FunctionArrow) parserNoSpace
-  expr <- withBindings (pats >>= bindingsForPat) parser
+  expr <- withBindings (pats >>= bindingsForPat) $ blockOf parser
   return (pats, expr)
 
 someBetweenLines :: Parser a -> Parser [a]

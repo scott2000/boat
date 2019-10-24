@@ -10,7 +10,7 @@ endif
 syn iskeyword a-z,A-Z,48-57,_
 
 syn keyword boatUse         use _
-syn keyword boatKeywords    mod let data operator type fun match in if then else
+syn keyword boatKeywords    mod effect let data operator type fun match in if then else
 syn keyword boatWrongKey    unary
 syn match   boatNum         '\<[0-9]\+(_[0-9]\+)*\>'
 syn match   boatType        '\<\([A-Z][A-Za-z0-9_]*\|_\+[A-Z][A-Za-z0-9_]*\)\>' contains=@NoSpell

@@ -82,7 +82,8 @@ isKeyword w = w `elem`
   , "fun"
   , "match"
   , "in"
-  , "unary"]
+  , "unary"
+  , "effect" ]
 
 isIdentFirst, isIdentRest :: Char -> Bool
 isIdentFirst x = (isAlpha x || x == '_') && isAscii x
@@ -118,14 +119,21 @@ parseMeta p =
 
 blockOf :: Parser a -> Parser a
 blockOf p = do
+  offset <- getOffset
   newLine <- option False parseSomeNewlines
   ParserState { minIndent } <- ask
   if newLine then do
     level <- getLevel
-    if level < minIndent then
-      fail ("block indented less then containing block (" ++ show level ++ " < " ++ show minIndent ++ ")")
-    else
-      local (\s -> s { minIndent = level, multiline = True }) p
+    case level `compare` minIndent of
+      LT ->
+        fail ("expected indented block with indentation greater than " ++ show minIndent
+          ++ ", found indent of " ++ show level ++ " instead")
+      EQ -> do
+        setOffset offset
+        fail ("expected indented block with indentation greater than surrounding block, "
+          ++ "did you forget to put something here?")
+      GT ->
+        local (\s -> s { minIndent = level, multiline = True }) p
   else
     local (\s -> s { multiline = False }) p
 
