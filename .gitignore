@@ -2,3 +2,5 @@
 .ghc.*
 cabal.*
 dist*
+tags
+TAGS
