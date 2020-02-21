@@ -502,7 +502,8 @@ nameResolveEach path mod =
                   EValue $ VFun [
                     ( replicate count $ meta $ PBind Nothing
                     , copySpan var $ EDataCons (unmeta dataName) (unmeta name) $
-                      [0 .. count-1] <&> \n -> meta $ EIndex n Nothing )] }
+                      [0 .. count-1] <&> \n -> meta $ EIndex n Nothing )]
+            , letConstraints = [] }
       where
         nameResolveVariant (name, types) =
           (,) name <$> mapM (nameResolveType file) types

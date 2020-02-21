@@ -11,6 +11,7 @@ import qualified Text.Megaparsec.Char.Lexer as L
 
 import Data.Maybe
 import Data.Semigroup ((<>))
+import qualified Data.Set as Set
 import Control.Monad.State.Strict
 
 -- TODO: replace mamy uses of `fail` with a `addError` followed by a custom, non-printed error type
@@ -76,6 +77,7 @@ parseFile path = parseModule defaultModule
           keyword "let"
           name <- nbsc *> parseMeta parseName <* nbsc
           maybeAscription <- optional (specialOp TypeAscription *> blockOf parserExpectEnd <* nbsc)
+          constraints <- (parseConstraints <* nbsc) <|> pure []
           body <- specialOp Assignment >> blockOf parser
           let
             bodyWithAscription =
@@ -84,7 +86,10 @@ parseFile path = parseModule defaultModule
                   copySpan body $ ETypeAscribe body ascription
                 Nothing ->
                   body
-          modAddLet name bodyWithAscription path m
+            letDecl = LetDecl
+              { letBody = bodyWithAscription
+              , letConstraints = constraints }
+          modAddLet name letDecl path m
 
         parseData = do
           keyword "data" >> nbsc
@@ -101,6 +106,30 @@ parseFile path = parseModule defaultModule
               return m
 
 -- TODO: remove all uses of `try` with `parseName` after finding another solution to `_` keyword parsing
+
+parseConstraints :: Parser [Constraint]
+parseConstraints = do
+  keyword "with"
+  blockOf $ parseSomeCommaList parseConstraint
+
+parseConstraint :: Parser Constraint
+parseConstraint =
+  pure IsSubEffectOf
+  <*> parseEffect
+  <*  nbsc
+  <*  specialOp TypeAscription
+  <*  nbsc
+  <*> blockOf parseEffectSet
+
+parseEffectSet :: Parser EffectSet
+parseEffectSet = do
+  effects <- parseSomeSeparatedList '+' parseEffect
+  return EffectSet { setEffects = Set.fromList effects }
+
+parseEffect :: Parser Effect
+parseEffect = label "effect" $
+  parseCapIdent "effect" (EffectNamed . unmeta) EffectPoly
+  <|> (keyword "_" >> EffectAnon <$> getNewAnon)
 
 parseUseModule :: Parser UseModule
 parseUseModule =
@@ -307,7 +336,7 @@ metaExtendFail f prec current = do
 
 instance Parsable Type where
   parseOne = label "type" $
-    parseCapIdent "type" TPoly
+    parseCapIdent "type" opNamed TPoly
     <|> (keyword "_" >> TAnon <$> getNewAnon)
 
   parseSpecial (span, FunctionArrow) =
@@ -425,7 +454,7 @@ manyUntil end p =
 
 instance Parsable Pattern where
   parseOne = label "pattern" $
-    parseCapIdent "pattern" (PBind . Just)
+    parseCapIdent "pattern" opNamed (PBind . Just)
     <|> (PAny <$ keyword "_")
     <|> (PBind Nothing <$ reservedOp QuestionMark)
 
@@ -433,8 +462,11 @@ instance Parsable Pattern where
     Just $ metaExtendPrec PTypeAscribe
   parseSpecial _ = Nothing
 
-parseCapIdent :: ExprLike a => String -> (String -> a) -> Parser a
-parseCapIdent kind localBind = do
+parseCapIdent :: String
+              -> (Meta Path -> a)
+              -> (String -> a)
+              -> Parser a
+parseCapIdent kind named localBind = do
   pathWithMeta <- parseMeta parsePath
   let path = unmeta pathWithMeta
   case extractLocalPath path of
@@ -448,5 +480,5 @@ parseCapIdent kind localBind = do
             let alt = Path $ init components ++ [Identifier $ capFirst name] in
             fail ("invalid path for " ++ kind ++ ", did you mean to capitalize it like `" ++ show alt ++ "`?")
         _ ->
-          return $ opNamed $ pathWithMeta
+          return $ named $ pathWithMeta
 

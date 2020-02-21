@@ -187,21 +187,21 @@ modAddOpDecls names op path mod = do
         , errorMessage = "duplicate operator declaration for name `" ++ show name ++ "`" }
   return mod { modOpDecls = Map.union (Map.fromList newOps) oldOps }
 
-newtype LetDecl = LetDecl
-  { letBody :: Meta Expr }
+data LetDecl = LetDecl
+  { letBody :: Meta Expr
+  , letConstraints :: [Constraint] }
 
 modAddLet
   :: MonadState CompileState m
   => Meta Name
-  -> Meta Expr
+  -> LetDecl
   -> FilePath
   -> Module
   -> m Module
-modAddLet name body path mod = do
+modAddLet name decl path mod = do
   let
     oldLets = modLets mod
-    newDecl = path :/: LetDecl
-      { letBody = body }
+    newDecl = path :/: decl
   when (Map.member name oldLets) $
     addError CompileError
       { errorFile = Just path

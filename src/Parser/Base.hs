@@ -79,6 +79,7 @@ isKeyword w = w `elem`
   , "type"
   , "data"
   , "let"
+  , "with"
   , "fun"
   , "match"
   , "in"
@@ -286,12 +287,14 @@ keyword expected =
 data ReservedOp
   = PathDot
   | QuestionMark
+  | PipeSeparator
   deriving Eq
 
 instance Show ReservedOp where
   show = \case
-    PathDot      -> "."
-    QuestionMark -> "?"
+    PathDot       -> "."
+    QuestionMark  -> "?"
+    PipeSeparator -> "|"
 
 data SpecialOp
   = Assignment
@@ -334,6 +337,7 @@ anyOperator = do
     case op of
       "."  -> ReservedOp PathDot
       "?"  -> ReservedOp QuestionMark
+      "|"  -> ReservedOp PipeSeparator
       "="  -> NonReservedOp $ SpecialOp Assignment
       "->" -> NonReservedOp $ SpecialOp FunctionArrow
       ":"  -> NonReservedOp $ SpecialOp TypeAscription

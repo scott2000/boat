@@ -284,6 +284,6 @@ updateExprs
             (,) name <$> mapM (updateSome file) types
 
       updateLet :: InFile LetDecl -> CompileIO (InFile LetDecl)
-      updateLet (file :/: LetDecl expr) =
-        (file :/:) . LetDecl <$> updateSome file expr
+      updateLet (file :/: decl) =
+        (file :/:) . (\x -> decl { letBody = x }) <$> updateSome file (letBody decl)
 

@@ -6,6 +6,9 @@ import Data.Word
 import Data.List
 import Data.Bifunctor
 
+import Data.Set (Set)
+import qualified Data.Set as Set
+
 import Control.Monad.Identity
 
 data Meta a = Meta
@@ -45,6 +48,75 @@ metaWithEnds
   = (meta x) { metaSpan = Just (span0 <> span1) }
 metaWithEnds _ _ x = meta x
 
+data AfterMap m = AfterMap
+  { aExpr :: Meta Expr -> m (Meta Expr)
+  , aPattern :: Meta Pattern -> m (Meta Pattern)
+  , aType :: Meta Type -> m (Meta Type)
+  , aEffect :: Effect -> m Effect
+  , aPath :: Meta Path -> m Path }
+
+aDefault :: Applicative m => AfterMap m
+aDefault = AfterMap
+  { aExpr = pure
+  , aPattern = pure
+  , aType = pure
+  , aEffect = pure
+  , aPath = pure . unmeta }
+
+aContainsOp :: Applicative m
+            => (forall a. ContainsOp a => Meta a -> m (Meta a))
+            -> AfterMap m
+aContainsOp f = aDefault
+  { aExpr = f
+  , aPattern = f
+  , aType = f }
+
+class After a where
+  after :: Monad m => AfterMap m -> Meta a -> m (Meta a)
+
+newtype EffectSet = EffectSet
+  { setEffects :: Set Effect }
+  deriving (Ord, Eq)
+
+instance After EffectSet where
+  after m =
+    mapM $ \EffectSet { setEffects } ->
+      EffectSet <$> Set.fromList <$> mapM (aEffect m) (Set.toList setEffects)
+
+instance Show EffectSet where
+  show =
+    intercalate " + " . map show . Set.toList . setEffects
+
+showEffectSetOrPure :: EffectSet -> String
+showEffectSetOrPure set
+  | Set.null $ setEffects set = "pure"
+  | otherwise                 = show set
+
+showEffectInPipes :: EffectSet -> String
+showEffectInPipes set
+  | Set.null $ setEffects set = ""
+  | otherwise                 = " |" ++ show set ++ "|"
+
+data Effect
+  = EffectNamed Path
+  | EffectPoly String
+  | EffectAnon Word64
+  deriving (Ord, Eq)
+
+instance Show Effect where
+  show = \case
+    EffectNamed path -> show path
+    EffectPoly name  -> name
+    EffectAnon _     -> "_"
+
+data Constraint
+  = Effect `IsSubEffectOf` EffectSet
+  deriving (Ord, Eq)
+
+instance Show Constraint where
+  show (effect `IsSubEffectOf` set) =
+    show effect ++ " : " ++ show set
+
 data UseModule
   = UseAny
   | UseModule (Meta Name) UseContents
@@ -70,7 +142,10 @@ instance Show UseContents where
     UseAll rest ->
       " (" ++ intercalate ", " (map show rest) ++ ")"
 
--- TODO: visitPath, visitType, visitAll?
+instance After Path where
+  after m path = do
+    p <- aPath m path
+    return path { unmeta = p }
 
 data Type
   = TNamed Path
@@ -80,31 +155,27 @@ data Type
   | TUnaryOp (Meta Path) (Meta Type)
   | TBinOp (Meta Path) (Meta Type) (Meta Type)
   | TApp (Meta Type) (Meta Type)
+  | TEff (Meta Type) (Meta EffectSet)
   deriving Eq
 
-afterType :: Monad m
-          => (Meta Type -> m (Meta Type))
-          -> (Meta Path -> m Path)
-          -> Meta Type
-          -> m (Meta Type)
-afterType t h = go
-  where
-    h' path = (<$ path) <$> h path
-    go x = do
-      x' <- t x
-      forM x' $ \case
-        TNamed path ->
-          TNamed <$> h (path <$ x')
-        TParen a ->
-          TParen <$> go a
-        TUnaryOp path a ->
-          TUnaryOp <$> h' path <*> go a
-        TBinOp path a b ->
-          TBinOp <$> h' path <*> go a <*> go b
-        TApp a b ->
-          TApp <$> go a <*> go b
-        other ->
-          return other
+instance After Type where
+  after m x = do
+    x' <- aType m x
+    forM x' $ \case
+      TNamed path ->
+        TNamed <$> aPath m (path <$ x')
+      TParen a ->
+        TParen <$> after m a
+      TUnaryOp path a ->
+        TUnaryOp <$> after m path <*> after m a
+      TBinOp path a b ->
+        TBinOp <$> after m path <*> after m a <*> after m b
+      TApp a b ->
+        TApp <$> after m a <*> after m b
+      TEff a e ->
+        TEff <$> after m a <*> after m e
+      other ->
+        return other
 
 instance Show Type where
   show = \case
@@ -196,49 +267,42 @@ data Expr
   | ETypeAscribe (Meta Expr) (Meta Type)
   | EDataCons Path Name [Meta Expr]
 
-afterExpr :: Monad m
-          => (Meta Expr -> m (Meta Expr))
-          -> (Meta Pattern -> m (Meta Pattern))
-          -> (Meta Type -> m (Meta Type))
-          -> (Meta Path -> m Path)
-          -> Meta Expr
-          -> m (Meta Expr)
-afterExpr e p t h = go
-  where
-    h' path = (<$ path) <$> h path
-    go x = do
-      x' <- e x
-      forM x' $ \case
-        EValue (VFun cases) ->
-          EValue . VFun <$> afterCases cases
-        EGlobal path ->
-          EGlobal <$> h (path <$ x')
-        EParen a ->
-          EParen <$> go a
-        EUnaryOp path a ->
-          EUnaryOp <$> h' path <*> go a
-        EBinOp path a b ->
-          EBinOp <$> h' path <*> go a <*> go b
-        EApp a b ->
-          EApp <$> go a <*> go b
-        ESeq a b ->
-          ESeq <$> go a <*> go b
-        ELet pat val expr ->
-          ELet <$> afterPattern p t h pat <*> go val <*> go expr
-        EMatchIn exprs cases ->
-          EMatchIn <$> mapM go exprs <*> afterCases cases
-        EUse m a ->
-          EUse m <$> go a
-        ETypeAscribe a ty ->
-          ETypeAscribe <$> go a <*> afterType t h ty
-        EDataCons path name exprs ->
-          (\p s -> EDataCons p name s)
-          <$> h (path <$ x') <*> mapM go exprs
-        other ->
-          return other
-    afterCases =
-      mapM $ \(pats, expr) ->
-        (,) <$> forM pats (afterPattern p t h) <*> go expr
+instance After Expr where
+  after m x = do
+    x' <- aExpr m x
+    forM x' $ \case
+      EValue (VFun cases) ->
+        EValue . VFun <$> afterCases cases
+      EGlobal path ->
+        EGlobal <$> aPath m (path <$ x')
+      EParen a ->
+        EParen <$> after m a
+      EUnaryOp path a ->
+        EUnaryOp <$> after m path <*> after m a
+      EBinOp path a b ->
+        EBinOp <$> after m path <*> after m a <*> after m b
+      EApp a b ->
+        EApp <$> after m a <*> after m b
+      ESeq a b ->
+        ESeq <$> after m a <*> after m b
+      ELet pat val expr ->
+        ELet <$> after m pat <*> after m val <*> after m expr
+      EMatchIn exprs cases ->
+        EMatchIn <$> mapM (after m) exprs <*> afterCases cases
+      EUse o a ->
+        EUse o <$> after m a
+      ETypeAscribe a ty ->
+        ETypeAscribe <$> after m a <*> after m ty
+      EDataCons path name exprs -> do
+        p <- aPath m (path <$ x')
+        s <- mapM (after m) exprs
+        return $ EDataCons p name s
+      other ->
+        return other
+    where
+      afterCases =
+        mapM $ \(pats, expr) ->
+          (,) <$> forM pats (after m) <*> after m expr
 
 instance Eq Expr where
   EValue v0 == EValue v1 =
@@ -369,30 +433,22 @@ data Pattern
   | PCons (Meta Path) [Meta Pattern]
   | PTypeAscribe (Meta Pattern) (Meta Type)
 
-afterPattern :: forall m. Monad m
-             => (Meta Pattern -> m (Meta Pattern))
-             -> (Meta Type -> m (Meta Type))
-             -> (Meta Path -> m Path)
-             -> Meta Pattern
-             -> m (Meta Pattern)
-afterPattern p t h = go
-  where
-    h' path = (<$ path) <$> h path
-    go x = do
-      x' <- p x
-      forM x' $ \case
-        PParen a ->
-          PParen <$> go a
-        PUnaryOp path a ->
-          PUnaryOp <$> h' path <*> go a
-        PBinOp path a b ->
-          PBinOp <$> h' path <*> go a <*> go b
-        PCons path xs ->
-          PCons <$> h' path <*> mapM go xs
-        PTypeAscribe a ty ->
-          PTypeAscribe <$> go a <*> afterType t h ty
-        other ->
-          return other
+instance After Pattern where
+  after m x = do
+    x' <- aPattern m x
+    forM x' $ \case
+      PParen a ->
+        PParen <$> after m a
+      PUnaryOp path a ->
+        PUnaryOp <$> after m path <*> after m a
+      PBinOp path a b ->
+        PBinOp <$> after m path <*> after m a <*> after m b
+      PCons path xs ->
+        PCons <$> after m path <*> mapM (after m) xs
+      PTypeAscribe a ty ->
+        PTypeAscribe <$> after m a <*> after m ty
+      other ->
+        return other
 
 instance Eq Pattern where
   PUnit   == PUnit   = True
@@ -463,11 +519,13 @@ instance Show a => Show (UnOpOrExpr a) where
     UnOp path -> "`" ++ show path ++ "`"
     UnExpr expr -> show expr
 
-class Show a => ContainsOp a where
+class (Show a, After a) => ContainsOp a where
   toUnOpList :: Meta a -> [UnOpOrExpr a]
   applyUnary :: Meta Path -> Meta a -> Meta a
   applyBinary :: Meta Path -> Meta a -> Meta a -> Meta a
-  reassociate :: Monad m => Associator m -> Meta a -> m (Meta a)
+
+reassociate :: (Monad m, ContainsOp a) => Associator m -> Meta a -> m (Meta a)
+reassociate f = after $ aContainsOp (f . toUnOpList)
 
 instance ContainsOp Type where
   toUnOpList x =
@@ -496,9 +554,6 @@ instance ContainsOp Type where
     metaWithEnds a b $
       TApp (metaWithEnds a path $ TApp (TNamed <$> path) a) b
 
-  reassociate f =
-    afterType (f . toUnOpList) idPath
-
 instance ContainsOp Expr where
   toUnOpList x =
     -- strip leading parentheses
@@ -526,13 +581,6 @@ instance ContainsOp Expr where
     metaWithEnds a b $
       EApp (metaWithEnds a path $ EApp (EGlobal <$> path) a) b
 
-  reassociate f =
-    afterExpr
-      (f . toUnOpList)
-      (f . toUnOpList)
-      (f . toUnOpList)
-      idPath
-
 instance ContainsOp Pattern where
   toUnOpList x =
     -- strip leading parentheses
@@ -558,12 +606,6 @@ instance ContainsOp Pattern where
 
   applyBinary path a b =
     metaWithEnds a b $ PCons path [a, b]
-
-  reassociate f =
-    afterPattern
-      (f . toUnOpList)
-      (f . toUnOpList)
-      idPath
 
 data Of a = Of
 
