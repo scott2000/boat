@@ -110,6 +110,17 @@ instance Monoid NameTable where
   mempty = NameTable Map.empty
   mappend = (<>)
 
+coreNameTable :: NameTable
+coreNameTable = NameTable
+  { getNameTable = Map.fromList
+    [ (Identifier "Core", modItem $ NameTable $ Map.fromList
+      [ (Operator "->", typeItem) ]) ] }
+
+coreUse :: UseModule
+coreUse =
+  UseModule (meta $ Identifier "Core") $
+    UseAll [meta $ UseModule (meta $ Operator "->") $ UseAll []]
+
 toNameTable :: Map Name [Module] -> NameTable
 toNameTable =
   NameTable . fmap (modItem . foldr addModule mempty)
@@ -385,7 +396,7 @@ nameResolve mods = do
   let
     nr = nameResolveAll (Local baseModule) mods
     nrState = runReaderT nr defaultNames
-    nameTable = toNameTable $ Map.singleton baseModule mods
+    nameTable = coreNameTable <> (toNameTable $ Map.singleton baseModule mods)
   fmap allDecls $ execStateT nrState $ defaultNameState nameTable
 
 nameResolveAll :: Path -> [Module] -> NR ()
@@ -401,8 +412,9 @@ nameResolveAll path mods = do
 
 nameResolveEach :: Path -> Module -> NR ()
 nameResolveEach path mod =
-  addUse path (Generated :/: meta UseAny) $
-    foldl' (flip (addUse path)) go (modUses mod)
+  addUse path (Generated :/: meta UseAny)
+    $ addUse path (Generated :/: meta coreUse)
+    $ foldl' (flip (addUse path)) go (modUses mod)
   where
     go = do
       forM_ (Map.toList $ modSubs mod) $ \(name, mods) ->
