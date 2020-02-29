@@ -166,11 +166,11 @@ createGraph = \case
 updateExprs :: AssocState -> AllDecls -> CompileIO AllDecls
 updateExprs
   AssocState { assocGraph, assocPaths }
-  AllDecls { allOpTypes, allOpDecls, allDatas, allLets }
+  decls@AllDecls { allOpTypes, allOpDecls }
   = do
-    allData <- mapM updateData allDatas
-    allLets <- mapM updateLet allLets
-    return AllDecls { allOpTypes, allOpDecls, allDatas, allLets }
+    allDatas <- mapM updateData $ allDatas decls
+    allLets <- mapM updateLet $ allLets decls
+    return decls { allDatas, allLets }
     where
       comparePaths :: Meta Path -> Meta Path -> Maybe Ordering
       comparePaths a b =

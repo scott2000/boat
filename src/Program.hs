@@ -32,14 +32,16 @@ type OpTypeEnds = (Maybe (Meta Path), Maybe (Meta Path))
 data AllDecls = AllDecls
   { allOpTypes :: !(Map (Meta Path) (InFile OpTypeEnds))
   , allOpDecls :: !(Map (Meta Path) (InFile OpDecl))
+  , allEffects :: !(Map (Meta Path) (InFile EffectDecl))
   , allDatas :: !(Map (Meta Path) (InFile DataDecl))
   , allLets :: !(Map (Meta Path) (InFile LetDecl)) }
 
 instance Show AllDecls where
-  show AllDecls { allOpTypes, allOpDecls, allDatas, allLets } =
+  show AllDecls { allOpTypes, allOpDecls, allEffects, allDatas, allLets } =
     intercalate "\n"
       [ "op types: " ++ intercalate ", " (map show $ Map.keys allOpTypes)
       , "op decls: " ++ intercalate ", " (map show $ Map.keys allOpDecls)
+      , "effects: " ++ intercalate ", " (map show $ Map.keys allEffects)
       , "datas: " ++ intercalate ", " (map show $ Map.keys allDatas)
       , "lets: " ++ intercalate ", " (map show $ Map.keys allLets) ]
 
@@ -47,6 +49,7 @@ emptyDecls :: AllDecls
 emptyDecls = AllDecls
   { allOpTypes = Map.empty
   , allOpDecls = Map.empty
+  , allEffects = Map.empty
   , allDatas = Map.empty
   , allLets = Map.empty }
 
@@ -57,6 +60,7 @@ data Module = Module
   , modSubs :: !(Map Name [Module])
   , modOpTypes :: ![InFile OpType]
   , modOpDecls :: !(Map (Meta Name) (InFile OpDecl))
+  , modEffects :: !(Map (Meta Name) (InFile EffectDecl))
   , modDatas :: !(Map (Meta Name) (InFile DataDecl))
   , modLets :: !(Map (Meta Name) (InFile LetDecl)) }
 
@@ -66,6 +70,7 @@ instance Show Module where
       , map showMod $ Map.toList $ modSubs mod
       , map showOpType $ reverse $ modOpTypes mod
       , map showOpDecl $ Map.toList $ modOpDecls mod
+      , map showEffect $ Map.toList $ modEffects mod
       , map showData $ Map.toList $ modDatas mod
       , map showLet $ Map.toList $ modLets mod ]
     where
@@ -84,6 +89,10 @@ instance Show Module where
               ANon -> ""
               ALeft -> " <left>"
               ARight -> " <right>"
+      showEffect (name, _ :/: EffectDecl { effectSuper }) =
+        "effect " ++ show name ++ case effectSuper of
+          Nothing -> ""
+          Just super -> " : " ++ show super
       showLet (name, _ :/: LetDecl { letBody }) =
         "let " ++ show name ++ " =" ++ indent (show letBody)
       showData (name, _ :/: DataDecl { dataMod, dataArgs, dataVariants }) =
@@ -99,6 +108,7 @@ defaultModule = Module
   , modSubs = Map.empty
   , modOpTypes = []
   , modOpDecls = Map.empty
+  , modEffects = Map.empty
   , modDatas = Map.empty
   , modLets = Map.empty }
 
@@ -187,6 +197,28 @@ modAddOpDecls names op path mod = do
         , errorMessage = "duplicate operator declaration for name `" ++ show name ++ "`" }
   return mod { modOpDecls = Map.union (Map.fromList newOps) oldOps }
 
+data EffectDecl = EffectDecl
+  { effectSuper :: Maybe (Meta Path) }
+
+modAddEffect
+  :: MonadState CompileState m
+  => Meta Name
+  -> EffectDecl
+  -> FilePath
+  -> Module
+  -> m Module
+modAddEffect name decl path mod = do
+  let
+    oldEffects = modEffects mod
+    newDecl = path :/: decl
+  when (Map.member name oldEffects) $
+    addError CompileError
+      { errorFile = Just path
+      , errorSpan = metaSpan name
+      , errorKind = Error
+      , errorMessage = "duplicate effect declaration for name `" ++ show name ++ "`" }
+  return mod { modEffects = Map.insert name newDecl oldEffects }
+
 data LetDecl = LetDecl
   { letBody :: Meta Expr
   , letConstraints :: [Constraint] }
@@ -220,21 +252,16 @@ data DataDecl = DataDecl
 modAddData
   :: MonadState CompileState m
   => Meta Name
-  -> Bool
-  -> [Meta String]
-  -> [Meta DataVariant]
+  -> DataDecl
   -> FilePath
   -> Module
   -> m Module
-modAddData name isMod args vars path mod = do
+modAddData name decl path mod = do
   let
     oldDatas = modDatas mod
-    newDecl = path :/: DataDecl
-      { dataMod = isMod
-      , dataArgs = args
-      , dataVariants = vars }
+    newDecl = path :/: decl
   when (unmeta name /= Operator "->") $
-    case find ((Operator "->" ==) . unmeta) $ map (fst . unmeta) vars of
+    case find ((Operator "->" ==) . unmeta) $ map (fst . unmeta) $ dataVariants decl of
       Just Meta { metaSpan = arrowSpan } ->
         addError CompileError
           { errorFile = Just path

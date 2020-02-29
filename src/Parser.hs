@@ -40,6 +40,7 @@ parseFile path = parseModule defaultModule
           <|> parseMod
           <|> parseLet
           <|> parseData
+          <|> parseEffect
           <|> parseOperator
 
         parseUse =
@@ -73,6 +74,15 @@ parseFile path = parseModule defaultModule
               (ALeft <$ expectLabel "left")
               <|> (ARight <$ expectLabel "right")
 
+        parseEffect = do
+          keyword "effect"
+          name <- nbsc >> parseMeta parseName
+          maybeSuper <- optional (try nbsc >> specialOp TypeAscription >> blockOf (parseMeta parsePath))
+          let
+            effectDecl = EffectDecl
+              { effectSuper = maybeSuper }
+          modAddEffect name effectDecl path m
+
         parseLet = do
           keyword "let"
           name <- nbsc *> parseMeta parseName <* nbsc
@@ -101,7 +111,13 @@ parseFile path = parseModule defaultModule
             someBetweenLines (parserExpectEnd >>= variantFromType path)
           case (nameAndParams, catMaybes vars) of
             ((Just name, params), vars) ->
-              modAddData name isMod params vars path m
+              let
+                dataDecl = DataDecl
+                  { dataMod = isMod
+                  , dataArgs = params
+                  , dataVariants = vars }
+              in
+                modAddData name dataDecl path m
             _ ->
               return m
 

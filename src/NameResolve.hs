@@ -51,6 +51,7 @@ data Item = Item
   { itemSub :: Maybe NameTable
   , isType :: Bool
   , isValue :: Bool
+  , isEffect :: Bool
   , isPattern :: Bool
   , isOperatorType :: Bool }
   deriving (Show, Ord, Eq)
@@ -60,6 +61,7 @@ instance Semigroup Item where
     { itemSub = itemSub a <> itemSub b
     , isType = isType a || isType b
     , isValue = isValue a || isValue b
+    , isEffect = isEffect a || isEffect b
     , isPattern = isPattern a || isPattern b
     , isOperatorType = isOperatorType a || isOperatorType b }
 
@@ -68,6 +70,7 @@ instance Monoid Item where
     { itemSub = Nothing
     , isType = False
     , isValue = False
+    , isEffect = False
     , isPattern = False
     , isOperatorType = False }
   mappend = (<>)
@@ -89,6 +92,10 @@ typeItem = mempty
 valueItem :: Item
 valueItem = mempty
   { isValue = True }
+
+effectItem :: Item
+effectItem = mempty
+  { isEffect = True }
 
 patternItem :: Item
 patternItem = mempty
@@ -118,8 +125,8 @@ coreNameTable = NameTable
 
 coreUse :: UseModule
 coreUse =
-  UseModule (meta $ Identifier "Core") $
-    UseAll [meta $ UseModule (meta $ Operator "->") $ UseAll []]
+  UseModule (meta $ Identifier "Core") $ UseAll
+    [ meta $ UseModule (meta $ Operator "->") $ UseAll [] ]
 
 toNameTable :: Map Name [Module] -> NameTable
 toNameTable =
@@ -131,6 +138,7 @@ addModule mod nt = nt
   <> foldMap opTypeItem (modOpTypes mod)
   <> convert typeItem (modDatas mod)
   <> convert valueItem (modLets mod)
+  <> convert effectItem (modEffects mod)
   <> foldMap patternsForData (Map.toList $ modDatas mod)
   where
     convert k m =
@@ -276,7 +284,8 @@ addUse path (file :/: useWithMeta) nr =
                         { errorFile = Just file
                         , errorSpan = metaSpan
                         , errorKind = Error
-                        , errorMessage = "cannot import items from `" ++ show subPath ++ "` because it is not a module" }
+                        , errorMessage =
+                          "cannot import items from `" ++ show subPath ++ "` because it is not a module" }
                       nr
             Nothing -> do
               lift $ lift $ addError CompileError
@@ -285,6 +294,34 @@ addUse path (file :/: useWithMeta) nr =
                 , errorKind = Error
                 , errorMessage = "`" ++ show path ++ "` does not contain any items named `" ++ show name ++ "`" }
               nr
+
+duplicateMessage :: (Meta Path, InFile a) -> String -> String
+duplicateMessage (otherPath, otherFile :/: _) baseMessage =
+  case metaSpan otherPath of
+    Just otherSpan ->
+      baseMessage ++ "(other at " ++ otherFile ++ ":" ++ show otherSpan ++ ")"
+    Nothing ->
+      baseMessage ++ "(other in " ++ otherFile ++ ")"
+
+insertEffect :: Meta Path -> InFile EffectDecl -> NR ()
+insertEffect path decl = do
+  s <- get
+  let
+    decls = allDecls s
+    effects = allEffects decls
+  case Map.lookupIndex path effects of
+    Just i ->
+      lift $ lift $ addError CompileError
+        { errorFile = Just $ getFile decl
+        , errorSpan = metaSpan path
+        , errorKind = Error
+        , errorMessage =
+          duplicateMessage (Map.elemAt i effects)
+            ("duplicate effect declaration for path `" ++ show path ++ "`\n") }
+    Nothing ->
+      put s
+        { allDecls = decls
+          { allEffects = Map.insert path decl effects } }
 
 insertData :: Meta Path -> InFile DataDecl -> NR ()
 insertData path decl = do
@@ -299,14 +336,8 @@ insertData path decl = do
         , errorSpan = metaSpan path
         , errorKind = Error
         , errorMessage =
-          let
-            baseMessage = "duplicate data type declaration for path `" ++ show path ++ "`\n"
-            (otherPath, otherFile :/: _) = Map.elemAt i datas
-          in case metaSpan otherPath of
-            Just otherSpan ->
-              baseMessage ++ "(other at " ++ otherFile ++ ":" ++ show otherSpan ++ ")"
-            Nothing ->
-              baseMessage ++ "(other in " ++ otherFile ++ ")" }
+          duplicateMessage (Map.elemAt i datas)
+            ("duplicate data type declaration for path `" ++ show path ++ "`\n") }
     Nothing ->
       put s
         { allDecls = decls
@@ -325,14 +356,8 @@ insertLet path decl = do
         , errorSpan = metaSpan path
         , errorKind = Error
         , errorMessage =
-          let
-            baseMessage = "duplicate let binding for path `" ++ show path ++ "`\n"
-            (otherPath, otherFile :/: _) = Map.elemAt i lets
-          in case metaSpan otherPath of
-            Just otherSpan ->
-              baseMessage ++ "(other at " ++ otherFile ++ ":" ++ show otherSpan ++ ")"
-            Nothing ->
-              baseMessage ++ "(other in " ++ otherFile ++ ")" }
+          duplicateMessage (Map.elemAt i lets)
+            ("duplicate let binding for path `" ++ show path ++ "`\n") }
     Nothing ->
       put s
         { allDecls = decls
@@ -351,14 +376,8 @@ insertOpType path newOp = do
         , errorSpan = metaSpan path
         , errorKind = Error
         , errorMessage =
-          let
-            baseMessage = "duplicate operator type declaration for path `" ++ show path ++ "`\n"
-            (otherPath, otherFile :/: _) = Map.elemAt i ops
-          in case metaSpan otherPath of
-            Just otherSpan ->
-              baseMessage ++ "(other at " ++ otherFile ++ ":" ++ show otherSpan ++ ")"
-            Nothing ->
-              baseMessage ++ "(other in " ++ otherFile ++ ")" }
+          duplicateMessage (Map.elemAt i ops)
+            ("duplicate operator type declaration for path `" ++ show path ++ "`\n") }
     Nothing ->
       put s
         { allDecls = decls
@@ -377,14 +396,8 @@ insertOpDecl path decl = do
         , errorSpan = metaSpan path
         , errorKind = Error
         , errorMessage =
-          let
-            baseMessage = "duplicate operator declaration for path `" ++ show path ++ "`\n"
-            (otherPath, otherFile :/: _) = Map.elemAt i ops
-          in case metaSpan otherPath of
-            Just otherSpan ->
-              baseMessage ++ "(other at " ++ otherFile ++ ":" ++ show otherSpan ++ ")"
-            Nothing ->
-              baseMessage ++ "(other in " ++ otherFile ++ ")" }
+          duplicateMessage (Map.elemAt i ops)
+            ("duplicate operator declaration for path `" ++ show path ++ "`\n") }
     Nothing ->
       put s
         { allDecls = decls
@@ -421,6 +434,7 @@ nameResolveEach path mod =
         forM_ mods $ nameResolveEach (path .|. name)
       mapM_ nameResolveOpType $ modOpTypes mod
       mapM_ nameResolveOpDecl $ Map.toList $ modOpDecls mod
+      mapM_ nameResolveEffect $ Map.toList $ modEffects mod
       mapM_ nameResolveData $ Map.toList $ modDatas mod
       mapM_ nameResolveLet $ Map.toList $ modLets mod
 
@@ -491,6 +505,12 @@ nameResolveEach path mod =
       where
         resPath = nameResolvePath file isOperatorType "an operator type"
         resMetaPath path = forM path $ resPath $ metaSpan path
+
+    nameResolveEffect (name, file :/: EffectDecl { effectSuper }) = do
+      super <- forM effectSuper $ \path ->
+        forM path $ nameResolvePath file isEffect "an effect" $ metaSpan path
+      insertEffect ((path .|.) <$> name) $ file :/: EffectDecl
+        { effectSuper = super }
 
     nameResolveData (name, file :/: decl) = do
       variants <- mapM (mapM nameResolveVariant) $ dataVariants decl

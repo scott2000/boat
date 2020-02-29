@@ -148,7 +148,8 @@ instance After Path where
     return path { unmeta = p }
 
 data Type
-  = TNamed Path
+  = TUnit
+  | TNamed Path
   | TPoly String
   | TAnon Word64
   | TParen (Meta Type)
@@ -179,6 +180,7 @@ instance After Type where
 
 instance Show Type where
   show = \case
+    TUnit -> "()"
     TNamed path -> show path
     TPoly name -> name
     TAnon _ -> "_"
@@ -622,7 +624,7 @@ class ExprLike a where
 
 instance ExprLike Type where
   opKind _ = "type"
-  opUnit = TNamed $ Core $ Identifier "Unit"
+  opUnit = TUnit
   opNamed = TNamed . unmeta
   opParen = TParen
   opUnary = TUnaryOp
