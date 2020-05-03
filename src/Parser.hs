@@ -80,7 +80,9 @@ parseFile path = parseModule defaultModule
           maybeSuper <- optional (try nbsc >> specialOp TypeAscription >> blockOf (parseMeta parsePath))
           let
             effectDecl = EffectDecl
-              { effectSuper = maybeSuper }
+              { effectSuper = case maybeSuper of
+                Nothing -> meta $ Core $ Identifier "Pure"
+                Just super -> super }
           modAddEffect name effectDecl path m
 
         parseLet = do
@@ -291,14 +293,16 @@ parserBase prec current =
               return $ Just $ fail $ show err
 
         opAfterSpace offset parsedOp spaceAfter = do
-          guard (spaceAfter || not spaceBefore)
           let
-            isBacktick =
+            isSpecial =
               case parsedOp of
                 Right InfixOp { infixBacktick = True } -> True
+                Left _ -> True
                 _ -> False
+          guard (spaceAfter || not spaceBefore || isSpecial)
+          let
             opPrec =
-              if spaceAfter || isBacktick then
+              if spaceAfter || isSpecial then
                 normalPrec
               else
                 compactPrec
@@ -350,25 +354,38 @@ metaExtendFail f prec current = do
   next <- parserPrec prec
   metaWithEnds current next <$> eitherToFail (f current next)
 
+localFunctionArrow :: Type
+localFunctionArrow =
+  -- use the unqualified (->) instead of Core.(->) just in case a custom prelude is used
+  TNamed $ Local $ Operator $ "->"
+
 instance Parsable Type where
   parseOne = label "type" $
     parseCapIdent "type" opNamed TPoly
     <|> (keyword "_" >> TAnon <$> getNewAnon)
 
   parseSpecial (span, FunctionArrow) =
-    Just $ metaExtendPrec $ \a b ->
+    Just $ metaExtendPrec $ \lhs rhs ->
       let
-        innerWithoutSpan =
-          -- use the unqualified (->) instead of Core.(->) just in case a custom prelude is used
-          meta $ TApp (metaWithSpan span $ TNamed $ Local $ Operator $ "->") a
-        innerWithSpan =
-          case metaSpan a of
-            Just aSpan ->
-              innerWithoutSpan { metaSpan = Just (aSpan <> span) }
-            Nothing ->
-              innerWithoutSpan
+        arrow = metaWithSpan span localFunctionArrow
+        firstApp = metaWithEnds lhs arrow $ TApp arrow lhs
       in
-        TApp innerWithSpan b
+        TApp firstApp rhs
+  parseSpecial (span, SplitArrow) =
+    Just $ \prec lhs -> do
+      effects <- parseMeta parseEffectSet
+      nbsc
+      (endSpan, _) <- getSpan $ plainOp "|>"
+      nbsc
+      parserPrec prec <&> \rhs ->
+        let
+          arrowSpan = span <> endSpan
+          arrow = metaWithSpan arrowSpan localFunctionArrow
+          withEff = metaWithSpan arrowSpan $ TEff arrow effects
+          firstApp = metaWithEnds lhs withEff $ TApp withEff lhs
+        in
+          metaWithEnds firstApp rhs $ TApp firstApp rhs
+
   parseSpecial _ = Nothing
 
 instance Parsable Expr where

@@ -121,12 +121,14 @@ coreNameTable :: NameTable
 coreNameTable = NameTable
   { getNameTable = Map.fromList
     [ (Identifier "Core", modItem $ NameTable $ Map.fromList
-      [ (Operator "->", typeItem) ]) ] }
+      [ (Operator "->", typeItem)
+      , (Identifier "Pure", effectItem) ]) ] }
 
 coreUse :: UseModule
 coreUse =
   UseModule (meta $ Identifier "Core") $ UseAll
-    [ meta $ UseModule (meta $ Operator "->") $ UseAll [] ]
+    [ meta $ UseModule (meta $ Operator "->") $ UseAll []
+    , meta $ UseModule (meta $ Identifier "Pure") $ UseAll [] ]
 
 toNameTable :: Map Name [Module] -> NameTable
 toNameTable =
@@ -507,8 +509,8 @@ nameResolveEach path mod =
         resMetaPath path = forM path $ resPath $ metaSpan path
 
     nameResolveEffect (name, file :/: EffectDecl { effectSuper }) = do
-      super <- forM effectSuper $ \path ->
-        forM path $ nameResolvePath file isEffect "an effect" $ metaSpan path
+      super <-
+        forM effectSuper $ nameResolvePath file isEffect "an effect" $ metaSpan effectSuper
       insertEffect ((path .|.) <$> name) $ file :/: EffectDecl
         { effectSuper = super }
 

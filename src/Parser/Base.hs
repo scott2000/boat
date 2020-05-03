@@ -299,6 +299,7 @@ instance Show ReservedOp where
 data SpecialOp
   = Assignment
   | FunctionArrow
+  | SplitArrow
   | TypeAscription
   deriving Eq
 
@@ -306,6 +307,7 @@ instance Show SpecialOp where
   show = \case
     Assignment     -> "="
     FunctionArrow  -> "->"
+    SplitArrow     -> "-|"
     TypeAscription -> ":"
 
 type PlainOp = String
@@ -340,18 +342,26 @@ anyOperator = do
       "|"  -> ReservedOp PipeSeparator
       "="  -> NonReservedOp $ SpecialOp Assignment
       "->" -> NonReservedOp $ SpecialOp FunctionArrow
+      "-|" -> NonReservedOp $ SpecialOp SplitArrow
       ":"  -> NonReservedOp $ SpecialOp TypeAscription
       _    -> NonReservedOp $ PlainOp op
 
-reservedOp :: ReservedOp -> Parser ()
-reservedOp expected = label (show $ show expected) $ try $ do
+anySpecificOp :: AnyOperator -> Parser ()
+anySpecificOp expected = label (show $ show expected) $ try $ do
   offset <- getOffset
-  anyOperator >>= \case
-    ReservedOp op | op == expected ->
-      return ()
-    op -> do
-      setOffset offset
-      unexpectedStr $ show op
+  op <- anyOperator
+  when (op /= expected) $ do
+    setOffset offset
+    unexpectedStr $ show op
+
+reservedOp :: ReservedOp -> Parser ()
+reservedOp = anySpecificOp . ReservedOp
+
+specialOp :: SpecialOp -> Parser ()
+specialOp = anySpecificOp . NonReservedOp . SpecialOp
+
+plainOp :: PlainOp -> Parser ()
+plainOp = anySpecificOp . NonReservedOp . PlainOp
 
 nonReservedOp :: Parser NonReservedOp
 nonReservedOp = label "operator" $ try $ do
@@ -362,16 +372,6 @@ nonReservedOp = label "operator" $ try $ do
       unexpectedStr $ show op
     NonReservedOp op ->
       return op
-
-specialOp :: SpecialOp -> Parser ()
-specialOp expected = label (show $ show expected) $ try $ do
-  offset <- getOffset
-  nonReservedOp >>= \case
-    SpecialOp op | op == expected ->
-      return ()
-    op -> do
-      setOffset offset
-      unexpectedStr $ show op
 
 plainOrArrowOp :: Parser PlainOp
 plainOrArrowOp = label "operator" $ try $ do

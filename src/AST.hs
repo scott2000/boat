@@ -84,18 +84,9 @@ instance After EffectSet where
       EffectSet <$> Set.fromList <$> mapM (aEffect m) (Set.toList setEffects)
 
 instance Show EffectSet where
-  show =
-    intercalate " + " . map show . Set.toList . setEffects
-
-showEffectSetOrPure :: EffectSet -> String
-showEffectSetOrPure set
-  | Set.null $ setEffects set = "pure"
-  | otherwise                 = show set
-
-showEffectInPipes :: EffectSet -> String
-showEffectInPipes set
-  | Set.null $ setEffects set = ""
-  | otherwise                 = " |" ++ show set ++ "|"
+  show EffectSet { setEffects }
+    | Set.null setEffects = "Pure"
+    | otherwise = intercalate " + " $ map show $ Set.toList setEffects
 
 data Effect
   = EffectNamed Path
@@ -195,6 +186,8 @@ instance Show Type where
       "{" ++ show op ++ " " ++ show lhs ++ " " ++ show rhs ++ "}"
     TApp a b ->
       "(" ++ show a ++ " " ++ show b ++ ")"
+    TEff ty eff ->
+      show ty ++ " |" ++ show eff ++ "|"
 
 reduceApply :: Meta Type -> Either (Meta Path, Meta Path) (Meta Type, [Meta Type])
 reduceApply typeWithMeta =
@@ -225,6 +218,9 @@ pattern DefaultMeta x <- Meta { unmeta = x }
 
 pattern TFuncArrow :: Type
 pattern TFuncArrow = TNamed (Core (Operator "->"))
+
+pattern EffectPure :: Type
+pattern EffectPure = TNamed (Core (Identifier "Pure"))
 
 pattern TFunc :: Meta Type -> Meta Type -> Type
 pattern TFunc a b =

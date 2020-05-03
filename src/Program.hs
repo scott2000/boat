@@ -90,9 +90,7 @@ instance Show Module where
               ALeft -> " <left>"
               ARight -> " <right>"
       showEffect (name, _ :/: EffectDecl { effectSuper }) =
-        "effect " ++ show name ++ case effectSuper of
-          Nothing -> ""
-          Just super -> " : " ++ show super
+        "effect " ++ show name ++ " : " ++ show effectSuper
       showLet (name, _ :/: LetDecl { letBody }) =
         "let " ++ show name ++ " =" ++ indent (show letBody)
       showData (name, _ :/: DataDecl { dataMod, dataArgs, dataVariants }) =
@@ -198,7 +196,7 @@ modAddOpDecls names op path mod = do
   return mod { modOpDecls = Map.union (Map.fromList newOps) oldOps }
 
 data EffectDecl = EffectDecl
-  { effectSuper :: Maybe (Meta Path) }
+  { effectSuper :: Meta Path }
 
 modAddEffect
   :: MonadState CompileState m
