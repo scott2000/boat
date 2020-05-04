@@ -175,7 +175,7 @@ instance Show Type where
     TNamed path -> show path
     TPoly name -> name
     TAnon _ -> "_"
-    TParen ty -> show ty
+    TParen ty -> "{" ++ show ty ++ "}"
     TUnaryOp Meta { unmeta = Path [Unary op] } ty ->
       "{" ++ op ++ show ty ++ "}"
     TUnaryOp op ty ->
@@ -184,6 +184,10 @@ instance Show Type where
       "{" ++ show lhs ++ " " ++ op ++ " " ++ show rhs ++ "}"
     TBinOp op lhs rhs ->
       "{" ++ show op ++ " " ++ show lhs ++ " " ++ show rhs ++ "}"
+    TApp Meta { unmeta = TApp Meta { unmeta = TEff Meta { unmeta = TFuncArrow } effs } a } b ->
+      "(" ++ show a ++ " -|" ++ show effs ++ "|> " ++ show b ++ ")"
+    TApp Meta { unmeta = TApp Meta { unmeta = TFuncArrow } a } b ->
+      "(" ++ show a ++ " -> " ++ show b ++ ")"
     TApp a b ->
       "(" ++ show a ++ " " ++ show b ++ ")"
     TEff ty eff ->
@@ -333,7 +337,7 @@ instance Show Expr where
     EIndex 0 Nothing -> "?"
     EIndex n Nothing -> "?" ++ show n
     EIndex _ (Just name) -> name
-    EParen expr -> show expr
+    EParen expr -> "{" ++ show expr ++ "}"
     EUnaryOp Meta { unmeta = Path [Unary op] } expr ->
       "{" ++ op ++ show expr ++ "}"
     EUnaryOp op expr ->
@@ -372,6 +376,7 @@ showCases _ cases = "\n  " ++ intercalate "\n  " (map showCase cases)
 showCase :: MatchCase -> String
 showCase (pats, expr) = intercalate " " (map show pats) ++ " ->" ++ indent (show expr)
 
+-- TODO: rewrite using `After`
 toDeBruijn :: Meta Expr -> Meta Expr
 toDeBruijn = fmap $ \case
   EValue val ->
@@ -465,6 +470,7 @@ instance Show Pattern where
     PAny -> "_"
     PBind Nothing -> "?"
     PBind (Just name) -> name
+    PParen pat -> "{" ++ show pat ++ "}"
     PUnaryOp Meta { unmeta = Path [Unary op] } pat ->
       "{" ++ op ++ show pat ++ "}"
     PUnaryOp op pat ->
@@ -615,8 +621,12 @@ class ExprLike a where
   opUnary :: Meta Path -> Meta a -> a
   opBinary :: Meta Path -> Meta a -> Meta a -> a
   opApply :: Meta a -> Meta a -> Either String a
+
   opSeq :: Maybe (Meta a -> Meta a -> a)
   opSeq = Nothing
+
+  opEffectApply :: Maybe (Meta a -> Meta EffectSet -> a)
+  opEffectApply = Nothing
 
 instance ExprLike Type where
   opKind _ = "type"
@@ -626,6 +636,7 @@ instance ExprLike Type where
   opUnary = TUnaryOp
   opBinary = TBinOp
   opApply a b = Right $ TApp a b
+  opEffectApply = Just TEff
 
 instance ExprLike Expr where
   opKind _ = "expression"

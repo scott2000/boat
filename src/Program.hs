@@ -27,6 +27,15 @@ instance Eq a => Eq (InFile a) where
 instance Show a => Show (InFile a) where
   show (_ :/: x) = show x
 
+class ShowWithName a where
+  showWithName :: String -> a -> String
+
+showDecl :: (ShowWithName a, Show s) => (s, InFile a) -> String
+showDecl (name, _ :/: decl) = showWithName (show name) decl
+
+showDeclMap :: (ShowWithName a, Show s) => Map s (InFile a) -> [String]
+showDeclMap = map showDecl . Map.toList
+
 type OpTypeEnds = (Maybe (Meta Path), Maybe (Meta Path))
 
 data AllDecls = AllDecls
@@ -38,12 +47,24 @@ data AllDecls = AllDecls
 
 instance Show AllDecls where
   show AllDecls { allOpTypes, allOpDecls, allEffects, allDatas, allLets } =
-    intercalate "\n"
-      [ "op types: " ++ intercalate ", " (map show $ Map.keys allOpTypes)
-      , "op decls: " ++ intercalate ", " (map show $ Map.keys allOpDecls)
-      , "effects: " ++ intercalate ", " (map show $ Map.keys allEffects)
-      , "datas: " ++ intercalate ", " (map show $ Map.keys allDatas)
-      , "lets: " ++ intercalate ", " (map show $ Map.keys allLets) ]
+    intercalate "\n" $ concat
+      [ map showOpType $ Map.toList allOpTypes
+      , showDeclMap allOpDecls
+      , showDeclMap allEffects
+      , showDeclMap allDatas
+      , showDeclMap allLets ]
+    where
+      showOpType (path, _ :/: (left, right)) =
+        "operator type " ++ leftStr ++ show path ++ rightStr
+        where
+          leftStr =
+            case left of
+              Nothing -> ""
+              Just lowerBound -> "(" ++ show lowerBound ++ ") < "
+          rightStr =
+            case right of
+              Nothing -> ""
+              Just upperBound -> " < (" ++ show upperBound ++ ")"
 
 emptyDecls :: AllDecls
 emptyDecls = AllDecls
@@ -65,14 +86,15 @@ data Module = Module
   , modLets :: !(Map (Meta Name) (InFile LetDecl)) }
 
 instance Show Module where
-  show mod = intercalate "\n" $ concat
-      [ map showUse $ reverse $ modUses mod
-      , map showMod $ Map.toList $ modSubs mod
-      , map showOpType $ reverse $ modOpTypes mod
-      , map showOpDecl $ Map.toList $ modOpDecls mod
-      , map showEffect $ Map.toList $ modEffects mod
-      , map showData $ Map.toList $ modDatas mod
-      , map showLet $ Map.toList $ modLets mod ]
+  show Module { modUses, modSubs, modOpTypes, modOpDecls, modEffects, modDatas, modLets } =
+    intercalate "\n" $ concat
+      [ map showUse $ reverse modUses
+      , map showMod $ Map.toList modSubs
+      , map showOpType $ reverse modOpTypes
+      , showDeclMap modOpDecls
+      , showDeclMap modEffects
+      , showDeclMap modDatas
+      , showDeclMap modLets ]
     where
       showUse use =
         "use " ++ show use
@@ -81,24 +103,6 @@ instance Show Module where
           "mod " ++ show name ++ " =" ++ indent (show mod)
       showOpType (_ :/: ops) =
         "operator type " ++ intercalate " < " (map show ops)
-      showOpDecl (name, _ :/: op) =
-        "operator" ++ assoc ++ " " ++ show name ++ " : " ++ show (opType op)
-        where
-          assoc =
-            case opAssoc op of
-              ANon -> ""
-              ALeft -> " <left>"
-              ARight -> " <right>"
-      showEffect (name, _ :/: EffectDecl { effectSuper }) =
-        "effect " ++ show name ++ " : " ++ show effectSuper
-      showLet (name, _ :/: LetDecl { letBody }) =
-        "let " ++ show name ++ " =" ++ indent (show letBody)
-      showData (name, _ :/: DataDecl { dataMod, dataArgs, dataVariants }) =
-        let mod = if dataMod then "mod " else "" in
-        "data " ++ mod ++ unwords (show name : map unmeta dataArgs)
-        ++ " =" ++ indent (intercalate "\n" (map (showVariant . unmeta) dataVariants))
-      showVariant (name, types) =
-        show name ++ " " ++ unwords (map show types)
 
 defaultModule :: Module
 defaultModule = Module
@@ -174,6 +178,16 @@ data OpDecl = OpDecl
   { opAssoc :: Associativity
   , opType :: Meta Path }
 
+instance ShowWithName OpDecl where
+  showWithName name op =
+    "operator" ++ assoc ++ " " ++ name ++ " : " ++ show (opType op)
+    where
+      assoc =
+        case opAssoc op of
+          ANon -> ""
+          ALeft -> " <left>"
+          ARight -> " <right>"
+
 modAddOpDecls
   :: MonadState CompileState m
   => [Meta Name]
@@ -198,6 +212,10 @@ modAddOpDecls names op path mod = do
 data EffectDecl = EffectDecl
   { effectSuper :: Meta Path }
 
+instance ShowWithName EffectDecl where
+  showWithName name EffectDecl { effectSuper } =
+    "effect " ++ name ++ " : " ++ show effectSuper
+
 modAddEffect
   :: MonadState CompileState m
   => Meta Name
@@ -220,6 +238,10 @@ modAddEffect name decl path mod = do
 data LetDecl = LetDecl
   { letBody :: Meta Expr
   , letConstraints :: [Constraint] }
+
+instance ShowWithName LetDecl where
+  showWithName name LetDecl { letBody } =
+    "let " ++ name ++ " =" ++ indent (show letBody)
 
 modAddLet
   :: MonadState CompileState m
@@ -246,6 +268,15 @@ data DataDecl = DataDecl
   { dataMod :: Bool
   , dataArgs :: [Meta String]
   , dataVariants :: [Meta DataVariant] }
+
+instance ShowWithName DataDecl where
+  showWithName name DataDecl { dataMod, dataArgs, dataVariants } =
+    let mod = if dataMod then "mod " else "" in
+    "data " ++ mod ++ unwords (name : map unmeta dataArgs)
+    ++ " =" ++ indent (intercalate "\n" (map (showVariant . unmeta) dataVariants))
+    where
+      showVariant (name, types) =
+        show name ++ " " ++ unwords (map show types)
 
 modAddData
   :: MonadState CompileState m

@@ -203,8 +203,25 @@ paren =
     emptyParen = opUnit <$ char ')'
     fullParen = opParen <$> blockOf parser <* spaces <* char ')'
 
+parserNoEffects :: Parsable a => Parser (Meta a)
+parserNoEffects = parseMeta parseOne <|> hidden paren
+
 parserNoPrefix :: Parsable a => Parser (Meta a)
-parserNoPrefix = parseMeta parseOne <|> hidden paren
+parserNoPrefix = do
+  term <- parserNoEffects
+  case opEffectApply of
+    Nothing -> return term
+    Just eApply -> tryEffect eApply term <|> return term
+  where
+    tryEffect eApply term = try $ do
+      nbsc
+      reservedOp PipeSeparator
+      nbsc
+      effects <- parseMeta parseEffectSet
+      nbsc
+      end <- parseMeta $ reservedOp PipeSeparator
+      return $ metaWithEnds term end $ eApply term effects
+
 
 parserPartial :: Parsable a => Parser (Meta a)
 parserPartial = hidden parsePrefix <|> parserNoPrefix

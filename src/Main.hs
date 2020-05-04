@@ -1,7 +1,6 @@
 module Main where
 
 import Basics
-import AST
 import Program
 import ErrorPrint
 import Parser
@@ -14,7 +13,6 @@ import System.IO (readFile)
 import System.Exit (exitFailure)
 
 import Data.List (sort, intercalate)
-import qualified Data.Map as Map
 import Text.Megaparsec (runParserT)
 import Control.Monad.State.Strict
 import Options.Applicative as Opt
@@ -78,9 +76,7 @@ startCompile = do
 
   allDecls <- assocOps allDecls
   exitIfErrors
-  lift $ forM_ (Map.toList $ allLets allDecls) $
-    \(name, _ :/: LetDecl { letBody }) ->
-      putStrLn ("\n" ++ show name ++ " =" ++ indent (show letBody))
+  lift $ putStrLn $ "\nFully resolved and associated:\n\n" ++ show allDecls
 
   finishAndCheckErrors
 

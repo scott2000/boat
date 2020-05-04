@@ -637,12 +637,15 @@ nameResolveType file = go
           TBinOp <$> resMetaPath op <*> go a <*> go b
         TApp a b ->
           TApp <$> go a <*> go b
+        TEff ty eff ->
+          TEff <$> go ty <*> pure eff -- TODO name resolve effects
         other ->
           return other
       where
         resPath = nameResolvePath file isType "a type"
         resMetaPath path = forM path $ resPath $ metaSpan path
 
+-- TODO convert to use `After`!
 nameResolveExpr :: Path -> FilePath -> Meta Expr -> NR (Meta Expr)
 nameResolveExpr path file = go
   where
