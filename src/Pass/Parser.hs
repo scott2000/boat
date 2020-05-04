@@ -141,7 +141,7 @@ parseConstraint =
 
 parseEffectSet :: Parser EffectSet
 parseEffectSet = do
-  effects <- parseSomeSeparatedList '+' parseEffect
+  effects <- parseSomeSeparatedList '+' (parseMeta parseEffect)
   return EffectSet { setEffects = Set.fromList effects }
 
 parseEffect :: Parser Effect

@@ -540,10 +540,10 @@ nameResolveEach path mod =
             , letConstraints = [] }
       where
         nameResolveVariant (name, types) =
-          (,) name <$> mapM (nameResolveType file) types
+          (,) name <$> mapM (nameResolveAfter path file) types
 
     nameResolveLet (name, file :/: decl) = do
-      body <- nameResolveExpr path file $ letBody decl
+      body <- nameResolveAfter path file $ letBody decl
       insertLet ((path .|.) <$> name) $ file :/: decl
         { letBody = body }
 
@@ -622,83 +622,20 @@ nameResolvePath file check kind span path@(Path parts@(head:rest)) = do
     notFound = pathErr $
       "cannot find `" ++ show path ++ "` in scope, did you forget to `use` it?"
 
-nameResolveType :: FilePath -> Meta Type -> NR (Meta Type)
-nameResolveType file = go
+nameResolveAfter :: After a => Path -> FilePath -> Meta a -> NR (Meta a)
+nameResolveAfter basePath file = after aDefault
+  { aUseExpr = handleUseExpr
+  , aPath = updatePath }
   where
-    go ty =
-      forM ty $ \case
-        TNamed path ->
-          TNamed <$> resPath (metaSpan ty) path
-        TParen ty ->
-          TParen <$> go ty
-        TUnaryOp op ty ->
-          TUnaryOp <$> resMetaPath op <*> go ty
-        TBinOp op a b ->
-          TBinOp <$> resMetaPath op <*> go a <*> go b
-        TApp a b ->
-          TApp <$> go a <*> go b
-        TEff ty eff ->
-          TEff <$> go ty <*> pure eff -- TODO name resolve effects
-        other ->
-          return other
-      where
-        resPath = nameResolvePath file isType "a type"
-        resMetaPath path = forM path $ resPath $ metaSpan path
+    handleUseExpr m use expr =
+      addUse basePath (file :/: use) $ unmeta <$> after m expr
 
--- TODO convert to use `After`!
-nameResolveExpr :: Path -> FilePath -> Meta Expr -> NR (Meta Expr)
-nameResolveExpr path file = go
-  where
-    go expr =
-      forM expr $ \case
-        EValue (VFun cases) ->
-          EValue . VFun <$> nameResolveCases cases
-        EGlobal path ->
-          EGlobal <$> resPath (metaSpan expr) path
-        EParen expr ->
-          EParen <$> go expr
-        EUnaryOp op expr ->
-          EUnaryOp <$> resMetaPath op <*> go expr
-        EBinOp op a b ->
-          EBinOp <$> resMetaPath op <*> go a <*> go b
-        EApp a b ->
-          EApp <$> go a <*> go b
-        ESeq a b ->
-          ESeq <$> go a <*> go b
-        ELet pat val expr ->
-          ELet <$> nameResolvePat path file pat <*> go val <*> go expr
-        EMatchIn exprs cases ->
-          EMatchIn <$> mapM go exprs <*> nameResolveCases cases
-        EUse use expr ->
-          addUse path (file :/: use) $ unmeta <$> go expr
-        ETypeAscribe expr ty ->
-          ETypeAscribe <$> go expr <*> nameResolveType file ty
-        other ->
-          return other
+    updatePath k path = nameResolvePath file kIs kStr (metaSpan path) (unmeta path)
       where
-        resPath = nameResolvePath file isValue "a value"
-        resMetaPath path = forM path $ resPath $ metaSpan path
-        nameResolveCases cases =
-          forM cases $ \(pats, expr) ->
-            (,) <$> mapM (nameResolvePat path file) pats <*> go expr
+        (kIs, kStr) =
+          case k of
+            KValue -> (isValue, "a value")
+            KPattern -> (isPattern, "a pattern")
+            KType -> (isType, "a type")
+            KEffect -> (isEffect, "an effect")
 
-nameResolvePat :: Path -> FilePath -> Meta Pattern -> NR (Meta Pattern)
-nameResolvePat path file = go
-  where
-    go pat =
-      forM pat $ \case
-        PParen pat ->
-          PParen <$> go pat
-        PUnaryOp op pat ->
-          PUnaryOp <$> resMetaPath op <*> go pat
-        PBinOp op a b ->
-          PBinOp <$> resMetaPath op <*> go a <*> go b
-        PCons path pats ->
-          PCons <$> resMetaPath path <*> mapM go pats
-        PTypeAscribe pat ty ->
-          PTypeAscribe <$> go pat <*> nameResolveType file ty
-        other ->
-          return other
-      where
-        resPath = nameResolvePath file isPattern "a pattern"
-        resMetaPath path = forM path $ resPath $ metaSpan path

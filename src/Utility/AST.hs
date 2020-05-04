@@ -48,22 +48,30 @@ metaWithEnds
   = (meta x) { metaSpan = Just (span0 <> span1) }
 metaWithEnds _ _ x = meta x
 
+data ExprKind
+  = KValue
+  | KPattern
+  | KType
+  | KEffect
+
 data AfterMap m = AfterMap
   { aExpr :: Meta Expr -> m (Meta Expr)
+  , aUseExpr :: AfterMap m -> Meta UseModule -> Meta Expr -> m Expr
   , aPattern :: Meta Pattern -> m (Meta Pattern)
   , aType :: Meta Type -> m (Meta Type)
-  , aEffect :: Effect -> m Effect
-  , aPath :: Meta Path -> m Path }
+  , aEffect :: Meta Effect -> m (Meta Effect)
+  , aPath :: ExprKind -> Meta Path -> m Path }
 
-aDefault :: Applicative m => AfterMap m
+aDefault :: Monad m => AfterMap m
 aDefault = AfterMap
   { aExpr = pure
+  , aUseExpr = \m use expr -> EUse use <$> after m expr
   , aPattern = pure
   , aType = pure
   , aEffect = pure
-  , aPath = pure . unmeta }
+  , aPath = const (pure . unmeta) }
 
-aContainsOp :: Applicative m
+aContainsOp :: Monad m
             => (forall a. ContainsOp a => Meta a -> m (Meta a))
             -> AfterMap m
 aContainsOp f = aDefault
@@ -74,14 +82,19 @@ aContainsOp f = aDefault
 class After a where
   after :: Monad m => AfterMap m -> Meta a -> m (Meta a)
 
+afterPath :: Monad m => AfterMap m -> ExprKind -> Meta Path -> m (Meta Path)
+afterPath m k path = do
+  p <- aPath m k path
+  return path { unmeta = p }
+
 newtype EffectSet = EffectSet
-  { setEffects :: Set Effect }
+  { setEffects :: Set (Meta Effect) }
   deriving (Ord, Eq)
 
 instance After EffectSet where
   after m =
     mapM $ \EffectSet { setEffects } ->
-      EffectSet <$> Set.fromList <$> mapM (aEffect m) (Set.toList setEffects)
+      EffectSet <$> Set.fromList <$> mapM (after m) (Set.toList setEffects)
 
 instance Show EffectSet where
   show EffectSet { setEffects }
@@ -93,6 +106,15 @@ data Effect
   | EffectPoly String
   | EffectAnon Word64
   deriving (Ord, Eq)
+
+instance After Effect where
+  after m x = do
+    x' <- aEffect m x
+    forM x' $ \case
+      EffectNamed path ->
+        EffectNamed <$> aPath m KEffect (path <$ x')
+      other ->
+        return other
 
 instance Show Effect where
   show = \case
@@ -133,11 +155,6 @@ instance Show UseContents where
     UseAll rest ->
       " (" ++ intercalate ", " (map show rest) ++ ")"
 
-instance After Path where
-  after m path = do
-    p <- aPath m path
-    return path { unmeta = p }
-
 data Type
   = TUnit
   | TNamed Path
@@ -155,13 +172,13 @@ instance After Type where
     x' <- aType m x
     forM x' $ \case
       TNamed path ->
-        TNamed <$> aPath m (path <$ x')
+        TNamed <$> aPath m KType (path <$ x')
       TParen a ->
         TParen <$> after m a
       TUnaryOp path a ->
-        TUnaryOp <$> after m path <*> after m a
+        TUnaryOp <$> afterPath m KType path <*> after m a
       TBinOp path a b ->
-        TBinOp <$> after m path <*> after m a <*> after m b
+        TBinOp <$> afterPath m KType path <*> after m a <*> after m b
       TApp a b ->
         TApp <$> after m a <*> after m b
       TEff a e ->
@@ -276,13 +293,13 @@ instance After Expr where
       EValue (VFun cases) ->
         EValue . VFun <$> afterCases cases
       EGlobal path ->
-        EGlobal <$> aPath m (path <$ x')
+        EGlobal <$> aPath m KValue (path <$ x')
       EParen a ->
         EParen <$> after m a
       EUnaryOp path a ->
-        EUnaryOp <$> after m path <*> after m a
+        EUnaryOp <$> afterPath m KValue path <*> after m a
       EBinOp path a b ->
-        EBinOp <$> after m path <*> after m a <*> after m b
+        EBinOp <$> afterPath m KValue path <*> after m a <*> after m b
       EApp a b ->
         EApp <$> after m a <*> after m b
       ESeq a b ->
@@ -291,12 +308,12 @@ instance After Expr where
         ELet <$> after m pat <*> after m val <*> after m expr
       EMatchIn exprs cases ->
         EMatchIn <$> mapM (after m) exprs <*> afterCases cases
-      EUse o a ->
-        EUse o <$> after m a
+      EUse use a ->
+        aUseExpr m m use a
       ETypeAscribe a ty ->
         ETypeAscribe <$> after m a <*> after m ty
       EDataCons path name exprs -> do
-        p <- aPath m (path <$ x')
+        p <- aPath m KValue (path <$ x')
         s <- mapM (after m) exprs
         return $ EDataCons p name s
       other ->
@@ -376,55 +393,18 @@ showCases _ cases = "\n  " ++ intercalate "\n  " (map showCase cases)
 showCase :: MatchCase -> String
 showCase (pats, expr) = intercalate " " (map show pats) ++ " ->" ++ indent (show expr)
 
--- TODO: rewrite using `After`
-toDeBruijn :: Meta Expr -> Meta Expr
-toDeBruijn = fmap $ \case
-  EValue val ->
-    EValue $ toDeBruijnVal val
-  EGlobal name ->
-    EGlobal name
-  EIndex index _ ->
-    EIndex index Nothing
-  EParen expr ->
-    EParen $ toDeBruijn expr
-  EUnaryOp op expr ->
-    EUnaryOp op $ toDeBruijn expr
-  EBinOp op lhs rhs ->
-    EBinOp op (toDeBruijn lhs) (toDeBruijn rhs)
-  EApp a b ->
-    EApp (toDeBruijn a) (toDeBruijn b)
-  ESeq a b ->
-    ESeq (toDeBruijn a) (toDeBruijn b)
-  ELet p v e ->
-    ELet (toDeBruijnPat p) (toDeBruijn v) (toDeBruijn e)
-  EMatchIn exprs cases ->
-    EMatchIn (map toDeBruijn exprs) $ map toDeBruijnCase cases
-  EUse u e ->
-    EUse u $ toDeBruijn e
-  ETypeAscribe expr ty ->
-    ETypeAscribe (toDeBruijn expr) ty
-  EDataCons path name exprs ->
-    EDataCons path name $ map toDeBruijn exprs
+toDeBruijnAfter :: After a => Meta a -> Meta a
+toDeBruijnAfter = runIdentity . after aDefault
+  { aExpr = pure . updateExpr
+  , aPattern = pure . updatePattern }
   where
-    toDeBruijnVal = \case
-      VFun cases ->
-        VFun $ map toDeBruijnCase cases
+    updateExpr = fmap $ \case
+      EIndex index (Just _) -> EIndex index Nothing
       other -> other
-    toDeBruijnCase (pats, expr) = (map toDeBruijnPat pats, toDeBruijn expr)
-    toDeBruijnPat = fmap $ \case
-      PUnit -> PUnit
-      PAny -> PAny
-      PBind _ -> PBind Nothing
-      PParen pat ->
-        PParen $ toDeBruijnPat pat
-      PUnaryOp op pat ->
-        PUnaryOp op $ toDeBruijnPat pat
-      PBinOp op lhs rhs ->
-        PBinOp op (toDeBruijnPat lhs) (toDeBruijnPat rhs)
-      PCons name pats ->
-        PCons name $ map toDeBruijnPat pats
-      PTypeAscribe pat ty ->
-        PTypeAscribe (toDeBruijnPat pat) ty
+
+    updatePattern = fmap $ \case
+      PBind (Just _) -> PBind Nothing
+      other -> other
 
 data Pattern
   = PUnit
@@ -443,11 +423,11 @@ instance After Pattern where
       PParen a ->
         PParen <$> after m a
       PUnaryOp path a ->
-        PUnaryOp <$> after m path <*> after m a
+        PUnaryOp <$> afterPath m KPattern path <*> after m a
       PBinOp path a b ->
-        PBinOp <$> after m path <*> after m a <*> after m b
+        PBinOp <$> afterPath m KPattern path <*> after m a <*> after m b
       PCons path xs ->
-        PCons <$> after m path <*> mapM (after m) xs
+        PCons <$> afterPath m KPattern path <*> mapM (after m) xs
       PTypeAscribe a ty ->
         PTypeAscribe <$> after m a <*> after m ty
       other ->
@@ -508,9 +488,6 @@ extractLocalName _ = Nothing
 extractLocalPath :: Path -> Maybe String
 extractLocalPath (Path [name]) = extractLocalName name
 extractLocalPath _ = Nothing
-
-idPath :: Monad m => Meta Path -> m Path
-idPath = return . unmeta
 
 type Associator m = forall t. ContainsOp t => [UnOpOrExpr t] -> m (Meta t)
 
