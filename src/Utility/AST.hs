@@ -1,6 +1,6 @@
-module AST where
+module Utility.AST where
 
-import Basics
+import Utility.Basics
 
 import Data.Word
 import Data.List

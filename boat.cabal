@@ -14,15 +14,15 @@ cabal-version:       >=1.10
 executable boat
   ghc-options:         -Wunused-imports
   main-is:             Main.hs
-  other-modules:       Basics,
-                       AST,
-                       Program,
-                       AssocOps,
-                       ErrorPrint,
-                       NameResolve,
-                       Parser,
-                       Parser.Base,
-                       TopSort
+  other-modules:       Utility.Basics,
+                       Utility.ErrorPrint,
+                       Utility.TopSort,
+                       Utility.AST,
+                       Utility.Program,
+                       Utility.Parser,
+                       Pass.Parser,
+                       Pass.NameResolve,
+                       Pass.AssocOps
   default-extensions:  FlexibleContexts,
                        FlexibleInstances,
                        NamedFieldPuns,

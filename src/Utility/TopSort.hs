@@ -1,4 +1,4 @@
-module TopSort (SCC (..), topSortSet, topSortMap) where
+module Utility.TopSort (SCC (..), topSortSet, topSortMap) where
 
 import Data.Graph (SCC (..), stronglyConnComp)
 import Data.Set (Set)

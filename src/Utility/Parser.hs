@@ -1,7 +1,7 @@
-module Parser.Base where
+module Utility.Parser where
 
-import Basics
-import AST
+import Utility.Basics
+import Utility.AST
 
 import Text.Megaparsec hiding (State)
 import Text.Megaparsec.Char

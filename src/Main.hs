@@ -1,11 +1,12 @@
 module Main where
 
-import Basics
-import Program
-import ErrorPrint
-import Parser
-import NameResolve
-import AssocOps
+import Utility.Basics
+import Utility.ErrorPrint
+import Utility.Program
+import Utility.Parser
+import Pass.Parser
+import Pass.NameResolve
+import Pass.AssocOps
 
 import System.FilePath
 import System.Directory

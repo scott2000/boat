@@ -1,7 +1,7 @@
-module Program where
+module Utility.Program where
 
-import Basics
-import AST
+import Utility.Basics
+import Utility.AST
 
 import Data.List
 import Data.Maybe

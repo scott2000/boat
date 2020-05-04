@@ -1,4 +1,4 @@
-module Basics where
+module Utility.Basics where
 
 import Data.Char
 import Data.Word

@@ -1,6 +1,6 @@
-module ErrorPrint (exitIfErrors, finishAndCheckErrors, addFatal) where
+module Utility.ErrorPrint (exitIfErrors, finishAndCheckErrors, addFatal) where
 
-import Basics
+import Utility.Basics
 
 import System.IO (readFile)
 import System.Exit (exitFailure)

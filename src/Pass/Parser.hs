@@ -1,9 +1,9 @@
-module Parser (module Parser.Base, Parsable (..), parseFile) where
+module Pass.Parser (Parsable (..), parseFile) where
 
-import Basics
-import AST
-import Program
-import Parser.Base
+import Utility.Basics
+import Utility.AST
+import Utility.Program
+import Utility.Parser
 
 import Text.Megaparsec
 import Text.Megaparsec.Char

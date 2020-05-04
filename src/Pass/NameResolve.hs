@@ -1,8 +1,8 @@
-module NameResolve (nameResolve) where
+module Pass.NameResolve (nameResolve) where
 
-import Basics
-import AST
-import Program
+import Utility.Basics
+import Utility.AST
+import Utility.Program
 
 import Data.List
 import Data.Foldable

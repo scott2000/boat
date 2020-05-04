@@ -1,10 +1,10 @@
-module AssocOps where
+module Pass.AssocOps where
 
-import TopSort
-import Basics
-import AST
-import ErrorPrint
-import Program
+import Utility.Basics
+import Utility.ErrorPrint
+import Utility.TopSort
+import Utility.AST
+import Utility.Program
 
 import Data.List
 import Control.Monad.Reader
