@@ -59,9 +59,7 @@ startCompile = do
       if isFile then
         case takeExtension path of
           ".boat" ->
-            parseSingleFile path <&> \case
-              Just mod -> [mod]
-              Nothing  -> []
+            parseSingleFile path <&> prependModule []
           other -> lift $ do
             let ext = if null other then "no extension" else other
             putStrLn ("Error: expected extension of .boat for file, found " ++ ext)
@@ -69,6 +67,12 @@ startCompile = do
       else lift $ do
         putStrLn ("Error: cannot find file or directory at `" ++ path ++ "`")
         exitFailure
+  when (null mods) $
+    addError CompileError
+      { errorFile = Nothing
+      , errorSpan = Nothing
+      , errorKind = Warning
+      , errorMessage = "no code found in source files" }
   exitIfErrors
   lift $ putStrLn ("\n" ++ intercalate "\n" (map show mods))
 
@@ -100,13 +104,18 @@ containsBoatFiles path = do
       else
         checkAll rest
 
-parseAll :: FilePath -> CompileIO (Maybe Module)
+prependModule :: [Module] -> Module -> [Module]
+prependModule mods mod
+  | modIsEmpty mod = mods
+  | otherwise      = mod : mods
+
+parseAll :: FilePath -> CompileIO Module
 parseAll path = do
   isDir <- lift $ doesDirectoryExist path
   if isDir then
     case parseModuleName $ takeFileName path of
       Right name ->
-        Just . moduleFromSubs name <$> parseDirectory path
+        moduleFromSubs name <$> parseDirectory path
       Left err -> do
         shouldWarn <- lift $ containsBoatFiles path
         when shouldWarn $
@@ -117,11 +126,11 @@ parseAll path = do
             , errorMessage =
               "folder contains .boat files but doesn't have a valid module name"
               ++ "\n(" ++ err ++ ")" }
-        return Nothing
+        return defaultModule
   else if isBoatExtension path then
     parseSingleFile path
   else
-    return Nothing
+    return defaultModule
 
 parseDirectory :: FilePath -> CompileIO [Module]
 parseDirectory path = do
@@ -129,14 +138,10 @@ parseDirectory path = do
   forEach files []
   where
     forEach []          mods = return mods
-    forEach (file:rest) mods = do
-      parseAll (path </> file) >>= \case
-        Just mod ->
-          forEach rest (mod:mods)
-        Nothing ->
-          forEach rest mods
+    forEach (file:rest) mods =
+      parseAll (path </> file) >>= forEach rest . prependModule mods
 
-parseSingleFile :: FilePath -> CompileIO (Maybe Module)
+parseSingleFile :: FilePath -> CompileIO Module
 parseSingleFile path = do
   lift $ putStrLn ("{- parsing: " ++ path ++ " -}")
   file <- lift $ readFile path
@@ -144,7 +149,7 @@ parseSingleFile path = do
   runParserT parserT path file >>= \case
     Left err -> do
       convertParseErrors err
-      return Nothing
+      return defaultModule
     Right m ->
-      return $ Just m
+      return m
 

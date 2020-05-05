@@ -115,6 +115,7 @@ defaultModule = Module
   , modLets = Map.empty }
 
 moduleFromSubs :: Name -> [Module] -> Module
+moduleFromSubs _ [] = defaultModule
 moduleFromSubs name mods = defaultModule
   { modSubs = Map.singleton name mods }
 
