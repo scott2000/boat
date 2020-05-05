@@ -22,7 +22,7 @@ mod Nat =
   operator type Add < Mul
 
   operator <left> (+) : Add
-  operator <left> (*) : Add
+  operator <left> (*) : Mul
 
   let (+) = fun
     Z     y -> y
