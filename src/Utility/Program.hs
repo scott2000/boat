@@ -10,6 +10,8 @@ import Data.Char
 import Data.Map (Map)
 import qualified Data.Map.Strict as Map
 
+import qualified Data.Set as Set
+
 import Control.Monad.State.Strict
 
 data InFile a = (:/:)
@@ -208,11 +210,15 @@ modAddOpDecls names op path mod = do
   return mod { modOpDecls = Map.union (Map.fromList newOps) oldOps }
 
 data EffectDecl = EffectDecl
-  { effectSuper :: Meta Path }
+  { effectSuper :: Maybe (Meta Path) }
 
 instance ShowWithName EffectDecl where
   showWithName name EffectDecl { effectSuper } =
-    "effect " ++ name ++ " : " ++ show effectSuper
+    "effect " ++ name ++
+      case effectSuper of
+        Nothing -> ""
+        Just effect ->
+          " : " ++ show effect
 
 modAddEffect
   :: MonadState CompileState m
@@ -225,6 +231,12 @@ modAddEffect name decl path mod = do
   let
     oldEffects = modEffects mod
     newDecl = path :/: decl
+  when (unmeta name == Identifier "Pure") $
+    addError CompileError
+      { errorFile = Just path
+      , errorSpan = metaSpan name
+      , errorKind = Error
+      , errorMessage = "effect name cannot be `Pure` because this is a special item" }
   when (Map.member name oldEffects) $
     addError CompileError
       { errorFile = Just path
@@ -272,19 +284,29 @@ modAddLet name decl path mod = do
       , errorMessage = "duplicate let binding for name `" ++ show name ++ "`" }
   return mod { modLets = Map.insert name newDecl oldLets }
 
+data TypeVariance
+  = VAnon AnonCount
+  | VOutput
+  | VInput
+  | VInvariant
+
+type DataArg = (Meta String, TypeVariance)
+
 type DataVariant = (Meta Name, [Meta Type])
 
 data DataDecl = DataDecl
   { dataMod :: Bool
-  , dataArgs :: [Meta String]
+  , dataEffects :: [DataArg]
+  , dataArgs :: [DataArg]
   , dataVariants :: [Meta DataVariant] }
 
 instance ShowWithName DataDecl where
-  showWithName name DataDecl { dataMod, dataArgs, dataVariants } =
-    let mod = if dataMod then "mod " else "" in
-    "data " ++ mod ++ unwords (name : map unmeta dataArgs)
+  showWithName name DataDecl { dataMod, dataArgs, dataEffects, dataVariants } =
+    "data " ++ mod ++ concatMap showEff dataEffects ++ unwords (name : map (unmeta . fst) dataArgs)
     ++ " =" ++ indent (intercalate "\n" (map (showVariant . unmeta) dataVariants))
     where
+      mod = if dataMod then "mod " else ""
+      showEff (name, _) = "|" ++ unmeta name ++ "| "
       showVariant (name, types) =
         show name ++ " " ++ unwords (map show types)
 
@@ -299,16 +321,6 @@ modAddData name decl path mod = do
   let
     oldDatas = modDatas mod
     newDecl = path :/: decl
-  when (unmeta name /= Operator "->") $
-    case find ((Operator "->" ==) . unmeta) $ map (fst . unmeta) $ dataVariants decl of
-      Just Meta { metaSpan = arrowSpan } ->
-        addError CompileError
-          { errorFile = Just path
-          , errorSpan = arrowSpan
-          , errorKind = Warning
-          , errorMessage = "data type `" ++ show name ++ "` contains type constructor named (->)" }
-      Nothing ->
-        return ()
   when (Map.member name oldDatas) $
     addError CompileError
       { errorFile = Just path
@@ -317,7 +329,15 @@ modAddData name decl path mod = do
       , errorMessage = "duplicate data type declaration for name `" ++ show name ++ "`" }
   return mod { modDatas = Map.insert name newDecl oldDatas }
 
-dataAndArgsFromType :: MonadState CompileState m => FilePath -> Meta Type -> m (Maybe (Meta Name), [Meta String])
+data MaybeLowercase a
+  = MLNamed Path
+  | MLPoly String
+  | MLOther String
+
+dataAndArgsFromType :: MonadState CompileState m
+                    => FilePath
+                    -> Meta Type
+                    -> m (Maybe (Meta Name), [DataArg], [DataArg])
 dataAndArgsFromType file typeWithMeta = do
   case reduceApply typeWithMeta of
     Left (_, b) -> do
@@ -327,30 +347,51 @@ dataAndArgsFromType file typeWithMeta = do
         , errorKind = Error
         , errorMessage =
           "expected only a single operator for data type delcaration, found multiple instead" }
-      return (Nothing, [])
-    Right (f, xs) -> do
+      return (Nothing, [], [])
+    Right (ReducedApp baseTy effs args) -> do
       name <-
         let
           err msg = do
             addError CompileError
               { errorFile = Just file
-              , errorSpan = metaSpan f
+              , errorSpan = metaSpan baseTy
               , errorKind = Error
               , errorMessage = msg }
             return Nothing
         in
-          case unmeta f of
+          case unmeta baseTy of
             TNamed (Path path) ->
-              case path of
-                [name] ->
-                  return $ Just $ copySpan f name
-                _ ->
-                  err ("data type name must be unqualified, did you mean `" ++ show (last path) ++ "`?")
+              if last path == Operator "->" then
+                err "data type name cannot be (->) because this is a special item"
+              else
+                case path of
+                  [name] ->
+                    return $ Just $ copySpan baseTy name
+                  _ ->
+                    err ("data type name must be unqualified, did you mean `" ++ show (last path) ++ "`?")
             TPoly local ->
               err ("data type name must be capitalized, did you mean `" ++ capFirst local ++ "`?")
             other ->
-              err ("expected a name for the data type, found " ++ show other ++ " instead")
-      vars <- forM xs $ \ty ->
+              err ("expected a name for the data type, found `" ++ show other ++ "` instead")
+      effs <- forM effs $ \effSet ->
+        let
+          err msg = do
+            addError CompileError
+              { errorFile = Just file
+              , errorSpan = metaSpan effSet
+              , errorKind = Error
+              , errorMessage = msg }
+            return Nothing
+        in
+          case Set.toList $ setEffects $ unmeta effSet of
+            [eff] ->
+              extractLowercase err (metaSpan eff) "effect" $
+                case unmeta eff of
+                  EffectNamed path -> MLNamed path
+                  EffectPoly local -> MLPoly local
+                  other -> MLOther (show other)
+            _ -> err "effect parameters must each be in their own set of pipes, you cannot use `+` in between"
+      vars <- forM args $ \ty ->
         let
           err msg = do
             addError CompileError
@@ -360,27 +401,34 @@ dataAndArgsFromType file typeWithMeta = do
               , errorMessage = msg }
             return Nothing
         in
-          case unmeta ty of
-            TNamed (Path path) ->
-              case path of
-                [Identifier ('_':rest)] ->
-                  let
-                    suggestion =
-                      case rest of
-                        (x:_) | isAlpha x ->
-                          ", did you mean `" ++ lowerFirst rest ++ "`?"
-                        _ -> ""
-                  in
-                    err ("type parameter name must start with a lowercase letter" ++ suggestion)
-                [Identifier name] ->
-                  err ("type parameter name must be lowercase, did you mean `" ++ lowerFirst name ++ "`?")
-                _ ->
-                  err ("type parameter name must be unqualified, did you mean `" ++ show (last path) ++ "`?")
-            TPoly local ->
-              return $ Just $ copySpan ty local
-            other ->
-              err ("expected name for type parameter, found " ++ show other ++ " instead")
-      return (name, catMaybes vars)
+          extractLowercase err (metaSpan ty) "type" $
+            case unmeta ty of
+              TNamed path -> MLNamed path
+              TPoly local -> MLPoly local
+              other -> MLOther (show other)
+      return (name, catMaybes effs, catMaybes vars)
+  where
+    extractLowercase err span kind = \case
+      MLNamed (Path path) ->
+        case path of
+          [Identifier ('_':rest)] ->
+            let
+              suggestion =
+                case rest of
+                  (x:_) | isAlpha x ->
+                    ", did you mean `" ++ lowerFirst rest ++ "`?"
+                  _ -> ""
+            in
+              err (kind ++ " parameter name must start with a lowercase letter" ++ suggestion)
+          [Identifier name] ->
+            err (kind ++ " parameter name must be lowercase, did you mean `" ++ lowerFirst name ++ "`?")
+          _ ->
+            err (kind ++ " parameter name must be unqualified, did you mean `" ++ show (last path) ++ "`?")
+      MLPoly local -> do
+        anon <- getNewAnon
+        return $ Just ((meta local) { metaSpan = span }, VAnon anon)
+      MLOther other ->
+        err ("expected name for " ++ kind ++ " parameter, found `" ++ other ++ "` instead")
 
 variantFromType :: MonadState CompileState m => FilePath -> Meta Type -> m (Maybe (Meta DataVariant))
 variantFromType file typeWithMeta = do
@@ -397,24 +445,33 @@ variantFromType file typeWithMeta = do
             "cannot resolve relative operator precedence of `"
             ++ show b ++ "` after `" ++ show a ++ "` without explicit parentheses" }
       return Nothing
-    Right (f, xs) ->
+    Right (ReducedApp baseTy effs args) -> do
       let
         err msg = do
           addError CompileError
             { errorFile = Just file
-            , errorSpan = metaSpan f
+            , errorSpan = metaSpan baseTy
             , errorKind = Error
             , errorMessage = msg }
           return Nothing
-      in
-        case unmeta f of
-          TNamed (Path path) ->
-            case path of
-              [name] ->
-                return $ Just $ copySpan typeWithMeta (copySpan f name, xs)
-              _ ->
-                err ("data type variant names must be unqualified, did you mean `" ++ show (last path) ++ "`?")
-          TPoly local ->
-            err ("data type variant names must be capitalized, did you mean `" ++ capFirst local ++ "`?")
-          other ->
-            err ("expected a name for the data type variant, found " ++ show other ++ " instead")
+      case effs of
+        [] -> return ()
+        (eff : _) ->
+          addError CompileError
+            { errorFile = Just file
+            , errorSpan = metaSpan eff
+            , errorKind = Error
+            , errorMessage = "data type variants cannot take effect arguments" }
+      case unmeta baseTy of
+        TFuncArrow -> do
+          err "data type variant name cannot use (->) in an infix position, this syntax is reserved for types"
+        TNamed (Path path) ->
+          case path of
+            [name] ->
+              return $ Just $ copySpan typeWithMeta (copySpan baseTy name, args)
+            _ ->
+              err ("data type variant names must be unqualified, did you mean `" ++ show (last path) ++ "`?")
+        TPoly local ->
+          err ("data type variant names must be capitalized, did you mean `" ++ capFirst local ++ "`?")
+        other ->
+          err ("expected a name for the data type variant, found `" ++ show other ++ "` instead")

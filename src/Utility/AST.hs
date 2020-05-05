@@ -2,9 +2,7 @@ module Utility.AST where
 
 import Utility.Basics
 
-import Data.Word
 import Data.List
-import Data.Bifunctor
 
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -104,7 +102,7 @@ instance Show EffectSet where
 data Effect
   = EffectNamed Path
   | EffectPoly String
-  | EffectAnon Word64
+  | EffectAnon AnonCount
   deriving (Ord, Eq)
 
 instance After Effect where
@@ -159,7 +157,7 @@ data Type
   = TUnit
   | TNamed Path
   | TPoly String
-  | TAnon Word64
+  | TAnon AnonCount
   | TParen (Meta Type)
   | TUnaryOp (Meta Path) (Meta Type)
   | TBinOp (Meta Path) (Meta Type) (Meta Type)
@@ -210,7 +208,12 @@ instance Show Type where
     TEff ty eff ->
       show ty ++ " |" ++ show eff ++ "|"
 
-reduceApply :: Meta Type -> Either (Meta Path, Meta Path) (Meta Type, [Meta Type])
+data ReducedApp = ReducedApp
+  { reducedType :: Meta Type
+  , reducedEffects :: [Meta EffectSet]
+  , reducedArgs :: [Meta Type] }
+
+reduceApply :: Meta Type -> Either (Meta Path, Meta Path) ReducedApp
 reduceApply typeWithMeta =
   case unmeta typeWithMeta of
     TParen ty ->
@@ -220,13 +223,21 @@ reduceApply typeWithMeta =
     TBinOp a _ Meta { unmeta = TBinOp b _ _ } ->
       Left (a, b)
     TUnaryOp path ty ->
-      Right (TNamed <$> path, [ty])
+      Right $ ReducedApp (TNamed <$> path) [] [ty]
     TBinOp path a b ->
-      Right (TNamed <$> path, [a, b])
+      Right $ ReducedApp (TNamed <$> path) [] [a, b]
     TApp a b -> do
-      second (++ [b]) <$> reduceApply a
+      ReducedApp ty effs args <- reduceApply a
+      Right $ ReducedApp ty effs (args ++ [b])
+    TEff ty eff -> do
+      ReducedApp ty effs args <- reduceApply ty
+      case args of
+        [] ->
+          Right $ ReducedApp ty (effs ++ [eff]) args
+        _ ->
+          Right $ ReducedApp typeWithMeta [] []
     other ->
-      Right (typeWithMeta, [])
+      Right $ ReducedApp typeWithMeta [] []
 
 expandFunction :: [Meta Type] -> Meta Type -> Meta Type
 expandFunction [] ty = ty

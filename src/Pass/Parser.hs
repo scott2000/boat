@@ -77,13 +77,8 @@ parseFile path = parseModule defaultModule
         parseEffect = do
           keyword "effect"
           name <- nbsc >> parseMeta parseName
-          maybeSuper <- optional (try nbsc >> specialOp TypeAscription >> blockOf (parseMeta parsePath))
-          let
-            effectDecl = EffectDecl
-              { effectSuper = case maybeSuper of
-                Nothing -> meta $ Core $ Identifier "Pure"
-                Just super -> super }
-          modAddEffect name effectDecl path m
+          effectSuper <- optional (try nbsc >> specialOp TypeAscription >> blockOf (parseMeta parsePath))
+          modAddEffect name EffectDecl { effectSuper } path m
 
         parseLet = do
           keyword "let"
@@ -112,11 +107,12 @@ parseFile path = parseModule defaultModule
           vars <- blockOf $
             someBetweenLines (parserExpectEnd >>= variantFromType path)
           case (nameAndParams, catMaybes vars) of
-            ((Just name, params), vars) ->
+            ((Just name, effs, params), vars) ->
               let
                 dataDecl = DataDecl
                   { dataMod = isMod
                   , dataArgs = params
+                  , dataEffects = effs
                   , dataVariants = vars }
               in
                 modAddData name dataDecl path m
@@ -213,14 +209,12 @@ parserNoPrefix = do
     Nothing -> return term
     Just eApply -> tryEffect eApply term <|> return term
   where
-    tryEffect eApply term = try $ do
-      nbsc
-      reservedOp PipeSeparator
-      nbsc
-      effects <- parseMeta parseEffectSet
-      nbsc
+    tryEffect eApply term = do
+      start <- try $ nbsc >> parseMeta (reservedOp PipeSeparator)
+      effects <- nbsc *> parseEffectSet <* nbsc
       end <- parseMeta $ reservedOp PipeSeparator
-      return $ metaWithEnds term end $ eApply term effects
+      let newTerm = metaWithEnds term end $ eApply term (metaWithEnds start end effects)
+      tryEffect eApply newTerm <|> return newTerm
 
 
 parserPartial :: Parsable a => Parser (Meta a)
@@ -283,6 +277,8 @@ parserBase prec current =
                     fail "line breaks are only allowed in expressions"
             else
               empty
+          Left EndOfIndentedBlock ->
+            fail $ show EndOfIndentedBlock
           Left err ->
             return $ fail $ show err
 
@@ -306,6 +302,8 @@ parserBase prec current =
               return $ Just $ do
                 setOffset offsetAfterOp
                 fail "line break never allowed after operator"
+            Left EndOfIndentedBlock ->
+              fail $ show EndOfIndentedBlock
             Left err ->
               return $ Just $ fail $ show err
 
@@ -371,11 +369,6 @@ metaExtendFail f prec current = do
   next <- parserPrec prec
   metaWithEnds current next <$> eitherToFail (f current next)
 
-localFunctionArrow :: Type
-localFunctionArrow =
-  -- use the unqualified (->) instead of Core.(->) just in case a custom prelude is used
-  TNamed $ Local $ Operator $ "->"
-
 instance Parsable Type where
   parseOne = label "type" $
     parseCapIdent "type" opNamed TPoly
@@ -384,7 +377,7 @@ instance Parsable Type where
   parseSpecial (span, FunctionArrow) =
     Just $ metaExtendPrec $ \lhs rhs ->
       let
-        arrow = metaWithSpan span localFunctionArrow
+        arrow = metaWithSpan span TFuncArrow
         firstApp = metaWithEnds lhs arrow $ TApp arrow lhs
       in
         TApp firstApp rhs
@@ -397,7 +390,7 @@ instance Parsable Type where
       parserPrec prec <&> \rhs ->
         let
           arrowSpan = span <> endSpan
-          arrow = metaWithSpan arrowSpan localFunctionArrow
+          arrow = metaWithSpan arrowSpan TFuncArrow
           withEff = metaWithSpan arrowSpan $ TEff arrow effects
           firstApp = metaWithEnds lhs withEff $ TApp withEff lhs
         in

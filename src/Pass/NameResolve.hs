@@ -126,9 +126,7 @@ coreNameTable = NameTable
 
 coreUse :: UseModule
 coreUse =
-  UseModule (meta $ Identifier "Core") $ UseAll
-    [ meta $ UseModule (meta $ Operator "->") $ UseAll []
-    , meta $ UseModule (meta $ Identifier "Pure") $ UseAll [] ]
+  UseModule (meta $ Identifier "Core") $ UseAll [meta UseAny]
 
 toNameTable :: Map Name [Module] -> NameTable
 toNameTable =
@@ -508,9 +506,21 @@ nameResolveEach path mod =
         resPath = nameResolvePath file isOperatorType "an operator type"
         resMetaPath path = forM path $ resPath $ metaSpan path
 
-    nameResolveEffect (name, file :/: EffectDecl { effectSuper }) = do
+    nameResolveEffect (name, file :/: decl@EffectDecl { effectSuper }) = do
       super <-
-        forM effectSuper $ nameResolvePath file isEffect "an effect" $ metaSpan effectSuper
+        case effectSuper of
+          Nothing ->
+            return Nothing
+          Just effect ->
+            Just <$> (forM effect $ nameResolvePath file isEffect "an effect" $ metaSpan effect)
+      case super of
+        Just Meta { unmeta = Core (Identifier "Pure"), metaSpan } ->
+          lift $ lift $ addError CompileError
+            { errorFile = Just file
+            , errorSpan = metaSpan
+            , errorKind = Error
+            , errorMessage = "effect cannot be a subtype of `Pure`, try just using `effect " ++ show name ++ "`" }
+        _ -> return ()
       insertEffect ((path .|.) <$> name) $ file :/: EffectDecl
         { effectSuper = super }
 

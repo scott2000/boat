@@ -1,4 +1,4 @@
 # TODO List
 
-- Add effects member to DataDecl and implement parsing
 - Type inference!
+- Maybe lex the file first and then parse the token stream?

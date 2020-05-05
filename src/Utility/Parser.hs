@@ -183,12 +183,14 @@ data SpaceType
 
 data SpaceError
   = ContinuationIndent Int
-  -- add more space types if needed
+  | EndOfIndentedBlock
 
 instance Show SpaceError where
   show = \case
     ContinuationIndent n ->
       "line continuation should be indented exactly 2 spaces more than its enclosing block (found " ++ show n ++ ")"
+    EndOfIndentedBlock ->
+      "unexpected end of indented block, is the indentation correct?"
 
 trySpaces :: Parser (Either SpaceError SpaceType)
 trySpaces =
@@ -207,10 +209,11 @@ trySpaces =
           2 ->
             return $ Right Whitespace
           n ->
-            if n < 0 then
-              fail "unexpected end of indented block, is the indentation correct?"
-            else
-              return $ Left $ ContinuationIndent n
+            return $ Left $
+              if n < 0 then
+                EndOfIndentedBlock
+              else
+                ContinuationIndent n
       else do
         isEOF <- atEnd
         if isEOF then
@@ -236,12 +239,17 @@ blockCmnt = hidden $ L.skipBlockCommentNested "{-" "-}"
 nbsc :: Parser SpaceType
 nbsc = do
   offset <- getOffset
-  spaces >>= \case
-    LineBreak -> do
+  trySpaces >>= \case
+    Right LineBreak -> do
       setOffset offset
-      fail "unexpected line break in indented block"
-    other ->
+      fail "unexpected line break"
+    Right other ->
       return other
+    Left EndOfIndentedBlock -> do
+      setOffset offset
+      fail "unexpected end of indented block"
+    Left err ->
+      fail $ show err
 
 lineBreak :: Parser ()
 lineBreak = do
@@ -251,7 +259,7 @@ lineBreak = do
       return ()
     _ -> do
       setOffset offset
-      fail "expected line break in indented block"
+      fail "expected line break"
 
 isSpace :: SpaceType -> Bool
 isSpace NoSpace = False
