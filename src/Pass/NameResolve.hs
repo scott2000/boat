@@ -117,6 +117,15 @@ operatorTypeItem :: Item
 operatorTypeItem = mempty
   { isOperatorType = True }
 
+anyItem :: Item
+anyItem = Item
+  { itemSub = Nothing
+  , isType = True
+  , isValue = True
+  , isEffect = True
+  , isPattern = True
+  , isOperatorType = True }
+
 newtype NameTable = NameTable
   { getNameTable :: Map Name Item }
   deriving (Show, Ord, Eq)
@@ -305,7 +314,8 @@ addUse path (file :/: useWithMeta) nr =
                 , errorSpan = metaSpan
                 , errorKind = Error
                 , errorMessage = "`" ++ show path ++ "` does not contain any items named `" ++ show name ++ "`" }
-              nr
+              -- add a dummy item as if it did exist to suppress further errors
+              withNames names { finalNames = addName Explicit hiddenImport path (name, anyItem) $ finalNames names } nr
 
 duplicateMessage :: (Meta Path, InFile a) -> String -> String
 duplicateMessage (otherPath, otherFile :/: _) baseMessage =
