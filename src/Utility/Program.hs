@@ -74,8 +74,6 @@ emptyDecls = AllDecls
   , allDatas = Map.empty
   , allLets = Map.empty }
 
--- TODO: consider removing strictness annotation?
-
 data Module = Module
   { modUses :: ![InFile (Meta UseModule)]
   , modSubs :: !(Map Name [Module])
@@ -240,8 +238,20 @@ data LetDecl = LetDecl
   , letConstraints :: [Constraint] }
 
 instance ShowWithName LetDecl where
-  showWithName name LetDecl { letBody } =
-    "let " ++ name ++ " =" ++ indent (show letBody)
+  showWithName name decl =
+    "let " ++ name ++ typeClause ++ withClause ++ " =" ++ indent (show body)
+    where
+      (body, typeClause) =
+        case letBody decl of
+          Meta { unmeta = ETypeAscribe expr ty } ->
+            (expr, " : " ++ show ty)
+          other ->
+            (other, "")
+
+      withClause =
+        case letConstraints decl of
+          [] -> ""
+          cs -> " with " ++ intercalate ", " (map show cs)
 
 modAddLet
   :: MonadState CompileState m
