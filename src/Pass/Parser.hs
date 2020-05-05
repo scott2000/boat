@@ -199,23 +199,22 @@ paren =
     emptyParen = opUnit <$ char ')'
     fullParen = opParen <$> blockOf parser <* spaces <* char ')'
 
-parserNoEffects :: Parsable a => Parser (Meta a)
-parserNoEffects = parseMeta parseOne <|> hidden paren
-
 parserNoPrefix :: Parsable a => Parser (Meta a)
-parserNoPrefix = do
-  term <- parserNoEffects
-  case opEffectApply of
-    Nothing -> return term
-    Just eApply -> tryEffect eApply term <|> return term
-  where
-    tryEffect eApply term = do
-      start <- try $ nbsc >> parseMeta (reservedOp PipeSeparator)
-      effects <- nbsc *> parseEffectSet <* nbsc
-      end <- parseMeta $ reservedOp PipeSeparator
-      let newTerm = metaWithEnds term end $ eApply term (metaWithEnds start end effects)
-      tryEffect eApply newTerm <|> return newTerm
+parserNoPrefix = parseMeta parseOne <|> hidden paren
 
+-- parserNoPrefix :: Parsable a => Parser (Meta a)
+-- parserNoPrefix = do
+--   term <- parserNoEffects
+--   case opEffectApply of
+--     Nothing -> return term
+--     Just eApply -> tryEffect eApply term <|> return term
+--   where
+--     tryEffect eApply term = do
+--       start <- try $ nbsc >> parseMeta (reservedOp PipeSeparator)
+--       effects <- nbsc *> parseEffectSet <* nbsc
+--       end <- parseMeta $ reservedOp PipeSeparator
+--       let newTerm = metaWithEnds term end $ eApply term (metaWithEnds start end effects)
+--       tryEffect eApply newTerm <|> return newTerm
 
 parserPartial :: Parsable a => Parser (Meta a)
 parserPartial = hidden parsePrefix <|> parserNoPrefix
@@ -346,9 +345,18 @@ parserBase prec current =
 
         app = do
           guard (prec < applyPrec)
-          return $ Just $
-            (metaExtendFail opApply applyPrec current >>= parserBase prec)
-            <|> (return current)
+          return $ Just $ appEff
+            <|> (metaExtendFail opApply applyPrec current >>= parserBase prec)
+            <|> return current
+
+        appEff =
+          case opEffectApply of
+            Nothing -> empty
+            Just eApply -> do
+              start <- try $ nbsc >> parseMeta (reservedOp PipeSeparator)
+              effects <- nbsc *> parseEffectSet <* nbsc
+              end <- parseMeta $ reservedOp PipeSeparator
+              parserBase prec $ metaWithEnds current end $ eApply current (metaWithEnds start end effects)
 
 eitherToFail :: Monad m => Either String a -> m a
 eitherToFail (Right x) = return x

@@ -16,7 +16,12 @@ import Control.Monad.State.Strict
 
 type NR = ReaderT Names (StateT NameState CompileIO)
 
-type NameSet mark = Map Name (Either (Set Path) (Path, Item, mark))
+data Explicitness
+  = Implicit
+  | Explicit
+  deriving Show
+
+type NameSet mark = Map Name (Either (Set Path) (Path, Item, Explicitness, mark))
 
 data Names = Names
   { finalNames :: NameSet ImportId
@@ -28,21 +33,28 @@ defaultNames = Names
   { finalNames = Map.empty
   , otherNames = Map.empty }
 
-addName :: mark -> Path -> (Name, Item) -> NameSet mark -> NameSet mark
-addName id path (name, item) s =
+addName :: Explicitness -> mark -> Path -> (Name, Item) -> NameSet mark -> NameSet mark
+addName exp id path (name, item) s =
   if Map.member name s then
     Map.adjust collide name s
   else do
-    Map.insert name (Right (path, item, id)) s
+    Map.insert name new s
   where
-    collide = \case
-      Left paths
-        | path `elem` paths -> Left paths
-        | otherwise         -> Left $ Set.insert path paths
-      Right (oldPath, oldItem, _)
-        | path == oldPath
-        , item == oldItem -> Right (path, item, id)
-        | otherwise       -> Left $ Set.insert path $ Set.singleton oldPath
+    new = Right (path, item, exp, id)
+    collide old =
+      case old of
+        Left paths
+          | path `elem` paths -> Left paths
+          | otherwise         -> Left $ Set.insert path paths
+        Right (oldPath, oldItem, oldExp, _) ->
+          if path == oldPath && item == oldItem then
+            -- The only time a new import should take precedence over an older one is if the new one is implicit and
+            -- the old one was explicit. This helps minimize the complexity of import statements.
+            case (exp, oldExp) of
+              (Implicit, Explicit) -> new
+              _ -> old
+          else
+            Left $ Set.insert path $ Set.singleton oldPath
 
 withNames :: Names -> NR a -> NR a
 withNames names nr = lift $ runReaderT nr names
@@ -223,7 +235,7 @@ addUse path (file :/: useWithMeta) nr =
             { errorFile = Just file
             , errorSpan = metaSpan
             , errorKind = Warning
-            , errorMessage = "`use " ++ show name ++ "` does nothing since top level names are imported automatically" }
+            , errorMessage = "`use " ++ show name ++ "` cannot bring anything into scope" }
         _ ->
           return ()
       nt <- gets nameTable
@@ -244,14 +256,14 @@ addUse path (file :/: useWithMeta) nr =
           id <- uniqueId file $ metaSpan use
           let
             finalNames' =
-              foldr (addName id path) (finalNames names) $ nameTableToList nt
+              foldr (addName Implicit id path) (finalNames names) $ nameTableToList nt
             names' = names { finalNames = finalNames' }
           withNames names' nr
         UseModule Meta { unmeta = name, metaSpan } (UseDot rest) ->
           case nameTableEntry name nt of
             Just item@Item { itemSub = Just sub } -> do
               let
-                otherNames' = addName () path (name, item) $ otherNames names
+                otherNames' = addName Explicit () path (name, item) $ otherNames names
                 names' = names { otherNames = otherNames' }
               withNames names' $ add (path .|. name) sub rest nr
             _ -> do
@@ -270,7 +282,7 @@ addUse path (file :/: useWithMeta) nr =
                 else
                   return hiddenImport
               let
-                finalNames' = addName id path (name, item) $ finalNames names
+                finalNames' = addName Explicit id path (name, item) $ finalNames names
                 names' = names { finalNames = finalNames' }
               withNames names' $ case rest of
                 [] -> nr
@@ -566,7 +578,7 @@ nameResolvePath file check kind span path@(Path parts@(head:rest)) = do
     Nothing -> do
       Names { finalNames, otherNames } <- ask
       case Map.lookup head finalNames of
-        Just (Right (path, item, id)) ->
+        Just (Right (path, item, _, id)) ->
           checkRec path item $ do
             clearId id
             return $ Path (unpath path ++ parts)
@@ -577,7 +589,7 @@ nameResolvePath file check kind span path@(Path parts@(head:rest)) = do
             notFound
           else
             case Map.lookup head otherNames of
-              Just (Right (path, item, ())) ->
+              Just (Right (path, item, _, ())) ->
                 checkRec path item $
                   return $ Path (unpath path ++ parts)
               Just (Left paths) ->

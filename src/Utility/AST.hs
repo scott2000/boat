@@ -229,10 +229,9 @@ reduceApply typeWithMeta =
     TApp a b -> do
       ReducedApp ty effs args <- reduceApply a
       Right $ ReducedApp ty effs (args ++ [b])
-    TEff ty eff -> do
-      ReducedApp innerTy effs args <- reduceApply ty
-      case args of
-        [] ->
+    TEff ty eff ->
+      case reduceApply ty of
+        Right (ReducedApp innerTy effs []) ->
           Right $ ReducedApp innerTy (effs ++ [eff]) []
         _ ->
           Right $ ReducedApp ty [eff] []

@@ -302,11 +302,11 @@ data DataDecl = DataDecl
 
 instance ShowWithName DataDecl where
   showWithName name DataDecl { dataMod, dataArgs, dataEffects, dataVariants } =
-    "data " ++ mod ++ concatMap showEff dataEffects ++ unwords (name : map (unmeta . fst) dataArgs)
+    "data " ++ mod ++ name ++ concatMap showEff dataEffects ++ unwords ("" : map (unmeta . fst) dataArgs)
     ++ " =" ++ indent (intercalate "\n" (map (showVariant . unmeta) dataVariants))
     where
       mod = if dataMod then "mod " else ""
-      showEff (name, _) = "|" ++ unmeta name ++ "| "
+      showEff (name, _) = " |" ++ unmeta name ++ "|"
       showVariant (name, types) =
         show name ++ " " ++ unwords (map show types)
 
@@ -372,7 +372,22 @@ dataAndArgsFromType file typeWithMeta = do
             TPoly local ->
               err ("data type name must be capitalized, did you mean `" ++ capFirst local ++ "`?")
             other ->
-              err ("expected a name for the data type, found `" ++ show other ++ "` instead")
+              let
+                nameErr =
+                  err ("expected a name for the data type, found `" ++ show other ++ "` instead")
+              in
+                case effs of
+                  [] -> nameErr
+                  (eff : _) ->
+                    case reduceApply baseTy of
+                      Right (ReducedApp _ _ []) -> nameErr
+                      _ -> do
+                        addError CompileError
+                          { errorFile = Just file
+                          , errorSpan = metaSpan eff
+                          , errorKind = Error
+                          , errorMessage = "effect parameter must come immediately after data type name" }
+                        return Nothing
       effs <- forM effs $ \effSet ->
         let
           err msg = do
@@ -445,33 +460,35 @@ variantFromType file typeWithMeta = do
             "cannot resolve relative operator precedence of `"
             ++ show b ++ "` after `" ++ show a ++ "` without explicit parentheses" }
       return Nothing
-    Right (ReducedApp baseTy effs args) -> do
-      let
-        err msg = do
-          addError CompileError
-            { errorFile = Just file
-            , errorSpan = metaSpan baseTy
-            , errorKind = Error
-            , errorMessage = msg }
-          return Nothing
+    Right (ReducedApp baseTy effs args) ->
       case effs of
-        [] -> return ()
-        (eff : _) ->
+        [] ->
+          let
+            err msg = do
+              addError CompileError
+                { errorFile = Just file
+                , errorSpan = metaSpan baseTy
+                , errorKind = Error
+                , errorMessage = msg }
+              return Nothing
+          in
+            case unmeta baseTy of
+              TFuncArrow ->
+                err "data type variant name cannot use (->) in an infix position, this syntax is reserved for types"
+              TNamed (Path path) ->
+                case path of
+                  [name] ->
+                    return $ Just $ copySpan typeWithMeta (copySpan baseTy name, args)
+                  _ ->
+                    err ("data type variant names must be unqualified, did you mean `" ++ show (last path) ++ "`?")
+              TPoly local ->
+                err ("data type variant names must be capitalized, did you mean `" ++ capFirst local ++ "`?")
+              other ->
+                err ("expected a name for the data type variant, found `" ++ show other ++ "` instead")
+        (eff : _) -> do
           addError CompileError
             { errorFile = Just file
             , errorSpan = metaSpan eff
             , errorKind = Error
             , errorMessage = "data type variants cannot take effect arguments" }
-      case unmeta baseTy of
-        TFuncArrow -> do
-          err "data type variant name cannot use (->) in an infix position, this syntax is reserved for types"
-        TNamed (Path path) ->
-          case path of
-            [name] ->
-              return $ Just $ copySpan typeWithMeta (copySpan baseTy name, args)
-            _ ->
-              err ("data type variant names must be unqualified, did you mean `" ++ show (last path) ++ "`?")
-        TPoly local ->
-          err ("data type variant names must be capitalized, did you mean `" ++ capFirst local ++ "`?")
-        other ->
-          err ("expected a name for the data type variant, found `" ++ show other ++ "` instead")
+          return Nothing
