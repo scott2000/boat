@@ -120,6 +120,13 @@ instance Show Effect where
     EffectPoly name  -> name
     EffectAnon _     -> "_"
 
+effectSuffix :: [Meta EffectSet] -> String
+effectSuffix = effectSuffixStr . map show
+
+effectSuffixStr :: [String] -> String
+effectSuffixStr = concatMap $ \effect ->
+  " |" ++ effect ++ "|"
+
 data Constraint
   = Effect `IsSubEffectOf` EffectSet
   deriving (Ord, Eq)
@@ -155,22 +162,21 @@ instance Show UseContents where
 
 data Type
   = TUnit
-  | TNamed Path
+  | TNamed [Meta EffectSet] (Meta Path)
   | TPoly String
   | TAnon AnonCount
   | TParen (Meta Type)
   | TUnaryOp (Meta Path) (Meta Type)
   | TBinOp (Meta Path) (Meta Type) (Meta Type)
   | TApp (Meta Type) (Meta Type)
-  | TEff (Meta Type) (Meta EffectSet)
   deriving Eq
 
 instance After Type where
   after m x = do
     x' <- aType m x
     forM x' $ \case
-      TNamed path ->
-        TNamed <$> aPath m KType (path <$ x')
+      TNamed effs path ->
+        TNamed <$> mapM (after m) effs <*> afterPath m KType path
       TParen a ->
         TParen <$> after m a
       TUnaryOp path a ->
@@ -179,15 +185,13 @@ instance After Type where
         TBinOp <$> afterPath m KType path <*> after m a <*> after m b
       TApp a b ->
         TApp <$> after m a <*> after m b
-      TEff a e ->
-        TEff <$> after m a <*> after m e
       other ->
         return other
 
 instance Show Type where
   show = \case
     TUnit -> "()"
-    TNamed path -> show path
+    TNamed effs path -> show path ++ effectSuffix effs
     TPoly name -> name
     TAnon _ -> "_"
     TParen ty -> "{" ++ show ty ++ "}"
@@ -199,18 +203,15 @@ instance Show Type where
       "{" ++ show lhs ++ " " ++ op ++ " " ++ show rhs ++ "}"
     TBinOp op lhs rhs ->
       "{" ++ show op ++ " " ++ show lhs ++ " " ++ show rhs ++ "}"
-    TApp Meta { unmeta = TApp Meta { unmeta = TEff Meta { unmeta = TFuncArrow } effs } a } b ->
+    TEffFunc effs a b ->
       "(" ++ show a ++ " -|" ++ show effs ++ "|> " ++ show b ++ ")"
-    TApp Meta { unmeta = TApp Meta { unmeta = TFuncArrow } a } b ->
+    TFunc a b ->
       "(" ++ show a ++ " -> " ++ show b ++ ")"
     TApp a b ->
       "(" ++ show a ++ " " ++ show b ++ ")"
-    TEff ty eff ->
-      show ty ++ " |" ++ show eff ++ "|"
 
 data ReducedApp = ReducedApp
   { reducedType :: Meta Type
-  , reducedEffects :: [Meta EffectSet]
   , reducedArgs :: [Meta Type] }
 
 reduceApply :: Meta Type -> Either (Meta Path, Meta Path) ReducedApp
@@ -223,20 +224,14 @@ reduceApply typeWithMeta =
     TBinOp a _ Meta { unmeta = TBinOp b _ _ } ->
       Left (a, b)
     TUnaryOp path ty ->
-      Right $ ReducedApp (TNamed <$> path) [] [ty]
+      Right $ ReducedApp (copySpan path $ TNamed [] path) [ty]
     TBinOp path a b ->
-      Right $ ReducedApp (TNamed <$> path) [] [a, b]
+      Right $ ReducedApp (copySpan path $ TNamed [] path) [a, b]
     TApp a b -> do
-      ReducedApp ty effs args <- reduceApply a
-      Right $ ReducedApp ty effs (args ++ [b])
-    TEff ty eff ->
-      case reduceApply ty of
-        Right (ReducedApp innerTy effs []) ->
-          Right $ ReducedApp innerTy (effs ++ [eff]) []
-        _ ->
-          Right $ ReducedApp ty [eff] []
+      ReducedApp ty args <- reduceApply a
+      Right $ ReducedApp ty (args ++ [b])
     other ->
-      Right $ ReducedApp typeWithMeta [] []
+      Right $ ReducedApp typeWithMeta []
 
 expandFunction :: [Meta Type] -> Meta Type -> Meta Type
 expandFunction [] ty = ty
@@ -247,16 +242,24 @@ pattern DefaultMeta :: a -> Meta a
 pattern DefaultMeta x <- Meta { unmeta = x }
   where DefaultMeta = meta
 
-pattern TFuncArrow :: Type
-pattern TFuncArrow = TNamed (Core (Operator "->"))
+pattern TEffFuncArrow :: Meta EffectSet -> Type
+pattern TEffFuncArrow eff = TNamed [eff] (DefaultMeta (Core (Operator "->")))
 
-pattern EffectPure :: Type
-pattern EffectPure = TNamed (Core (Identifier "Pure"))
+pattern TFuncArrow :: Type
+pattern TFuncArrow = TNamed [] (DefaultMeta (Core (Operator "->")))
+
+pattern TEffFunc :: Meta EffectSet -> Meta Type -> Meta Type -> Type
+pattern TEffFunc eff a b =
+  TApp (DefaultMeta (TApp (DefaultMeta (TEffFuncArrow eff)) a)) b
 
 pattern TFunc :: Meta Type -> Meta Type -> Type
 pattern TFunc a b =
+  TApp (DefaultMeta (TApp (DefaultMeta TFuncArrow) a)) b
   -- using TFuncArrow here triggers a GHC bug with pattern synonyms
-  TApp (DefaultMeta (TApp (DefaultMeta (TNamed (Core (Operator "->")))) a)) b
+  -- TApp (DefaultMeta (TApp (DefaultMeta (TNamed (Core (Operator "->")))) a)) b
+
+pattern EffectPure :: Effect
+pattern EffectPure = EffectNamed (Core (Identifier "Pure"))
 
 data Value
   = VUnit
@@ -539,11 +542,11 @@ instance ContainsOp Type where
             [UnExpr x]
 
   applyUnary path a =
-    metaWithEnds path a $ TApp (TNamed <$> path) a
+    metaWithEnds path a $ TApp (copySpan path $ TNamed [] path) a
 
   applyBinary path a b =
     metaWithEnds a b $
-      TApp (metaWithEnds a path $ TApp (TNamed <$> path) a) b
+      TApp (metaWithEnds a path $ TApp (copySpan path $ TNamed [] path) a) b
 
 instance ContainsOp Expr where
   toUnOpList x =
@@ -612,18 +615,27 @@ class ExprLike a where
   opSeq :: Maybe (Meta a -> Meta a -> a)
   opSeq = Nothing
 
-  opEffectApply :: Maybe (Meta a -> Meta EffectSet -> a)
+  opEffectApply :: Maybe (Meta a -> Meta EffectSet -> Either String a)
   opEffectApply = Nothing
 
 instance ExprLike Type where
   opKind _ = "type"
   opUnit = TUnit
-  opNamed = TNamed . unmeta
-  opParen = TParen
+  opNamed = TNamed []
+  opParen ty =
+    case unmeta ty of
+      TUnaryOp _ _ -> TParen ty
+      TBinOp _ _ _ -> TParen ty
+      other -> other
   opUnary = TUnaryOp
   opBinary = TBinOp
   opApply a b = Right $ TApp a b
-  opEffectApply = Just TEff
+  opEffectApply = Just effectApply
+    where
+      effectApply Meta { unmeta = TNamed es path } e =
+        Right $ TNamed (es ++ [e]) path
+      effectApply _ _ =
+        Left "effect arguments can only occur immediately following a named type"
 
 instance ExprLike Expr where
   opKind _ = "expression"
@@ -650,7 +662,8 @@ instance ExprLike Pattern where
       other -> other
   opUnary = PUnaryOp
   opBinary = PBinOp
-  opApply Meta { unmeta = PParen p } x = opApply p x
-  opApply Meta { unmeta = PCons name xs } x = Right $ PCons name (xs ++ [x])
-  opApply other _ = Left ("pattern does not support parameters: " ++ show other)
+  opApply Meta { unmeta = PCons name xs } x =
+    Right $ PCons name (xs ++ [x])
+  opApply other _ =
+    Left "pattern arguments can only occur immediately following a named pattern"
 

@@ -7,6 +7,7 @@ import Utility.Parser
 import Pass.Parser
 import Pass.NameResolve
 import Pass.AssocOps
+import Pass.InferVariance
 
 import System.FilePath
 import System.Directory
@@ -67,14 +68,15 @@ startCompile = do
       else lift $ do
         putStrLn ("Error: cannot find file or directory at `" ++ path ++ "`")
         exitFailure
+  exitIfErrors
+  lift $ putStrLn ("\n" ++ intercalate "\n" (map show mods))
+
   when (null mods) $
     addError CompileError
       { errorFile = Nothing
       , errorSpan = Nothing
       , errorKind = Warning
       , errorMessage = "no code found in source files" }
-  exitIfErrors
-  lift $ putStrLn ("\n" ++ intercalate "\n" (map show mods))
 
   allDecls <- nameResolve mods
   exitIfErrors
@@ -82,6 +84,8 @@ startCompile = do
   allDecls <- assocOps allDecls
   exitIfErrors
   lift $ putStrLn $ "\nFully resolved and associated:\n\n" ++ show allDecls
+
+  allDecls <- inferVariance allDecls
 
   finishAndCheckErrors
 

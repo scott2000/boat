@@ -37,12 +37,12 @@ convertParseErrors bundle =
     go posState (err:rest) = do
       let
         o = errorOffset err
-        (startPos, posState') =
-          reachOffsetNoLine o posState
+        posState' = reachOffsetNoLine o posState
+        startPos = pstateSourcePos posState'
         errText = parseErrorTextPretty err
         endPos
           | errLen == 1 = startPos
-          | otherwise = fst $ reachOffsetNoLine (o+errLen-1) posState'
+          | otherwise = pstateSourcePos $ reachOffsetNoLine (o+errLen-1) posState'
       addError CompileError
         { errorFile = file
         , errorSpan = Just $ Span

@@ -1,4 +1,4 @@
-module Utility.ErrorPrint (exitIfErrors, finishAndCheckErrors, addFatal) where
+module Utility.ErrorPrint (exitIfErrors, finishAndCheckErrors, addFatal, compilerBug) where
 
 import Utility.Basics
 
@@ -36,10 +36,22 @@ finishAndCheckErrors = do
     , errorMessage = "compiled successfully with " ++ show count }
   printErrors
 
-addFatal :: CompileError -> CompileIO ()
+addFatal :: CompileError -> CompileIO a
 addFatal e = do
   addError e
   exitIfErrors
+  compilerBug "addFatal did not exit!"
+
+compilerBug :: String -> CompileIO a
+compilerBug msg = do
+  addError CompileError
+    { errorFile = Nothing
+    , errorSpan = Nothing
+    , errorKind = Error
+    , errorMessage =
+      "something went wrong when compiling your code! (please report this compiler bug)\nerror message: " ++ msg }
+  printErrors
+  lift $ exitFailure
 
 printErrors :: CompileIO ()
 printErrors =

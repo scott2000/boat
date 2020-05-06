@@ -3,8 +3,8 @@ module Utility.TopSort (SCC (..), topSortSet, topSortMap) where
 import Data.Graph (SCC (..), stronglyConnComp)
 import Data.Set (Set)
 import qualified Data.Set as Set
-import Data.Map (Map)
-import qualified Data.Map as Map
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 
 topSortSet :: Ord a => Set a -> (a -> [a]) -> [SCC a]
 topSortSet set f =

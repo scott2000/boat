@@ -345,8 +345,8 @@ parserBase prec current =
 
         app = do
           guard (prec < applyPrec)
-          return $ Just $ appEff
-            <|> (metaExtendFail opApply applyPrec current >>= parserBase prec)
+          return $ Just $
+            ((appEff <|> metaExtendFail opApply applyPrec current) >>= parserBase prec)
             <|> return current
 
         appEff =
@@ -356,7 +356,7 @@ parserBase prec current =
               start <- try $ nbsc >> parseMeta (reservedOp PipeSeparator)
               effects <- nbsc *> parseEffectSet <* nbsc
               end <- parseMeta $ reservedOp PipeSeparator
-              parserBase prec $ metaWithEnds current end $ eApply current (metaWithEnds start end effects)
+              metaWithEnds current end <$> eitherToFail (eApply current $ metaWithEnds start end effects)
 
 eitherToFail :: Monad m => Either String a -> m a
 eitherToFail (Right x) = return x
@@ -385,8 +385,9 @@ instance Parsable Type where
   parseSpecial (span, FunctionArrow) =
     Just $ metaExtendPrec $ \lhs rhs ->
       let
-        arrow = metaWithSpan span TFuncArrow
-        firstApp = metaWithEnds lhs arrow $ TApp arrow lhs
+        arrow = metaWithSpan span $ Core $ Operator "->"
+        withNoEff = metaWithSpan span $ TNamed [] arrow
+        firstApp = metaWithEnds lhs arrow $ TApp withNoEff lhs
       in
         TApp firstApp rhs
   parseSpecial (span, SplitArrow) =
@@ -398,8 +399,8 @@ instance Parsable Type where
       parserPrec prec <&> \rhs ->
         let
           arrowSpan = span <> endSpan
-          arrow = metaWithSpan arrowSpan TFuncArrow
-          withEff = metaWithSpan arrowSpan $ TEff arrow effects
+          arrow = metaWithSpan arrowSpan $ Core $ Operator "->"
+          withEff = metaWithSpan arrowSpan $ TNamed [effects] arrow
           firstApp = metaWithEnds lhs withEff $ TApp withEff lhs
         in
           metaWithEnds firstApp rhs $ TApp firstApp rhs

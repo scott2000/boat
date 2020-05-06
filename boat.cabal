@@ -23,6 +23,7 @@ executable boat
                        Pass.Parser,
                        Pass.NameResolve,
                        Pass.AssocOps
+                       Pass.InferVariance
   default-extensions:  FlexibleContexts,
                        FlexibleInstances,
                        NamedFieldPuns,
@@ -39,7 +40,7 @@ executable boat
                        DeriveFoldable,
                        DeriveTraversable
   build-depends:       base >=4.9,
-                       megaparsec >=7.0,
+                       megaparsec >=8.0,
                        containers >=0.6,
                        mtl >=2.2,
                        transformers >=0.5,
