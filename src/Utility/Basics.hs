@@ -214,6 +214,11 @@ instance Semigroup Span where
   Span { spanStart } <> Span { spanEnd } =
     Span { spanStart, spanEnd }
 
+pointSpan :: Position -> Span
+pointSpan pos = Span
+  { spanStart = pos
+  , spanEnd = pos { posColumn = posColumn pos + 1 } }
+
 (<&>) :: Functor f => f a -> (a -> b) -> f b
 (<&>) = flip fmap
 

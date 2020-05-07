@@ -610,12 +610,12 @@ class ExprLike a where
   opParen :: Meta a -> a
   opUnary :: Meta Path -> Meta a -> a
   opBinary :: Meta Path -> Meta a -> Meta a -> a
-  opApply :: Meta a -> Meta a -> Either String a
+  opApply :: Meta a -> Meta a -> Either (Meta String) a
 
   opSeq :: Maybe (Meta a -> Meta a -> a)
   opSeq = Nothing
 
-  opEffectApply :: Maybe (Meta a -> Meta EffectSet -> Either String a)
+  opEffectApply :: Maybe (Meta a -> Meta EffectSet -> Either (Meta String) a)
   opEffectApply = Nothing
 
 instance ExprLike Type where
@@ -634,8 +634,8 @@ instance ExprLike Type where
     where
       effectApply Meta { unmeta = TNamed es path } e =
         Right $ TNamed (es ++ [e]) path
-      effectApply _ _ =
-        Left "effect arguments can only occur immediately following a named type"
+      effectApply _ e =
+        Left $ copySpan e "effect arguments can only occur immediately following a named type"
 
 instance ExprLike Expr where
   opKind _ = "expression"
@@ -664,6 +664,6 @@ instance ExprLike Pattern where
   opBinary = PBinOp
   opApply Meta { unmeta = PCons name xs } x =
     Right $ PCons name (xs ++ [x])
-  opApply other _ =
-    Left "pattern arguments can only occur immediately following a named pattern"
+  opApply _ x =
+    Left $ copySpan x "pattern arguments can only occur immediately following a named pattern"
 

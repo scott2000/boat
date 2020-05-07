@@ -14,8 +14,6 @@ import Data.Semigroup ((<>))
 import qualified Data.Set as Set
 import Control.Monad.State.Strict
 
--- TODO: replace mamy uses of `fail` with a `addError` followed by a custom, non-printed error type
-
 parseName :: Parser Name
 parseName =
   parseParen <|> Identifier <$> identifier
@@ -222,12 +220,12 @@ parserPartial = hidden parsePrefix <|> parserNoPrefix
     parsePrefix :: forall a. Parsable a => Parser (Meta a)
     parsePrefix = parseMeta $ do
       path <- try $ do
-        offset <- getOffset
         path <- parseMeta (Local . Unary <$> unaryOp)
         spaceAfter <- isSpace <$> nbsc
         if spaceAfter then do
-          setOffset offset
-          fail ("operator not allowed at start of " ++ opKind (Of :: Of a))
+          addFail (metaSpan path) $
+            "infix operator not allowed at start of " ++ opKind (Of :: Of a)
+            ++ "\n(make sure prefix operators have no space after them)"
         else
           return path
       opUnary path <$> parserPrec compactPrec
@@ -333,9 +331,8 @@ parserBase prec current =
                 case parseSpecial op of
                   Nothing ->
                     if prec == minPrec then
-                      return $ Just $ do
-                        setOffset offset
-                        fail ("special operator `" ++ show (snd op) ++ "` not allowed in " ++ opKind (Of :: Of a))
+                      return $ Just $ addFail (Just $ fst op)
+                        ("special operator `" ++ show (snd op) ++ "` not allowed in " ++ opKind (Of :: Of a))
                     else
                       return Nothing
                   Just p ->
@@ -358,9 +355,9 @@ parserBase prec current =
               end <- parseMeta $ reservedOp PipeSeparator
               metaWithEnds current end <$> eitherToFail (eApply current $ metaWithEnds start end effects)
 
-eitherToFail :: Monad m => Either String a -> m a
+eitherToFail :: Either (Meta String) a -> Parser a
 eitherToFail (Right x) = return x
-eitherToFail (Left err) = fail err
+eitherToFail (Left Meta { unmeta = msg, metaSpan }) = addFail metaSpan msg
 
 metaExtendPrec :: Parsable b => (Meta a -> Meta b -> c) -> Prec -> Meta a -> Parser (Meta c)
 metaExtendPrec f prec current =
@@ -369,7 +366,7 @@ metaExtendPrec f prec current =
 
 metaExtendFail
   :: Parsable b
-  => (Meta a -> Meta b -> Either String c)
+  => (Meta a -> Meta b -> Either (Meta String) c)
   -> Prec
   -> Meta a
   -> Parser (Meta c)
@@ -435,23 +432,26 @@ parseExprIdent = do
       return $ EGlobal path
 
 parseExprIndex :: Parser Expr
-parseExprIndex =
-  reservedOp QuestionMark >> (try L.decimal <|> return 0) >>= index
-  where
-    index num = do
-      count <- countBindings
-      if num < count then
-        bindingAtIndex num >>= \case
-          Nothing ->
-            return $ EIndex num Nothing
-          Just name ->
-            fail ("binding declared by name `" ++ name ++ "` should also be referred to by name")
-      else if count == 0 then
-        fail ("found De Bruijn index, but no bindings are in scope")
-      else if count == 1 then
-        fail ("found De Bruijn index of " ++ show num ++ ", but only 1 binding is in scope")
-      else
-        fail ("found De Bruijn index of " ++ show num ++ ", but only " ++ show count ++ " bindings are in scope")
+parseExprIndex = do
+  (span, num) <- getSpan $ do
+    reservedOp QuestionMark
+    try L.decimal <|> return 0
+  count <- countBindings
+  if num < count then
+    bindingAtIndex num >>= \case
+      Nothing ->
+        return $ EIndex num Nothing
+      Just name ->
+        addFail (Just span) ("binding declared by name `" ++ name ++ "` should also be referred to by name")
+  else
+    addFail (Just span) $
+      case count of
+        0 ->
+          "found De Bruijn index, but no bindings are in scope"
+        1 ->
+          ("found De Bruijn index of " ++ show num ++ ", but only 1 binding is in scope")
+        _ ->
+          ("found De Bruijn index of " ++ show num ++ ", but only " ++ show count ++ " bindings are in scope")
 
 parseFunction :: Parser Expr
 parseFunction = do
@@ -530,7 +530,8 @@ parseCapIdent kind named localBind = do
         Identifier name
           | isLocalIdentifier name ->
             let alt = Path $ init components ++ [Identifier $ capFirst name] in
-            fail ("invalid path for " ++ kind ++ ", did you mean to capitalize it like `" ++ show alt ++ "`?")
+            addFail (metaSpan pathWithMeta)
+              ("invalid path for " ++ kind ++ ", did you mean to capitalize it like `" ++ show alt ++ "`?")
         _ ->
           return $ named $ pathWithMeta
 

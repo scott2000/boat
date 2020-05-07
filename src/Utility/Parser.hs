@@ -7,7 +7,6 @@ import Text.Megaparsec hiding (State)
 import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as L
 
-import Data.Void
 import Data.List
 import Data.Char
 import Control.Monad.Reader
@@ -18,7 +17,10 @@ data ParserState = ParserState
   , multiline :: Bool
   , exprBindings :: [Maybe String] }
 
-type InnerParser = ParsecT Void String CompileIO
+data SilentFail = SilentFail
+  deriving (Show, Ord, Eq)
+
+type InnerParser = ParsecT SilentFail String CompileIO
 type Parser = ReaderT ParserState InnerParser
 
 runCustomParser :: Parser a -> InnerParser a
@@ -27,30 +29,35 @@ runCustomParser p = runReaderT (followedByEnd p) defaultParserState
 followedByEnd :: Parser a -> Parser a
 followedByEnd p = p <* label "end of file" (try $ many spaceAnyIndent >> eof)
 
-convertParseErrors :: ParseErrorBundle String Void -> CompileIO ()
+instance ShowErrorComponent SilentFail where
+  showErrorComponent SilentFail = "<silent failure>"
+
+convertParseErrors :: ParseErrorBundle String SilentFail -> CompileIO ()
 convertParseErrors bundle =
   go initialPosState $ NonEmpty.toList $ bundleErrors bundle
   where
     initialPosState = bundlePosState bundle
     file = Just $ sourceName $ pstateSourcePos initialPosState
     go _ [] = return ()
-    go posState (err:rest) = do
-      let
-        o = errorOffset err
-        posState' = reachOffsetNoLine o posState
-        startPos = pstateSourcePos posState'
-        errText = parseErrorTextPretty err
-        endPos
-          | errLen == 1 = startPos
-          | otherwise = pstateSourcePos $ reachOffsetNoLine (o+errLen-1) posState'
-      addError CompileError
-        { errorFile = file
-        , errorSpan = Just $ Span
-          (Position (unPos $ sourceLine startPos) (unPos $ sourceColumn startPos))
-          (Position (unPos $ sourceLine endPos) (unPos (sourceColumn endPos) + 1))
-        , errorKind = Error
-        , errorMessage = errText }
-      go posState' rest
+    go posState (err:rest)
+      | errLen == 0 = go posState rest
+      | otherwise = do
+        let
+          o = errorOffset err
+          posState' = reachOffsetNoLine o posState
+          startPos = pstateSourcePos posState'
+          errText = parseErrorTextPretty err
+          endPos
+            | errLen == 1 = startPos
+            | otherwise = pstateSourcePos $ reachOffsetNoLine (o+errLen-1) posState'
+        addError CompileError
+          { errorFile = file
+          , errorSpan = Just $ Span
+            (Position (unPos $ sourceLine startPos) (unPos $ sourceColumn startPos))
+            (Position (unPos $ sourceLine endPos) (unPos (sourceColumn endPos) + 1))
+          , errorKind = Error
+          , errorMessage = errText }
+        go posState' rest
       where
         errLen =
           case err of
@@ -60,8 +67,7 @@ convertParseErrors bundle =
             FancyError _ xs ->
               foldl' fancyLenMax 1 xs
     fancyLenMax a = \case
-      ErrorCustom b ->
-        max a $ errorComponentLen b
+      ErrorCustom SilentFail -> 0
       _ -> a
 
 defaultParserState :: ParserState
@@ -416,4 +422,20 @@ expectStr s = label $ show s
 
 unexpectedStr :: String -> Parser a
 unexpectedStr = unexpected . Tokens . NonEmpty.fromList
+
+addFail :: Maybe Span -> String -> Parser a
+addFail maybeSpan msg = do
+  file <- getFilePath
+  span <-
+    case maybeSpan of
+      Nothing ->
+        pointSpan <$> getPos
+      Just span ->
+        return span
+  addError CompileError
+    { errorFile = Just file
+    , errorSpan = Just span
+    , errorKind = Error
+    , errorMessage = msg }
+  customFailure SilentFail
 
