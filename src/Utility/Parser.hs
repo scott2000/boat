@@ -11,16 +11,25 @@ import Data.List
 import Data.Char
 import Control.Monad.Reader
 import qualified Data.List.NonEmpty as NonEmpty
+import qualified Data.Set as Set
 
 data ParserState = ParserState
   { minIndent :: Int
   , multiline :: Bool
   , exprBindings :: [Maybe String] }
+  deriving Show
 
-data SilentFail = SilentFail
-  deriving (Show, Ord, Eq)
+defaultParserState :: ParserState
+defaultParserState = ParserState
+  { minIndent = 0
+  , multiline = True
+  , exprBindings = [] }
 
-type InnerParser = ParsecT SilentFail String CompileIO
+data CustomFail = CustomFail
+  { customCompileError :: CompileError }
+  deriving (Ord, Eq)
+
+type InnerParser = ParsecT CustomFail String CompileIO
 type Parser = ReaderT ParserState InnerParser
 
 runCustomParser :: Parser a -> InnerParser a
@@ -29,52 +38,55 @@ runCustomParser p = runReaderT (followedByEnd p) defaultParserState
 followedByEnd :: Parser a -> Parser a
 followedByEnd p = p <* label "end of file" (try $ many spaceAnyIndent >> eof)
 
-instance ShowErrorComponent SilentFail where
-  showErrorComponent SilentFail = "<silent failure>"
+instance ShowErrorComponent CustomFail where
+  showErrorComponent (CustomFail CompileError { errorMessage }) = errorMessage
 
-convertParseErrors :: ParseErrorBundle String SilentFail -> CompileIO ()
+convertParseErrors :: ParseErrorBundle String CustomFail -> CompileIO ()
 convertParseErrors bundle =
   go initialPosState $ NonEmpty.toList $ bundleErrors bundle
   where
     initialPosState = bundlePosState bundle
     file = Just $ sourceName $ pstateSourcePos initialPosState
     go _ [] = return ()
-    go posState (err:rest)
-      | errLen == 0 = go posState rest
-      | otherwise = do
-        let
-          o = errorOffset err
-          posState' = reachOffsetNoLine o posState
-          startPos = pstateSourcePos posState'
-          errText = parseErrorTextPretty err
-          endPos
-            | errLen == 1 = startPos
-            | otherwise = pstateSourcePos $ reachOffsetNoLine (o+errLen-1) posState'
-        addError CompileError
-          { errorFile = file
-          , errorSpan = Just $ Span
-            (Position (unPos $ sourceLine startPos) (unPos $ sourceColumn startPos))
-            (Position (unPos $ sourceLine endPos) (unPos (sourceColumn endPos) + 1))
-          , errorKind = Error
-          , errorMessage = errText }
-        go posState' rest
+    go posState (err:rest) =
+      case customFail of
+        Just err -> do
+          addError err
+          go posState rest
+        Nothing -> do
+          let
+            o = errorOffset err
+            posState' = reachOffsetNoLine o posState
+            startPos = pstateSourcePos posState'
+            errText = parseErrorTextPretty err
+            endPos
+              | errLen == 1 = startPos
+              | otherwise = pstateSourcePos $ reachOffsetNoLine (o+errLen-1) posState'
+          addError CompileError
+            { errorFile = file
+            , errorSpan = Just $ Span
+              (Position (unPos $ sourceLine startPos) (unPos $ sourceColumn startPos))
+              (Position (unPos $ sourceLine endPos) (unPos (sourceColumn endPos) + 1))
+            , errorKind = Error
+            , errorMessage = errText }
+          go posState' rest
       where
+        customFail =
+          case err of
+            FancyError _ s ->
+              case Set.toList s of
+                [ErrorCustom (CustomFail err)] ->
+                  Just err
+                _ ->
+                  Nothing
+            _ ->
+              Nothing
+
         errLen =
           case err of
             TrivialError _ (Just (Tokens ts)) _ ->
               NonEmpty.length ts
-            TrivialError _ _ _ -> 1
-            FancyError _ xs ->
-              foldl' fancyLenMax 1 xs
-    fancyLenMax a = \case
-      ErrorCustom SilentFail -> 0
-      _ -> a
-
-defaultParserState :: ParserState
-defaultParserState = ParserState
-  { minIndent = 0
-  , multiline = True
-  , exprBindings = [] }
+            _ -> 1
 
 isKeyword :: String -> Bool
 isKeyword w = w `elem`
@@ -182,21 +194,54 @@ parseSomeNewlines = fmap or $ hidden $ some $ choice
   , lineCmnt  >> return False
   , blockCmnt  >> return False ]
 
+data SpaceError
+  = UnexpectedEndOfIndentedBlock
+  | UnexpectedEndOfLine
+  | UnexpectedLineBreak
+  | UnexpectedContinuation
+  | ContinuationIndent Int
+
+instance Show SpaceError where
+  show = \case
+    UnexpectedEndOfIndentedBlock ->
+      "unexpected end of indented block"
+    UnexpectedEndOfLine ->
+      "unexpected end of line, are you missing something here?"
+    UnexpectedLineBreak ->
+      "line break not allowed unless directly inside indented block"
+    UnexpectedContinuation ->
+      "line continuation not allowed unless directly inside indented block"
+    ContinuationIndent n ->
+      "line continuation should be indented exactly 2 spaces more than its enclosing block (found " ++ show n ++ ")"
+
+spaceErrorBacktrack :: SpaceError -> Bool
+spaceErrorBacktrack = \case
+  UnexpectedEndOfIndentedBlock -> True
+  UnexpectedEndOfLine -> True
+  _ -> False
+
+spaceErrorSingleLine :: SpaceError -> Bool
+spaceErrorSingleLine = \case
+  UnexpectedEndOfLine -> True
+  UnexpectedLineBreak -> True
+  UnexpectedContinuation -> True
+  _ -> False
+
+spaceErrorRecoverable :: SpaceError -> Bool
+spaceErrorRecoverable = \case
+  ContinuationIndent _ -> False
+  _ -> True
+
+spaceErrorFail :: Int -> SpaceError -> Parser a
+spaceErrorFail offset err = do
+  when (spaceErrorBacktrack err) $
+    setOffset offset
+  fail $ show err
+
 data SpaceType
   = NoSpace
   | Whitespace
   | LineBreak
-
-data SpaceError
-  = ContinuationIndent Int
-  | EndOfIndentedBlock
-
-instance Show SpaceError where
-  show = \case
-    ContinuationIndent n ->
-      "line continuation should be indented exactly 2 spaces more than its enclosing block (found " ++ show n ++ ")"
-    EndOfIndentedBlock ->
-      "unexpected end of indented block, is the indentation correct?"
 
 trySpaces :: Parser (Either SpaceError SpaceType)
 trySpaces =
@@ -208,8 +253,13 @@ trySpaces =
       ParserState { minIndent, multiline } <- ask
       -- getting the level here ensures that getting the position in a span is safe
       level <- getLevel
+      isEOF <- atEnd
+      let
+        adjustedLevel
+          | isEOF = 0
+          | otherwise = level
       if multiline then do
-        case level - minIndent of
+        case adjustedLevel - minIndent of
           0 ->
             return $ Right LineBreak
           2 ->
@@ -217,21 +267,22 @@ trySpaces =
           n ->
             return $ Left $
               if n < 0 then
-                EndOfIndentedBlock
+                UnexpectedEndOfIndentedBlock
               else
                 ContinuationIndent n
-      else do
-        isEOF <- atEnd
-        if isEOF then
-          fail "unexpected end of input, did you forget a closing parenthesis or bracket?"
-        else
-          fail "line continuation not allowed unless directly inside indented block"
+      else
+        return $ Left $
+          case adjustedLevel `compare` minIndent of
+            LT -> UnexpectedEndOfLine
+            EQ -> UnexpectedLineBreak
+            GT -> UnexpectedContinuation
 
 spaces :: Parser SpaceType
-spaces =
+spaces = do
+  offset <- getOffset
   trySpaces >>= \case
     Right space -> return space
-    Left err -> fail $ show err
+    Left err -> spaceErrorFail offset err
 
 spaceAnyIndent :: Parser ()
 spaceAnyIndent = choice [plainWhitespace, void $ char '\n', lineCmnt, blockCmnt]
@@ -251,21 +302,20 @@ nbsc = do
       fail "unexpected line break"
     Right other ->
       return other
-    Left EndOfIndentedBlock -> do
-      setOffset offset
-      fail "unexpected end of indented block"
     Left err ->
-      fail $ show err
+      spaceErrorFail offset err
 
 lineBreak :: Parser ()
 lineBreak = do
   offset <- getOffset
-  spaces >>= \case
-    LineBreak ->
+  trySpaces >>= \case
+    Right LineBreak ->
       return ()
-    _ -> do
+    Right _ -> do
       setOffset offset
       fail "expected line break"
+    Left err ->
+      spaceErrorFail offset err
 
 isSpace :: SpaceType -> Bool
 isSpace NoSpace = False
@@ -432,10 +482,9 @@ addFail maybeSpan msg = do
         pointSpan <$> getPos
       Just span ->
         return span
-  addError CompileError
+  customFailure $ CustomFail CompileError
     { errorFile = Just file
     , errorSpan = Just span
     , errorKind = Error
     , errorMessage = msg }
-  customFailure SilentFail
 

@@ -40,4 +40,4 @@ lookupDecl path = do
     Just decl -> return decl
 
 inferVariance :: AllDecls -> CompileIO AllDecls
-inferVariance decls = compilerBug "inferVariance is unimplemented"
+inferVariance decls = return decls

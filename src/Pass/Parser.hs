@@ -25,22 +25,29 @@ parseName =
 
 parsePath :: Parser Path
 parsePath =
-  Path <$> ((:) <$> try parseName <*> many (reservedOp PathDot *> parseName))
+  Path <$> ((:) <$> try parseName <*> many (hidden (reservedOp PathDot) *> parseName))
 
 parseFile :: FilePath -> Parser Module
-parseFile path = parseModule defaultModule
+parseFile path = do
+  trySpaces >>= \case
+    Right NoSpace ->
+      return ()
+    Right LineBreak ->
+      return ()
+    _ ->
+      fail "expected unindented top-level items for module"
+  parseModule defaultModule
   where
-    parseModule m =
-      option m (try spaces >> (parseAll >>= parseModule) <|> (m <$ eof))
+    parseModule m = do
+      m <-
+        parseUse
+        <|> parseMod
+        <|> parseLet
+        <|> parseData
+        <|> parseEffect
+        <|> parseOperator
+      option m (try lineBreak >> ((m <$ hidden eof) <|> parseModule m))
       where
-        parseAll =
-          parseUse
-          <|> parseMod
-          <|> parseLet
-          <|> parseData
-          <|> parseEffect
-          <|> parseOperator
-
         parseUse =
           keyword "use" *> nbsc *> parseMeta parseUseModule <&> \use ->
             modAddUse use path m
@@ -60,7 +67,7 @@ parseFile path = parseModule defaultModule
               ops <- parseSomeSeparatedList '<' operatorPart
               return $ modAddOpType ops path m
             operatorPart =
-              try (OpLink <$> parseMeta (char '(' *> parsePath <* spaces <* char ')'))
+              try (OpLink <$> parseMeta (char '(' *> nbsc *> parsePath <* nbsc <* char ')'))
               <|> (OpDeclare <$> parseMeta parseName)
             operatorDecl = do
               opAssoc <- option ANon (operatorAssoc <* nbsc)
@@ -154,9 +161,9 @@ parseUseContents =
   <|> (UseAll <$> (parseParen <|> return []))
   where
     parseParen =
-      try nbsc *> char '(' *> parenInner <* spaces <* char ')'
+      try nbsc *> char '(' *> blockOf parenInner <* spaces <* char ')'
     parenInner =
-      blockOf $ parseSomeCommaList $ parseMeta parseUseModule
+      parseSomeCommaList $ parseMeta parseUseModule
 
 parseSomeCommaList :: Parser a -> Parser [a]
 parseSomeCommaList = parseSomeSeparatedList ','
@@ -200,27 +207,13 @@ paren =
 parserNoPrefix :: Parsable a => Parser (Meta a)
 parserNoPrefix = parseMeta parseOne <|> hidden paren
 
--- parserNoPrefix :: Parsable a => Parser (Meta a)
--- parserNoPrefix = do
---   term <- parserNoEffects
---   case opEffectApply of
---     Nothing -> return term
---     Just eApply -> tryEffect eApply term <|> return term
---   where
---     tryEffect eApply term = do
---       start <- try $ nbsc >> parseMeta (reservedOp PipeSeparator)
---       effects <- nbsc *> parseEffectSet <* nbsc
---       end <- parseMeta $ reservedOp PipeSeparator
---       let newTerm = metaWithEnds term end $ eApply term (metaWithEnds start end effects)
---       tryEffect eApply newTerm <|> return newTerm
-
 parserPartial :: Parsable a => Parser (Meta a)
 parserPartial = hidden parsePrefix <|> parserNoPrefix
   where
     parsePrefix :: forall a. Parsable a => Parser (Meta a)
     parsePrefix = parseMeta $ do
-      path <- try $ do
-        path <- parseMeta (Local . Unary <$> unaryOp)
+      path <- do
+        path <- try $ parseMeta (Local . Unary <$> unaryOp)
         spaceAfter <- isSpace <$> nbsc
         if spaceAfter then do
           addFail (metaSpan path) $
@@ -274,10 +267,11 @@ parserBase prec current =
                     fail "line breaks are only allowed in expressions"
             else
               empty
-          Left EndOfIndentedBlock ->
-            fail $ show EndOfIndentedBlock
-          Left err ->
-            return $ fail $ show err
+          Left err
+            | spaceErrorRecoverable err ->
+              spaceErrorFail offset err
+            | otherwise ->
+              return $ fail $ show err
 
     opOrApp spaceBefore =
       op <|> app >>= \case
@@ -288,55 +282,60 @@ parserBase prec current =
       where
         op = try $ do
           offset <- getOffset
-          parsedOp <- infixOp
+          infixOp >>= \case
+            Left special ->
+              opParseSpecial offset special
+            Right normal ->
+              parseSpaceAfterOperator offset $ opAfterSpace offset normal
+
+        parseSpaceAfterOperator offset f = do
           offsetAfterOp <- getOffset
           trySpaces >>= \case
             Right NoSpace ->
-              opAfterSpace offset parsedOp False
+              f False
             Right Whitespace ->
-              opAfterSpace offset parsedOp True
+              f True
             Right LineBreak ->
               return $ Just $ do
                 setOffset offsetAfterOp
                 fail "line break never allowed after operator"
-            Left EndOfIndentedBlock ->
-              fail $ show EndOfIndentedBlock
-            Left err ->
-              return $ Just $ fail $ show err
+            Left err
+              | spaceErrorRecoverable err ->
+                spaceErrorFail offset err
+              | otherwise ->
+                return $ Just $ fail $ show err
+
+        opParseSpecial offset op =
+          if prec <= normalPrec then
+            case parseSpecial op of
+              Nothing ->
+                if prec == minPrec then
+                  return $ Just $ addFail (Just $ fst op)
+                    ("special operator `" ++ show (snd op) ++ "` not allowed in " ++ opKind (Of :: Of a))
+                else
+                  return Nothing
+              Just p ->
+                parseSpaceAfterOperator offset $ \_ ->
+                  return $ Just $ p normalPrec current
+          else
+            return Nothing
 
         opAfterSpace offset parsedOp spaceAfter = do
-          let
-            isSpecial =
-              case parsedOp of
-                Right InfixOp { infixBacktick = True } -> True
-                Left _ -> True
-                _ -> False
-          guard (spaceAfter || not spaceBefore || isSpecial)
+          let isBacktick = infixBacktick parsedOp
+          guard (spaceAfter || not spaceBefore || isBacktick)
           let
             opPrec =
-              if spaceAfter || isSpecial then
+              if spaceAfter || isBacktick then
                 normalPrec
               else
                 compactPrec
           if prec <= opPrec then
-            case parsedOp of
-              Right path ->
-                return $ Just $ do
-                  bin <- metaExtendPrec (opBinary $ infixPath path) opPrec current
-                  if prec == opPrec then
-                    return bin
-                  else
-                    parserBase prec $ copySpan bin $ opParen bin
-              Left op ->
-                case parseSpecial op of
-                  Nothing ->
-                    if prec == minPrec then
-                      return $ Just $ addFail (Just $ fst op)
-                        ("special operator `" ++ show (snd op) ++ "` not allowed in " ++ opKind (Of :: Of a))
-                    else
-                      return Nothing
-                  Just p ->
-                    return $ Just $ p opPrec current
+            return $ Just $ do
+              bin <- metaExtendPrec (opBinary $ infixPath parsedOp) opPrec current
+              if prec == opPrec then
+                return bin
+              else
+                parserBase prec $ copySpan bin $ opParen bin
           else
             return Nothing
 
@@ -472,7 +471,7 @@ parseMatch :: Parser Expr
 parseMatch =
   pure EMatchIn
   <*  keyword "match"
-  <*> blockOf (some (try spaces >> parserNoSpace))
+  <*> blockOf (some (try nbsc >> parserNoSpace))
   <*> blockOf matchCases
 
 parseExprUse :: Parser Expr
