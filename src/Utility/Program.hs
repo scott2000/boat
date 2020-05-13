@@ -295,6 +295,13 @@ data TypeVariance
   -- Invariance, represented as _ for high-order parameters
   | VInvariant
 
+instance Show TypeVariance where
+  show = \case
+    VAnon _ -> "<unknown>"
+    VOutput -> show SymbolOutput
+    VInput -> show SymbolInput
+    VInvariant -> show SymbolInvariannt
+
 instance Semigroup TypeVariance where
   VOutput <> x = x
   VInvariant <> _ = VInvariant
@@ -309,9 +316,20 @@ pattern SymbolInput :: Type
 pattern SymbolInput = TNamed [] (DefaultMeta (Local (Operator "-")))
 
 pattern SymbolInvariannt :: Type
-pattern SymbolInvariannt <- TAnon _
+pattern SymbolInvariannt = TAnon AnonAny
 
-type DataArg = (Meta String, TypeVariance)
+data DataArg = DataArg
+  { argName :: Meta String
+  , argVariance :: TypeVariance
+  , argParams :: [Meta TypeVariance] }
+
+instance Show DataArg where
+  show DataArg { argName, argParams }
+    | null argParams = unmeta argName
+    | otherwise = "(" ++ unwords (unmeta argName : map show argParams) ++ ")"
+
+pattern NullaryArg :: Meta String -> TypeVariance -> DataArg
+pattern NullaryArg name variance = DataArg name variance []
 
 type DataVariant = (Meta Name, [Meta Type])
 
@@ -324,8 +342,8 @@ data DataDecl = DataDecl
 instance ShowWithName DataDecl where
   showWithName name DataDecl { dataMod, dataArgs, dataEffects, dataVariants } =
     "data " ++ mod ++ name
-    ++ effectSuffixStr (map (unmeta . fst) dataEffects)
-    ++ unwords ("" : map (unmeta . fst) dataArgs)
+    ++ effectSuffixStr (map show dataEffects)
+    ++ unwords ("" : map show dataArgs)
     ++ " =" ++ indent (intercalate "\n" (map (showVariant . unmeta) dataVariants))
     where
       mod = if dataMod then "mod " else ""
@@ -351,16 +369,98 @@ modAddData name decl path mod = do
       , errorMessage = "duplicate data type declaration for name `" ++ show name ++ "`" }
   return mod { modDatas = Map.insert name newDecl oldDatas }
 
-data MaybeLowercase a
+data MaybeLowercase
   = MLNamed Path
   | MLPoly String
   | MLOther String
+
+extractLowercase :: MonadState CompileState m
+                 => (String -> m (Maybe DataArg))
+                 -> Maybe Span
+                 -> String
+                 -> MaybeLowercase
+                 -> m (Maybe DataArg)
+extractLowercase err span kind = \case
+  MLNamed (Path path) ->
+    case path of
+      [Identifier ('_':rest)] ->
+        let
+          suggestion =
+            case rest of
+              (x:_) | isAlpha x ->
+                ", did you mean `" ++ lowerFirst rest ++ "`?"
+              _ -> ""
+        in
+          err (kind ++ " parameter name must start with a lowercase letter" ++ suggestion)
+      [Identifier name] ->
+        err (kind ++ " parameter name must be lowercase, did you mean `" ++ lowerFirst name ++ "`?")
+      _ ->
+        err (kind ++ " parameter name must be unqualified, did you mean `" ++ show (last path) ++ "`?")
+  MLPoly local -> do
+    anon <- getNewAnon
+    return $ Just $ DataArg (meta local) { metaSpan = span } (VAnon anon) []
+  MLOther other ->
+    err ("expected name for " ++ kind ++ " parameter, found `" ++ other ++ "` instead")
+
+varianceFromType :: MonadState CompileState m
+                 => FilePath
+                 -> Meta Type
+                 -> m (Maybe (Meta TypeVariance))
+varianceFromType file typeWithMeta =
+  case unmeta typeWithMeta of
+    SymbolOutput -> convert VOutput
+    SymbolInput -> convert VInput
+    SymbolInvariannt -> convert VInvariant
+    _ -> do
+      addError CompileError
+        { errorFile = Just file
+        , errorSpan = metaSpan typeWithMeta
+        , errorKind = Error
+        , errorMessage =
+          "expected one of (+), (-), or _ for higher-kinded type parameter variance" }
+      return Nothing
+  where
+    convert = return . Just . copySpan typeWithMeta
+
+dataArgFromType :: MonadState CompileState m
+                => FilePath
+                -> Meta Type
+                -> m (Maybe DataArg)
+dataArgFromType file typeWithMeta =
+  case reduceApply typeWithMeta of
+    Left (a, _) -> do
+      addError CompileError
+        { errorFile = Just file
+        , errorSpan = metaSpan a
+        , errorKind = Error
+        , errorMessage =
+          "expected a type parameter, not a series of infix operators" }
+      return Nothing
+    Right (ReducedApp Meta { unmeta = baseTy, metaSpan = baseSpan } args) -> do
+      let
+        err msg = do
+          addError CompileError
+            { errorFile = Just file
+            , errorSpan = baseSpan
+            , errorKind = Error
+            , errorMessage = msg }
+          return Nothing
+      dataArg <- extractLowercase err baseSpan "type" $
+        case baseTy of
+          TNamed [] path -> MLNamed $ unmeta path
+          TPoly local -> MLPoly local
+          other -> MLOther (show other)
+      case dataArg of
+        Nothing -> return Nothing
+        Just dataArg -> do
+          args <- forM args $ varianceFromType file
+          return $ Just $ dataArg { argParams = catMaybes args }
 
 dataAndArgsFromType :: MonadState CompileState m
                     => FilePath
                     -> Meta Type
                     -> m (Maybe (Meta Name), [DataArg], [DataArg])
-dataAndArgsFromType file typeWithMeta = do
+dataAndArgsFromType file typeWithMeta =
   case reduceApply typeWithMeta of
     Left (_, b) -> do
       addError CompileError
@@ -414,47 +514,11 @@ dataAndArgsFromType file typeWithMeta = do
                   EffectPoly local -> MLPoly local
                   other -> MLOther (show other)
             _ -> err "effect parameters must each be in their own set of pipes, you cannot use `+` in between"
-      vars <- forM args $ \ty ->
-        let
-          err msg = do
-            addError CompileError
-              { errorFile = Just file
-              , errorSpan = metaSpan ty
-              , errorKind = Error
-              , errorMessage = msg }
-            return Nothing
-        in
-          extractLowercase err (metaSpan ty) "type" $
-            case unmeta ty of
-              TNamed [] path -> MLNamed $ unmeta path
-              TPoly local -> MLPoly local
-              other -> MLOther (show other)
+      vars <- forM args $ dataArgFromType file
       return (name, catMaybes effs, catMaybes vars)
-  where
-    extractLowercase err span kind = \case
-      MLNamed (Path path) ->
-        case path of
-          [Identifier ('_':rest)] ->
-            let
-              suggestion =
-                case rest of
-                  (x:_) | isAlpha x ->
-                    ", did you mean `" ++ lowerFirst rest ++ "`?"
-                  _ -> ""
-            in
-              err (kind ++ " parameter name must start with a lowercase letter" ++ suggestion)
-          [Identifier name] ->
-            err (kind ++ " parameter name must be lowercase, did you mean `" ++ lowerFirst name ++ "`?")
-          _ ->
-            err (kind ++ " parameter name must be unqualified, did you mean `" ++ show (last path) ++ "`?")
-      MLPoly local -> do
-        anon <- getNewAnon
-        return $ Just ((meta local) { metaSpan = span }, VAnon anon)
-      MLOther other ->
-        err ("expected name for " ++ kind ++ " parameter, found `" ++ other ++ "` instead")
 
 variantFromType :: MonadState CompileState m => FilePath -> Meta Type -> m (Maybe (Meta DataVariant))
-variantFromType file typeWithMeta = do
+variantFromType file typeWithMeta =
   case reduceApply typeWithMeta of
     Left (a, b) -> do
       addError CompileError
@@ -489,7 +553,7 @@ variantFromType file typeWithMeta = do
               , errorMessage = "data type variants cannot take effect arguments" }
             return Nothing
           TNamed [] pathWithMeta ->
-            let Meta { unmeta = Path path, metaSpan } = pathWithMeta in
+            let Meta { unmeta = Path path } = pathWithMeta in
             case path of
               [name] ->
                 return $ Just $ copySpan typeWithMeta (copySpan pathWithMeta name, args)
@@ -499,3 +563,4 @@ variantFromType file typeWithMeta = do
             err ("data type variant names must be capitalized, did you mean `" ++ capFirst local ++ "`?")
           other ->
             err ("expected a name for the data type variant, found `" ++ show other ++ "` instead")
+

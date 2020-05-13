@@ -131,7 +131,7 @@ prettyLines color firstLine lines = do
     printAll blankLast _ [] =
       if blankLast then
         return ()
-      else do
+      else
         printBlank
     printAll blankLast lineNumber ((style, line):rest) =
       case style of
@@ -285,9 +285,7 @@ getLineRangeAndContext spanStart spanEnd = do
   return (contextLines, lines)
   where
     startLine = posLine spanStart
-    startColumn = posColumn spanStart
-    endLine = posLine spanEnd
-    lineCount = endLine - startLine + 1
+    lineCount = posLine spanEnd - startLine + 1
 
 takeEnds :: [a] -> (a, [a], a)
 takeEnds (first:rest) = go [] rest
@@ -342,9 +340,7 @@ prettyCompileErrors errs =
             Just Span { spanStart, spanEnd } -> do
               lift $ putStrLn ("\n" ++ file ++ ":" ++ show spanStart ++ ":")
               setFile file
-              let
-                startLine = posLine spanStart
-                endLine = posLine spanEnd
+              let startLine = posLine spanStart
               (context, lines) <- getLineRangeAndContext spanStart spanEnd
               let
                 startColumn = posColumn spanStart

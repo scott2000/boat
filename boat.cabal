@@ -12,7 +12,7 @@ build-type:          Simple
 cabal-version:       >=1.10
 
 executable boat
-  ghc-options:         -Wunused-imports
+  ghc-options:         -Wall -Wno-name-shadowing -Wno-incomplete-patterns -Wno-unused-do-bind -Wno-unused-top-binds
   main-is:             Main.hs
   other-modules:       Utility.Basics,
                        Utility.ErrorPrint,

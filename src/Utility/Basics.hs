@@ -102,6 +102,10 @@ parseModuleName = parseIdentIn "module names" False
 
 type AnonCount = Word64
 
+pattern AnonAny :: Word64
+pattern AnonAny <- _
+  where AnonAny = 0
+
 data CompileState = CompileState
   { compileOptions :: !CompileOptions
   , compileErrors :: !(Set CompileError)
@@ -113,7 +117,7 @@ compileStateFromOptions opts = CompileState
   { compileOptions = opts
   , compileErrors = Set.empty
   , compileErrorCount = ErrorCount 0 0
-  , compileAnonTypes = 0 }
+  , compileAnonTypes = 1 }
 
 getNewAnon :: MonadState CompileState m => m AnonCount
 getNewAnon = do

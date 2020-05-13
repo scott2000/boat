@@ -37,7 +37,7 @@ addName :: Explicitness -> mark -> Path -> (Name, Item) -> NameSet mark -> NameS
 addName exp id path (name, item) s =
   if Map.member name s then
     Map.adjust collide name s
-  else do
+  else
     Map.insert name new s
   where
     new = Right (path, item, exp, id)
@@ -270,11 +270,12 @@ addUse path (file :/: useWithMeta) nr =
           withNames names' nr
         UseModule Meta { unmeta = name, metaSpan } (UseDot rest) ->
           case nameTableEntry name nt of
-            Just item@Item { itemSub = Just sub } -> do
+            Just item@Item { itemSub = Just sub } ->
               let
                 otherNames' = addName Explicit () path (name, item) $ otherNames names
                 names' = names { otherNames = otherNames' }
-              withNames names' $ add (path .|. name) sub rest nr
+              in
+                withNames names' $ add (path .|. name) sub rest nr
             _ -> do
               lift $ lift $ addError CompileError
                 { errorFile = Just file
@@ -528,7 +529,7 @@ nameResolveEach path mod =
         resPath = nameResolvePath file isOperatorType "an operator type"
         resMetaPath path = forM path $ resPath $ metaSpan path
 
-    nameResolveEffect (name, file :/: decl@EffectDecl { effectSuper }) = do
+    nameResolveEffect (name, file :/: EffectDecl { effectSuper }) = do
       super <-
         case effectSuper of
           Nothing ->

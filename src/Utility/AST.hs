@@ -230,7 +230,7 @@ reduceApply typeWithMeta =
     TApp a b -> do
       ReducedApp ty args <- reduceApply a
       Right $ ReducedApp ty (args ++ [b])
-    other ->
+    _ ->
       Right $ ReducedApp typeWithMeta []
 
 expandFunction :: [Meta Type] -> Meta Type -> Meta Type

@@ -215,7 +215,7 @@ parserPartial = hidden parsePrefix <|> parserNoPrefix
       path <- do
         path <- try $ parseMeta (Local . Unary <$> unaryOp)
         spaceAfter <- isSpace <$> nbsc
-        if spaceAfter then do
+        if spaceAfter then
           addFail (metaSpan path) $
             "infix operator not allowed at start of " ++ opKind (Of :: Of a)
             ++ "\n(make sure prefix operators have no space after them)"
@@ -286,7 +286,7 @@ parserBase prec current =
             Left special ->
               opParseSpecial offset special
             Right normal ->
-              parseSpaceAfterOperator offset $ opAfterSpace offset normal
+              parseSpaceAfterOperator offset $ opAfterSpace normal
 
         parseSpaceAfterOperator offset f = do
           offsetAfterOp <- getOffset
@@ -320,7 +320,7 @@ parserBase prec current =
           else
             return Nothing
 
-        opAfterSpace offset parsedOp spaceAfter = do
+        opAfterSpace parsedOp spaceAfter = do
           let isBacktick = infixBacktick parsedOp
           guard (spaceAfter || not spaceBefore || isBacktick)
           let

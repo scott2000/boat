@@ -139,7 +139,7 @@ createGraph = \case
           l = showLast lower
           h = showLast higher
           p = showLast path
-          showErr msg = do
+          showErr msg =
             lift $ addFatal CompileError
               { errorFile = Just file
               , errorSpan = metaSpan path
@@ -166,7 +166,7 @@ createGraph = \case
 updateExprs :: AssocState -> AllDecls -> CompileIO AllDecls
 updateExprs
   AssocState { assocGraph, assocPaths }
-  decls@AllDecls { allOpTypes, allOpDecls }
+  decls@AllDecls { allOpDecls }
   = do
     allDatas <- mapM updateData $ allDatas decls
     allLets <- mapM updateLet $ allLets decls
@@ -238,7 +238,7 @@ updateExprs
       unwrap m = runMaybeT m >>= \case
         Nothing -> do
           exitIfErrors
-          return undefined
+          compilerBug "unwrapping associated operator list failed despite no errors being reported"
         Just x -> return x
 
       getNext :: Monad m => StateT [a] m a
