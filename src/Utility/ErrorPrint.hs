@@ -1,4 +1,4 @@
-module Utility.ErrorPrint (exitIfErrors, finishAndCheckErrors, addFatal, compilerBug) where
+module Utility.ErrorPrint (exitIfErrors, finishAndCheckErrors, addFatal, compilerBug, compilerBugRawIO) where
 
 import Utility.Basics
 
@@ -42,16 +42,28 @@ addFatal e = do
   exitIfErrors
   compilerBug "addFatal did not exit!"
 
+compilerBugBaseMessage :: String
+compilerBugBaseMessage =
+  "something went wrong when compiling your code! (please report this compiler bug)\n"
+
 compilerBug :: String -> CompileIO a
 compilerBug msg = do
   addError CompileError
     { errorFile = Nothing
     , errorSpan = Nothing
     , errorKind = Error
-    , errorMessage =
-      "something went wrong when compiling your code! (please report this compiler bug)\nerror message: " ++ msg }
+    , errorMessage = compilerBugBaseMessage ++ "error message: " ++ msg }
   printErrors
   lift $ exitFailure
+
+compilerBugRawIO :: String -> IO a
+compilerBugRawIO err = do
+  prettyCompileErrors $ Set.singleton CompileError
+    { errorFile = Nothing
+    , errorSpan = Nothing
+    , errorKind = Error
+    , errorMessage = compilerBugBaseMessage ++ err }
+  exitFailure
 
 printErrors :: CompileIO ()
 printErrors =

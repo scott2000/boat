@@ -2,6 +2,7 @@ module Main where
 
 import Utility.Basics
 import Utility.ErrorPrint
+import Utility.AST
 import Utility.Program
 import Utility.Parser
 import Pass.Parser
@@ -15,15 +16,36 @@ import System.IO (readFile)
 import System.Exit (exitFailure)
 
 import Data.List (sort, intercalate)
+import Data.IORef
 import Text.Megaparsec (runParserT)
 import Control.Monad.State.Strict
+import Control.Exception
 import Options.Applicative as Opt
 
+data Phase
+  = PhaseInit
+  | PhaseParser
+  | PhaseNameResolve
+  | PhaseAssocOps
+  | PhaseInferVariance
+
 main :: IO ()
-main =
-  getCurrentDirectory
-  >>= parseArgs
-  >>= (evalStateT startCompile . compileStateFromOptions)
+main = do
+  phase <- newIORef PhaseInit
+  catch (start phase) $ \(e :: SomeException) -> do
+    phaseMsg <- readIORef phase <&> \case
+      PhaseInit -> "initialization"
+      PhaseParser -> "parsing"
+      PhaseNameResolve -> "name resolution"
+      PhaseAssocOps -> "operator association"
+      PhaseInferVariance -> "variance inference"
+    compilerBugRawIO $ "unexpected crash during " ++ phaseMsg ++ ":" ++ indent (show e)
+
+start :: IORef Phase -> IO ()
+start phase = do
+  currentDirectory <- getCurrentDirectory
+  options <- parseArgs currentDirectory
+  evalStateT (startCompile phase) $ compileStateFromOptions options
   where
     parseArgs currentDirectory =
       execParser $ info (parseOptions <**> helper) mempty
@@ -48,8 +70,13 @@ main =
             <> metavar "PACKAGE_NAME"
             <> help "The name which will appear as the base of every path in this package")
 
-startCompile :: CompileIO ()
-startCompile = do
+setPhase :: IORef Phase -> Phase -> CompileIO ()
+setPhase phase newPhase =
+  lift $ writeIORef phase newPhase
+
+startCompile :: IORef Phase -> CompileIO ()
+startCompile phase = do
+  setPhase phase PhaseParser
   mods <- do
     path <- gets (compileTarget . compileOptions)
     isDir <- lift $ doesDirectoryExist path
@@ -78,13 +105,16 @@ startCompile = do
       , errorKind = Warning
       , errorMessage = "no code found in source files" }
 
+  setPhase phase PhaseNameResolve
   allDecls <- nameResolve mods
   exitIfErrors
 
+  setPhase phase PhaseAssocOps
   allDecls <- assocOps allDecls
   exitIfErrors
   lift $ putStrLn $ "\nFully resolved and associated:\n\n" ++ show allDecls
 
+  setPhase phase PhaseInferVariance
   allDecls <- inferVariance allDecls
 
   finishAndCheckErrors
