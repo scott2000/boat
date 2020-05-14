@@ -21,3 +21,4 @@ topSortMap m f =
     -- use the indices in the Map as vertices for the graph
     toVertex k = Map.findIndex k m
     toGraph (k, v) = ((k, v), toVertex k, map toVertex $ f v)
+

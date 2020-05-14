@@ -390,3 +390,4 @@ prettyCompileErrors errs =
           putStr tag
           resetColor
           putStrLn (" " ++ intercalate ("\n " ++ replicate (length tag) ' ') (lines $ errorMessage e))
+

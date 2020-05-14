@@ -41,3 +41,4 @@ lookupDecl path = do
 
 inferVariance :: AllDecls -> CompileIO AllDecls
 inferVariance decls = return decls
+
