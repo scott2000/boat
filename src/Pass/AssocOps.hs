@@ -39,7 +39,7 @@ assocOps decls = do
 
 getSortedAcyclic :: AllDecls -> CompileIO [(Meta Path, InFile OpTypeEnds)]
 getSortedAcyclic AllDecls { allOpTypes } =
-  checkForCycles $ topSortMap allOpTypes concatEnds
+  checkForCycles $ topSortMap concatEnds allOpTypes
   where
     concatEnds = \case
       _ :/: (Nothing,  Nothing)  -> []

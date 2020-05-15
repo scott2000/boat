@@ -13,7 +13,7 @@ import Pass.InferVariance
 import System.FilePath
 import System.Directory
 import System.IO (readFile)
-import System.Exit (exitFailure)
+import System.Exit (exitFailure, ExitCode)
 
 import Data.List (sort, intercalate)
 import Data.IORef
@@ -21,6 +21,7 @@ import Text.Megaparsec (runParserT)
 import Control.Monad.State.Strict
 import Control.Exception
 import Options.Applicative as Opt
+import qualified Data.Map.Strict as Map
 
 data Phase
   = PhaseInit
@@ -31,21 +32,19 @@ data Phase
 
 main :: IO ()
 main = do
-  phase <- newIORef PhaseInit
-  catch (start phase) $ \(e :: SomeException) -> do
-    phaseMsg <- readIORef phase <&> \case
-      PhaseInit -> "initialization"
-      PhaseParser -> "parsing"
-      PhaseNameResolve -> "name resolution"
-      PhaseAssocOps -> "operator association"
-      PhaseInferVariance -> "variance inference"
-    compilerBugRawIO $ "unexpected crash during " ++ phaseMsg ++ ":" ++ indent (show e)
-
-start :: IORef Phase -> IO ()
-start phase = do
   currentDirectory <- getCurrentDirectory
   options <- parseArgs currentDirectory
-  evalStateT (startCompile phase) $ compileStateFromOptions options
+  phase <- newIORef PhaseInit
+  evalStateT (startCompile phase) (compileStateFromOptions options) `catches`
+    [ Handler $ \(e :: ExitCode) -> throwIO e
+    , Handler $ \(e :: SomeException) -> do
+        phaseMsg <- readIORef phase <&> \case
+          PhaseInit -> "initialization"
+          PhaseParser -> "parsing"
+          PhaseNameResolve -> "name resolution"
+          PhaseAssocOps -> "operator association"
+          PhaseInferVariance -> "variance inference"
+        compilerBugRawIO $ "unexpected crash during " ++ phaseMsg ++ ":" ++ indent (show e) ]
   where
     parseArgs currentDirectory =
       execParser $ info (parseOptions <**> helper) mempty
@@ -116,6 +115,10 @@ startCompile phase = do
 
   setPhase phase PhaseInferVariance
   allDecls <- inferVariance allDecls
+
+  lift $ putStrLn $ "\nInferred variances:\n"
+  lift $ forM_ (Map.toList $ allDatas allDecls) $ \(name, _ :/: DataDecl { dataSig }) ->
+    putStrLn $ showWithName (show name) dataSig
 
   finishAndCheckErrors
 

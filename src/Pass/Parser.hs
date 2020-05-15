@@ -116,8 +116,9 @@ parseFile path = do
               let
                 dataDecl = DataDecl
                   { dataMod = isMod
-                  , dataArgs = params
-                  , dataEffects = effs
+                  , dataSig = DataSig
+                    { dataArgs = params
+                    , dataEffects = effs }
                   , dataVariants = vars }
               in
                 modAddData name dataDecl path m

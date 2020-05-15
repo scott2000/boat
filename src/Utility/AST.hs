@@ -51,6 +51,14 @@ data ExprKind
   | KPattern
   | KType
   | KEffect
+  deriving (Ord, Eq)
+
+instance Show ExprKind where
+  show = \case
+    KValue   -> "value"
+    KPattern -> "pattern"
+    KType    -> "type"
+    KEffect  -> "effect"
 
 data AfterMap m = AfterMap
   { aExpr :: Meta Expr -> m (Meta Expr)
@@ -233,6 +241,16 @@ reduceApply typeWithMeta =
     _ ->
       Right $ ReducedApp typeWithMeta []
 
+findBase :: Meta Type -> (Meta Type, Int)
+findBase = go 0
+  where
+    go n ty =
+      case unmeta ty of
+        TApp a _ ->
+          go (n + 1) a
+        _ ->
+          (ty, n)
+
 expandFunction :: [Meta Type] -> Meta Type -> Meta Type
 expandFunction [] ty = ty
 expandFunction (ty:types) ret =
@@ -242,21 +260,24 @@ pattern DefaultMeta :: a -> Meta a
 pattern DefaultMeta x <- Meta { unmeta = x }
   where DefaultMeta = meta
 
+pattern TAnyFuncArrow :: [Meta EffectSet] -> Type
+pattern TAnyFuncArrow effs = TNamed effs (DefaultMeta (Core (Operator "->")))
+
 pattern TEffFuncArrow :: Meta EffectSet -> Type
-pattern TEffFuncArrow eff = TNamed [eff] (DefaultMeta (Core (Operator "->")))
+pattern TEffFuncArrow eff = TAnyFuncArrow [eff]
 
 pattern TFuncArrow :: Type
-pattern TFuncArrow = TNamed [] (DefaultMeta (Core (Operator "->")))
+pattern TFuncArrow = TAnyFuncArrow []
+
+pattern TAnyFunc :: [Meta EffectSet] -> Meta Type -> Meta Type -> Type
+pattern TAnyFunc effs a b =
+  TApp (DefaultMeta (TApp (DefaultMeta (TAnyFuncArrow effs)) a)) b
 
 pattern TEffFunc :: Meta EffectSet -> Meta Type -> Meta Type -> Type
-pattern TEffFunc eff a b =
-  TApp (DefaultMeta (TApp (DefaultMeta (TEffFuncArrow eff)) a)) b
+pattern TEffFunc eff a b = TAnyFunc [eff] a b
 
 pattern TFunc :: Meta Type -> Meta Type -> Type
-pattern TFunc a b =
-  TApp (DefaultMeta (TApp (DefaultMeta TFuncArrow) a)) b
-  -- using TFuncArrow here triggers a GHC bug with pattern synonyms
-  -- TApp (DefaultMeta (TApp (DefaultMeta (TNamed (Core (Operator "->")))) a)) b
+pattern TFunc a b = TAnyFunc [] a b
 
 pattern EffectPure :: Effect
 pattern EffectPure = EffectNamed (Core (Identifier "Pure"))

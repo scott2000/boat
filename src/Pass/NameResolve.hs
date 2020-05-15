@@ -479,7 +479,7 @@ nameResolveEach path mod =
         other ->
           afterDeclare Nothing other
       where
-        resPath = nameResolvePath file isOperatorType "an operator type"
+        resPath = nameResolvePath file isOperatorType "operator type"
         resMetaPath path = forM path $ resPath $ metaSpan path
 
         afterLink lower = \case
@@ -523,10 +523,10 @@ nameResolveEach path mod =
         decl' = decl { opType = opType' }
         opPath = (path .|.) <$> name
       -- check that something that can be used as an operator exists at the path
-      _ <- nameResolvePath file isInfixable "an operator" (metaSpan opPath) (unmeta opPath)
+      _ <- nameResolvePath file isInfixable "operator" (metaSpan opPath) (unmeta opPath)
       insertOpDecl opPath (file :/: decl')
       where
-        resPath = nameResolvePath file isOperatorType "an operator type"
+        resPath = nameResolvePath file isOperatorType "operator type"
         resMetaPath path = forM path $ resPath $ metaSpan path
 
     nameResolveEffect (name, file :/: EffectDecl { effectSuper }) = do
@@ -535,7 +535,7 @@ nameResolveEach path mod =
           Nothing ->
             return Nothing
           Just effect ->
-            Just <$> (forM effect $ nameResolvePath file isEffect "an effect" $ metaSpan effect)
+            Just <$> (forM effect $ nameResolvePath file isEffect "effect" $ metaSpan effect)
       case super of
         Just Meta { unmeta = Core (Identifier "Pure"), metaSpan } ->
           lift $ lift $ addError CompileError
@@ -625,11 +625,11 @@ nameResolvePath file check kind span path@(Path parts@(head:rest)) = do
                   let
                     subKind = case ns of
                       [] -> kind
-                      _ -> "a module"
+                      _ -> "module"
                   in pathErr $
-                    "`" ++ show path ++ "` does not contain " ++ subKind ++ " named `" ++ show n ++ "`"
+                    "`" ++ show path ++ "` does not contain " ++ aOrAn subKind ++ " named `" ++ show n ++ "`"
             Nothing ->
-              wrongKind subPath "a module"
+              wrongKind subPath "module"
 
     clearId id =
       modify $ \s -> s
@@ -650,7 +650,7 @@ nameResolvePath file check kind span path@(Path parts@(head:rest)) = do
         showExt (Path start) = show $ Path (start ++ parts)
 
     wrongKind path kind = pathErr $
-      "`" ++ show path ++ "` is not " ++ kind
+      "`" ++ show path ++ "` is not " ++ aOrAn kind
 
     notFound = pathErr $
       "cannot find `" ++ show path ++ "` in scope, did you forget to `use` it?"
@@ -663,12 +663,12 @@ nameResolveAfter basePath file = after aDefault
     handleUseExpr m use expr =
       addUse basePath (file :/: use) $ unmeta <$> after m expr
 
-    updatePath k path = nameResolvePath file kIs kStr (metaSpan path) (unmeta path)
+    updatePath k path = nameResolvePath file kIs (show k) (metaSpan path) (unmeta path)
       where
-        (kIs, kStr) =
+        kIs =
           case k of
-            KValue -> (isValue, "a value")
-            KPattern -> (isPattern, "a pattern")
-            KType -> (isType, "a type")
-            KEffect -> (isEffect, "an effect")
+            KValue   -> isValue
+            KPattern -> isPattern
+            KType    -> isType
+            KEffect  -> isEffect
 

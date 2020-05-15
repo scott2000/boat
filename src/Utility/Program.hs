@@ -27,15 +27,21 @@ instance Eq a => Eq (InFile a) where
   (_ :/: a) == (_ :/: b) = a == b
 
 instance Show a => Show (InFile a) where
-  show (_ :/: x) = show x
+  showsPrec i = showsPrec i . unfile
 
 class ShowWithName a where
   showWithName :: String -> a -> String
 
-showDecl :: (ShowWithName a, Show s) => (s, InFile a) -> String
-showDecl (name, _ :/: decl) = showWithName (show name) decl
+instance ShowWithName a => ShowWithName (Meta a) where
+  showWithName name = showWithName name . unmeta
 
-showDeclMap :: (ShowWithName a, Show s) => Map s (InFile a) -> [String]
+instance ShowWithName a => ShowWithName (InFile a) where
+  showWithName name = showWithName name . unfile
+
+showDecl :: (ShowWithName a, Show s) => (s, a) -> String
+showDecl (name, decl) = showWithName (show name) decl
+
+showDeclMap :: (ShowWithName a, Show s) => Map s a -> [String]
 showDeclMap = map showDecl . Map.toList
 
 type OpTypeEnds = (Maybe (Meta Path), Maybe (Meta Path))
@@ -294,6 +300,7 @@ data TypeVariance
   | VInput
   -- Invariance, represented as _ for high-order parameters
   | VInvariant
+  deriving (Ord, Eq)
 
 instance Show TypeVariance where
   show = \case
@@ -319,31 +326,42 @@ pattern SymbolInvariannt :: Type
 pattern SymbolInvariannt = TAnon AnonAny
 
 data DataArg = DataArg
-  { argName :: Meta String
-  , argVariance :: TypeVariance
-  , argParams :: [Meta TypeVariance] }
+  { argVariance :: !TypeVariance
+  , argParams :: [DataArg] }
+  deriving (Ord, Eq)
 
 instance Show DataArg where
-  show DataArg { argName, argParams }
-    | null argParams = unmeta argName
-    | otherwise = "(" ++ unwords (unmeta argName : map show argParams) ++ ")"
+  show arg =
+    showWithName (show $ argVariance arg) arg
 
-pattern NullaryArg :: Meta String -> TypeVariance -> DataArg
-pattern NullaryArg name variance = DataArg name variance []
+instance ShowWithName DataArg where
+  showWithName name DataArg { argParams }
+    | null argParams = name
+    | otherwise = "(" ++ unwords (name : map show argParams) ++ ")"
+
+pattern NullaryArg :: TypeVariance -> DataArg
+pattern NullaryArg var = DataArg var []
+
+data DataSig = DataSig
+  { dataEffects :: [(Meta String, TypeVariance)]
+  , dataArgs :: [(Meta String, DataArg)] }
+
+instance ShowWithName DataSig where
+  showWithName name DataSig { dataArgs, dataEffects } =
+    name ++ effectSuffixStr (map (show . fst) dataEffects) ++ unwords ("" : map showArg dataArgs)
+    where
+      showArg (name, dataArg) = showWithName (unmeta name) dataArg
 
 type DataVariant = (Meta Name, [Meta Type])
 
 data DataDecl = DataDecl
   { dataMod :: Bool
-  , dataEffects :: [DataArg]
-  , dataArgs :: [DataArg]
+  , dataSig :: !DataSig
   , dataVariants :: [Meta DataVariant] }
 
 instance ShowWithName DataDecl where
-  showWithName name DataDecl { dataMod, dataArgs, dataEffects, dataVariants } =
-    "data " ++ mod ++ name
-    ++ effectSuffixStr (map show dataEffects)
-    ++ unwords ("" : map show dataArgs)
+  showWithName name DataDecl { dataMod, dataSig, dataVariants } =
+    "data " ++ mod ++ showWithName name dataSig
     ++ " =" ++ indent (intercalate "\n" (map (showVariant . unmeta) dataVariants))
     where
       mod = if dataMod then "mod " else ""
@@ -375,11 +393,11 @@ data MaybeLowercase
   | MLOther String
 
 extractLowercase :: MonadState CompileState m
-                 => (String -> m (Maybe DataArg))
+                 => (String -> m (Maybe (Meta String, TypeVariance)))
                  -> Maybe Span
                  -> String
                  -> MaybeLowercase
-                 -> m (Maybe DataArg)
+                 -> m (Maybe (Meta String, TypeVariance))
 extractLowercase err span kind = \case
   MLNamed (Path path) ->
     case path of
@@ -398,35 +416,47 @@ extractLowercase err span kind = \case
         err (kind ++ " parameter name must be unqualified, did you mean `" ++ show (last path) ++ "`?")
   MLPoly local -> do
     anon <- getNewAnon
-    return $ Just $ DataArg (meta local) { metaSpan = span } (VAnon anon) []
+    return $ Just ((meta local) { metaSpan = span }, VAnon anon)
   MLOther other ->
     err ("expected name for " ++ kind ++ " parameter, found `" ++ other ++ "` instead")
-
-varianceFromType :: MonadState CompileState m
-                 => FilePath
-                 -> Meta Type
-                 -> m (Maybe (Meta TypeVariance))
-varianceFromType file typeWithMeta =
-  case unmeta typeWithMeta of
-    SymbolOutput -> convert VOutput
-    SymbolInput -> convert VInput
-    SymbolInvariannt -> convert VInvariant
-    _ -> do
-      addError CompileError
-        { errorFile = Just file
-        , errorSpan = metaSpan typeWithMeta
-        , errorKind = Error
-        , errorMessage =
-          "expected one of (+), (-), or _ for higher-kinded type parameter variance" }
-      return Nothing
-  where
-    convert = return . Just . copySpan typeWithMeta
 
 dataArgFromType :: MonadState CompileState m
                 => FilePath
                 -> Meta Type
-                -> m (Maybe DataArg)
+                -> m DataArg
 dataArgFromType file typeWithMeta =
+  case reduceApply typeWithMeta of
+    Left (_, b) -> do
+      addError CompileError
+        { errorFile = Just file
+        , errorSpan = metaSpan b
+        , errorKind = Error
+        , errorMessage =
+          "cannot resolve operator precedence (try not to use infix operators for variance)" }
+      return $ DataArg VInvariant []
+    Right (ReducedApp Meta { unmeta = baseTy, metaSpan = baseSpan } args) -> do
+      baseVariance <- case baseTy of
+        SymbolOutput -> return VOutput
+        SymbolInput -> return VInput
+        SymbolInvariannt -> return VInvariant
+        _ -> do
+          addError CompileError
+            { errorFile = Just file
+            , errorSpan = baseSpan
+            , errorKind = Error
+            , errorMessage =
+              "expected one of (+), (-), or _ for higher-kinded type parameter variance" }
+          return VInvariant
+      paramsVariance <- forM args $ dataArgFromType file
+      return DataArg
+        { argVariance = baseVariance
+        , argParams = paramsVariance }
+
+namedDataArgFromType :: MonadState CompileState m
+                     => FilePath
+                     -> Meta Type
+                     -> m (Maybe (Meta String, DataArg))
+namedDataArgFromType file typeWithMeta =
   case reduceApply typeWithMeta of
     Left (a, _) -> do
       addError CompileError
@@ -445,21 +475,21 @@ dataArgFromType file typeWithMeta =
             , errorKind = Error
             , errorMessage = msg }
           return Nothing
-      dataArg <- extractLowercase err baseSpan "type" $
+      nameAndVariance <- extractLowercase err baseSpan "type" $
         case baseTy of
           TNamed [] path -> MLNamed $ unmeta path
           TPoly local -> MLPoly local
           other -> MLOther (show other)
-      case dataArg of
+      case nameAndVariance of
         Nothing -> return Nothing
-        Just dataArg -> do
-          args <- forM args $ varianceFromType file
-          return $ Just $ dataArg { argParams = catMaybes args }
+        Just (name, variance) -> do
+          params <- forM args $ dataArgFromType file
+          return $ Just (name, DataArg { argVariance = variance, argParams = params })
 
 dataAndArgsFromType :: MonadState CompileState m
                     => FilePath
                     -> Meta Type
-                    -> m (Maybe (Meta Name), [DataArg], [DataArg])
+                    -> m (Maybe (Meta Name), [(Meta String, TypeVariance)], [(Meta String, DataArg)])
 dataAndArgsFromType file typeWithMeta =
   case reduceApply typeWithMeta of
     Left (_, b) -> do
@@ -514,7 +544,7 @@ dataAndArgsFromType file typeWithMeta =
                   EffectPoly local -> MLPoly local
                   other -> MLOther (show other)
             _ -> err "effect parameters must each be in their own set of pipes, you cannot use `+` in between"
-      vars <- forM args $ dataArgFromType file
+      vars <- forM args $ namedDataArgFromType file
       return (name, catMaybes effs, catMaybes vars)
 
 variantFromType :: MonadState CompileState m => FilePath -> Meta Type -> m (Maybe (Meta DataVariant))

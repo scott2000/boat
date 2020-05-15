@@ -161,6 +161,23 @@ plural 0 w = "no " ++ w ++ "s"
 plural 1 w = "1 " ++ w
 plural n w = show n ++ " " ++ w ++ "s"
 
+aOrAn :: String -> String
+aOrAn str = article ++ str
+  where
+    article =
+      if isVowel $ head str then
+        "an "
+      else
+        "a "
+    -- this only works for lowercase letters but that's fine
+    isVowel = \case
+      'a' -> True
+      'e' -> True
+      'i' -> True
+      'o' -> True
+      'u' -> True
+      _ -> False
+
 updateErrorCount :: ErrorKind -> ErrorCount -> ErrorCount
 updateErrorCount Error c = c
   { errorCount = errorCount c + 1 }
