@@ -1,35 +1,37 @@
+{-# OPTIONS_GHC -Wincomplete-patterns #-}
+
+-- | Parses command-line arguments and then runs every pass in order
 module Main where
 
-import Utility.Basics
-import Utility.ErrorPrint
-import Utility.AST
-import Utility.Program
-import Utility.Parser
-import Pass.Parser
-import Pass.NameResolve
-import Pass.AssocOps
-import Pass.InferVariance
+import Utility
+import Parse
+import Analyze
 
 import System.FilePath
 import System.Directory
-import System.IO (readFile)
-import System.Exit (exitFailure, ExitCode)
+import System.Exit (ExitCode)
 
-import Data.List (sort, intercalate)
+import Data.List (intercalate)
 import Data.IORef
-import Text.Megaparsec (runParserT)
 import Control.Monad.State.Strict
 import Control.Exception
 import Options.Applicative as Opt
 import qualified Data.Map.Strict as Map
 
+-- | A phase of compilation (see "Parse" and "Analyze")
 data Phase
+  -- | Any initialization in "Main" that occurs before parsing begins
   = PhaseInit
+  -- | The parsing phase defined in "Parse" ('parse')
   | PhaseParser
+  -- | The name resolution phase defined in "Analyze.NameResolve" ('nameResolve')
   | PhaseNameResolve
+  -- | The operator association phase defined in "Analyze.AssocOps" ('assocOps')
   | PhaseAssocOps
+  -- | The variance inference phase defined in "Analyze.InferVariance" ('inferVariance')
   | PhaseInferVariance
 
+-- | The entry point of the compiler, parses arguments and then calls 'startCompile'
 main :: IO ()
 main = do
   currentDirectory <- getCurrentDirectory
@@ -69,31 +71,13 @@ main = do
             <> metavar "PACKAGE_NAME"
             <> help "The name which will appear as the base of every path in this package")
 
-setPhase :: IORef Phase -> Phase -> CompileIO ()
-setPhase phase newPhase =
-  lift $ writeIORef phase newPhase
-
+-- | Starts the compilation process by running each pass in order
 startCompile :: IORef Phase -> CompileIO ()
 startCompile phase = do
+  path <- gets (compileTarget . compileOptions)
+
   setPhase phase PhaseParser
-  mods <- do
-    path <- gets (compileTarget . compileOptions)
-    isDir <- lift $ doesDirectoryExist path
-    if isDir then
-      parseDirectory path
-    else do
-      isFile <- lift $ doesFileExist path
-      if isFile then
-        case takeExtension path of
-          ".boat" ->
-            parseSingleFile path <&> prependModule []
-          other -> lift $ do
-            let ext = if null other then "no extension" else other
-            putStrLn ("Error: expected extension of .boat for file, found " ++ ext)
-            exitFailure
-      else lift $ do
-        putStrLn ("Error: cannot find file or directory at `" ++ path ++ "`")
-        exitFailure
+  mods <- parse path
   exitIfErrors
   lift $ putStrLn ("\n" ++ intercalate "\n" (map show mods))
 
@@ -121,72 +105,8 @@ startCompile phase = do
     putStrLn $ showWithName (show name) dataSig
 
   finishAndCheckErrors
-
-isBoatExtension :: FilePath -> Bool
-isBoatExtension = (".boat" ==) . takeExtension
-
-containsBoatFiles :: FilePath -> IO Bool
-containsBoatFiles path = do
-  files <- listDirectory path
-  checkAll files
   where
-    checkAll [] = return False
-    checkAll (file:rest) =
-      if isBoatExtension file then do
-        isFile <- doesFileExist (path </> file)
-        if isFile then
-          return True
-        else
-          checkAll rest
-      else
-        checkAll rest
-
-prependModule :: [Module] -> Module -> [Module]
-prependModule mods mod
-  | modIsEmpty mod = mods
-  | otherwise      = mod : mods
-
-parseAll :: FilePath -> CompileIO Module
-parseAll path = do
-  isDir <- lift $ doesDirectoryExist path
-  if isDir then
-    case parseModuleName $ takeFileName path of
-      Right name ->
-        moduleFromSubs name <$> parseDirectory path
-      Left err -> do
-        shouldWarn <- lift $ containsBoatFiles path
-        when shouldWarn $
-          addError CompileError
-            { errorFile = Just path
-            , errorSpan = Nothing
-            , errorKind = Warning
-            , errorMessage =
-              "folder contains .boat files but doesn't have a valid module name"
-              ++ "\n(" ++ err ++ ")" }
-        return defaultModule
-  else if isBoatExtension path then
-    parseSingleFile path
-  else
-    return defaultModule
-
-parseDirectory :: FilePath -> CompileIO [Module]
-parseDirectory path = do
-  files <- lift $ sort <$> listDirectory path
-  forEach files []
-  where
-    forEach []          mods = return mods
-    forEach (file:rest) mods =
-      parseAll (path </> file) >>= forEach rest . prependModule mods
-
-parseSingleFile :: FilePath -> CompileIO Module
-parseSingleFile path = do
-  lift $ putStrLn ("{- parsing: " ++ path ++ " -}")
-  file <- lift $ readFile path
-  let parserT = runCustomParser $ parseFile path
-  runParserT parserT path file >>= \case
-    Left err -> do
-      convertParseErrors err
-      return defaultModule
-    Right m ->
-      return m
+    setPhase :: IORef Phase -> Phase -> CompileIO ()
+    setPhase phase newPhase =
+      lift $ writeIORef phase newPhase
 

@@ -1,38 +1,47 @@
-module Pass.NameResolve (nameResolve) where
+-- | Replaces all partial paths with the full path of the object to which they refer
+module Analyze.NameResolve where
 
-import Utility.Basics
-import Utility.AST
-import Utility.Program
+import Utility
 
 import Data.List
 import Data.Foldable
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.IntMap.Strict (IntMap)
+import qualified Data.IntMap.Strict as IntMap
 import Data.Set (Set)
 import qualified Data.Set as Set
 
 import Control.Monad.Reader
 import Control.Monad.State.Strict
 
+-- | 'ReaderT' for name resolution containing all names in scope and other state information
 type NR = ReaderT Names (StateT NameState CompileIO)
 
+-- | A type representing whether an import was explicitly listed or imported by an underscore
 data Explicitness
   = Implicit
   | Explicit
   deriving Show
 
+-- | A map of names in scope to the specific item they refer to, or to a set of ambiguous paths
 type NameSet mark = Map Name (Either (Set Path) (Path, Item, Explicitness, mark))
 
+-- | Records the names visible in the current scope
 data Names = Names
-  { finalNames :: NameSet ImportId
+  { -- | Names that were directly imported as the final name in a dot-separated path
+    finalNames :: NameSet ImportId
+    -- | Other names that can only be used as modules and take lower precedence for resolution
   , otherNames :: NameSet () }
   deriving Show
 
+-- | A scope with no names present
 defaultNames :: Names
 defaultNames = Names
   { finalNames = Map.empty
   , otherNames = Map.empty }
 
+-- | Adds a name associated with an item to a 'NameSet'
 addName :: Explicitness -> mark -> Path -> (Name, Item) -> NameSet mark -> NameSet mark
 addName exp id path (name, item) s =
   if Map.member name s then
@@ -56,9 +65,11 @@ addName exp id path (name, item) s =
           else
             Left $ Set.insert path $ Set.singleton oldPath
 
+-- | Updates the names present in a scope
 withNames :: Names -> NR a -> NR a
 withNames names nr = lift $ runReaderT nr names
 
+-- | An item is anything that has a name
 data Item = Item
   { itemSub :: Maybe NameTable
   , isType :: Bool
@@ -87,36 +98,44 @@ instance Monoid Item where
     , isOperatorType = False }
   mappend = (<>)
 
+-- | An item is infixable if it is in a namespace that can be used in infix position (types, values, and patterns)
 isInfixable :: Item -> Bool
 isInfixable item =
   isType item
   || isValue item
   || isPattern item
 
+-- | Checks if an item is a 'Module'
 modItem :: NameTable -> Item
 modItem nt = mempty
   { itemSub = Just nt }
 
+-- | Checks if an item is a 'Type'
 typeItem :: Item
 typeItem = mempty
   { isType = True }
 
+-- | Checks if an item is a value ('Expr')
 valueItem :: Item
 valueItem = mempty
   { isValue = True }
 
+-- | Checks if an item is an 'Effect'
 effectItem :: Item
 effectItem = mempty
   { isEffect = True }
 
+-- | Checks if an item is a 'Pattern'
 patternItem :: Item
 patternItem = mempty
   { isPattern = True }
 
+-- | Checks if an item is an operator type
 operatorTypeItem :: Item
 operatorTypeItem = mempty
   { isOperatorType = True }
 
+-- | Returns an item that can be used for anything but a module
 anyItem :: Item
 anyItem = Item
   { itemSub = Nothing
@@ -126,6 +145,7 @@ anyItem = Item
   , isPattern = True
   , isOperatorType = True }
 
+-- | A mapping from names to items
 newtype NameTable = NameTable
   { getNameTable :: Map Name Item }
   deriving (Show, Ord, Eq)
@@ -138,6 +158,7 @@ instance Monoid NameTable where
   mempty = NameTable Map.empty
   mappend = (<>)
 
+-- | The 'NameTable' for the Core package with intrinsic items
 coreNameTable :: NameTable
 coreNameTable = NameTable
   { getNameTable = Map.fromList
@@ -145,14 +166,17 @@ coreNameTable = NameTable
       [ (Operator "->", typeItem)
       , (Identifier "Pure", effectItem) ]) ] }
 
+-- | The 'UseModule' to be used to import common items from Core
 coreUse :: UseModule
 coreUse =
   UseModule (meta $ Identifier "Core") $ UseAll [meta UseAny]
 
+-- | Converts a set of named modules to a 'NameTable'
 toNameTable :: Map Name [Module] -> NameTable
 toNameTable =
   NameTable . fmap (modItem . foldr addModule mempty)
 
+-- | Adds a new module to the 'NameTable'
 addModule :: Module -> NameTable -> NameTable
 addModule mod nt = nt
   <> toNameTable (modSubs mod)
@@ -180,33 +204,45 @@ addModule mod nt = nt
         else
           variantTable
 
+-- | Converts a 'NameTable' to a list of named items
 nameTableToList :: NameTable -> [(Name, Item)]
 nameTableToList = Map.toList . getNameTable
 
+-- | Tries to get an item from a 'NameTable'
 nameTableEntry :: Name -> NameTable -> Maybe Item
 nameTableEntry name = Map.lookup name . getNameTable
 
+-- | Checks if a given item is a member of a 'NameTable'
 nameTableMember :: Name -> NameTable -> Bool
 nameTableMember name = Map.member name . getNameTable
 
+-- | A unique identifier for parts of a use declaration
 type ImportId = Int
 
+-- | An 'ImportId' that is untracked
 hiddenImport :: ImportId
 hiddenImport = -1
 
+-- | State information that is kept while resolving declarations
 data NameState = NameState
-  { allDecls :: AllDecls
+  { -- | Contains all resolved declarations
+    allDecls :: AllDecls
+    -- | Table with information about every item that may be used
   , nameTable :: NameTable
-  , unusedIds :: Map ImportId (InFile Span)
+    -- | Map containing a location for every unused import so warnings can be emitted
+  , unusedIds :: IntMap (InFile Span)
+    -- | The next unique 'ImportId' that will be given out
   , importId :: ImportId }
 
+-- | Creates a default 'NameState' from a given 'NameTable'
 defaultNameState :: NameTable -> NameState
 defaultNameState nameTable = NameState
   { allDecls = emptyDecls
   , nameTable
-  , unusedIds = Map.empty
+  , unusedIds = IntMap.empty
   , importId = 0 }
 
+-- | Gets a unique identifier for an import and tracks its use
 uniqueId :: FilePath -> Maybe Span -> NR ImportId
 uniqueId file maybeSpan =
   case maybeSpan of
@@ -216,20 +252,22 @@ uniqueId file maybeSpan =
       s <- get
       let id = importId s
       put s
-        { unusedIds = Map.insert id (file :/: span) $ unusedIds s
+        { unusedIds = IntMap.insert id (file :/: span) $ unusedIds s
         , importId = id + 1 }
       return id
 
+-- | Prefix a use declaration with a given path
 prefixUse :: [Name] -> Meta UseModule -> Meta UseModule
 prefixUse []     use = use
 prefixUse (n:ns) use =
   meta $ UseModule (meta n) $ UseDot $ prefixUse ns use
 
+-- | Add all requested items into the scope for a sub-expression
 addUse :: Path -> InFile (Meta UseModule) -> NR a -> NR a
 addUse path (file :/: useWithMeta) nr =
   case useWithMeta of
     Meta { unmeta = UseAny, metaSpan = Just span } -> do
-      -- the span is required here because the automatic `use _` doesn't have a span
+      -- The span is required here because the automatic `use _` doesn't have a span
       -- and we only want to catch imports made by the programmer
       lift $ lift $ addError CompileError
         { errorFile = Just file
@@ -257,6 +295,8 @@ addUse path (file :/: useWithMeta) nr =
               prefixUse (unpath path) useWithMeta
       add EmptyPath nt usePath nr
   where
+    isGenerated = file == Generated
+
     add :: Path -> NameTable -> Meta UseModule -> NR a -> NR a
     add path nt use nr = do
       names <- ask
@@ -264,8 +304,10 @@ addUse path (file :/: useWithMeta) nr =
         UseAny -> do
           id <- uniqueId file $ metaSpan use
           let
+            allowedImport (Underscore _, _) = isGenerated
+            allowedImport _ = True
             finalNames' =
-              foldr (addName Implicit id path) (finalNames names) $ nameTableToList nt
+              foldr (addName Implicit id path) (finalNames names) $ filter allowedImport $ nameTableToList nt
             names' = names { finalNames = finalNames' }
           withNames names' nr
         UseModule Meta { unmeta = name, metaSpan } (UseDot rest) ->
@@ -315,9 +357,10 @@ addUse path (file :/: useWithMeta) nr =
                 , errorSpan = metaSpan
                 , errorKind = Error
                 , errorMessage = "`" ++ show path ++ "` does not contain any items named `" ++ show name ++ "`" }
-              -- add a dummy item as if it did exist to suppress further errors
+              -- Add a dummy item as if it did exist to suppress further errors
               withNames names { finalNames = addName Explicit hiddenImport path (name, anyItem) $ finalNames names } nr
 
+-- | Create a message saying where a duplicate definition can be found
 duplicateMessage :: (Meta Path, InFile a) -> String -> String
 duplicateMessage (otherPath, otherFile :/: _) baseMessage =
   case metaSpan otherPath of
@@ -326,6 +369,7 @@ duplicateMessage (otherPath, otherFile :/: _) baseMessage =
     Nothing ->
       baseMessage ++ "(other in " ++ otherFile ++ ")"
 
+-- | Resolve an 'EffectDecl'
 insertEffect :: Meta Path -> InFile EffectDecl -> NR ()
 insertEffect path decl = do
   s <- get
@@ -346,6 +390,7 @@ insertEffect path decl = do
         { allDecls = decls
           { allEffects = Map.insert path decl effects } }
 
+-- | Resolve a 'DataDecl'
 insertData :: Meta Path -> InFile DataDecl -> NR ()
 insertData path decl = do
   s <- get
@@ -366,6 +411,7 @@ insertData path decl = do
         { allDecls = decls
           { allDatas = Map.insert path decl datas } }
 
+-- | Resolve a 'LetDecl'
 insertLet :: Meta Path -> InFile LetDecl -> NR ()
 insertLet path decl = do
   s <- get
@@ -386,6 +432,7 @@ insertLet path decl = do
         { allDecls = decls
           { allLets = Map.insert path decl lets } }
 
+-- | Resolve an operator type declaration
 insertOpType :: Meta Path -> InFile OpTypeEnds -> NR ()
 insertOpType path newOp = do
   s <- get
@@ -406,6 +453,7 @@ insertOpType path newOp = do
         { allDecls = decls
           { allOpTypes = Map.insert path newOp ops } }
 
+-- | Resolve an 'OpDecl'
 insertOpDecl :: Meta Path -> InFile OpDecl -> NR ()
 insertOpDecl path decl = do
   s <- get
@@ -426,6 +474,7 @@ insertOpDecl path decl = do
         { allDecls = decls
           { allOpDecls = Map.insert path decl ops } }
 
+-- | Resolve all names in a set of modules and return a flattened map of declarations
 nameResolve :: [Module] -> CompileIO AllDecls
 nameResolve mods = do
   baseModule <- gets (compilePackageName . compileOptions)
@@ -435,17 +484,19 @@ nameResolve mods = do
     nameTable = coreNameTable <> (toNameTable $ Map.singleton baseModule mods)
   fmap allDecls $ execStateT nrState $ defaultNameState nameTable
 
+-- | Resolve a set of modules
 nameResolveAll :: Path -> [Module] -> NR ()
 nameResolveAll path mods = do
   forM_ mods $ nameResolveEach path
   unusedIds <- gets unusedIds
-  forM_ (Map.elems unusedIds) $ \(file :/: span) ->
+  forM_ (IntMap.elems unusedIds) $ \(file :/: span) ->
     lift $ lift $ addError CompileError
       { errorFile = Just file
       , errorSpan = Just span
       , errorKind = Warning
       , errorMessage = "unused import in `use` statement" }
 
+-- | Resolve a single 'Module'
 nameResolveEach :: Path -> Module -> NR ()
 nameResolveEach path mod =
   addUse path (Generated :/: meta UseAny)
@@ -522,7 +573,7 @@ nameResolveEach path mod =
       let
         decl' = decl { opType = opType' }
         opPath = (path .|.) <$> name
-      -- check that something that can be used as an operator exists at the path
+      -- Check that something that can be used as an operator exists at the path
       _ <- nameResolvePath file isInfixable "operator" (metaSpan opPath) (unmeta opPath)
       insertOpDecl opPath (file :/: decl')
       where
@@ -558,17 +609,18 @@ nameResolveEach path mod =
           constructorPath
             | dataMod decl = unmeta dataName
             | otherwise = path
+          variantPath = constructorPath .|. unmeta name
         in
-          insertLet ((constructorPath .|.) <$> name) $ file :/: LetDecl
+          insertLet (copySpan name variantPath) $ file :/: LetDecl
             { letBody =
               copySpan var $
                 if null types then
-                  EValue $ VDataCons (unmeta dataName) (unmeta name) []
+                  EValue $ VDataCons variantPath []
                 else
                   let count = length types in
                   EValue $ VFun [
                     ( replicate count $ meta $ PBind Nothing
-                    , copySpan var $ EDataCons (unmeta dataName) (unmeta name) $
+                    , copySpan var $ EDataCons variantPath $
                       [0 .. count-1] <&> \n -> meta $ EIndex n Nothing )]
             , letConstraints = [] }
       where
@@ -580,6 +632,7 @@ nameResolveEach path mod =
       insertLet ((path .|.) <$> name) $ file :/: decl
         { letBody = body }
 
+-- | Resolve a single 'Path'
 nameResolvePath :: FilePath -> (Item -> Bool) -> String -> Maybe Span -> Path -> NR Path
 nameResolvePath file check kind span path@(Path parts@(head:rest)) = do
   nt <- gets nameTable
@@ -633,7 +686,7 @@ nameResolvePath file check kind span path@(Path parts@(head:rest)) = do
 
     clearId id =
       modify $ \s -> s
-        { unusedIds = Map.delete id $ unusedIds s }
+        { unusedIds = IntMap.delete id $ unusedIds s }
 
     pathErr msg = do
       lift $ lift $ addError CompileError
@@ -653,8 +706,15 @@ nameResolvePath file check kind span path@(Path parts@(head:rest)) = do
       "`" ++ show path ++ "` is not " ++ aOrAn kind
 
     notFound = pathErr $
-      "cannot find `" ++ show path ++ "` in scope, did you forget to `use` it?"
+      "cannot find `" ++ show path ++ "` in scope, did you forget to " ++
+        case head of
+          Underscore _ ->
+            "define it or explicitly `use` it?\n"
+            ++ "(private items starting with '_' must be explicitly imported from other modules)"
+          _ ->
+            "`use` it?"
 
+-- | Resolve any kind of expression
 nameResolveAfter :: After a => Path -> FilePath -> Meta a -> NR (Meta a)
 nameResolveAfter basePath file = after aDefault
   { aUseExpr = handleUseExpr

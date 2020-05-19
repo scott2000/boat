@@ -1,4 +1,47 @@
-module Utility.Program where
+-- | Utilities for dealing with top-level declarations and full packages
+module Utility.Program
+  ( -- * Top-Level Declarations
+    InFile (..)
+  , ShowWithName (..)
+  , Associativity (..)
+  , OpDecl (..)
+  , EffectDecl (..)
+  , LetDecl (..)
+
+    -- * Data Types
+  , DataDecl (..)
+  , DataVariant
+  , variantFromType
+  , DataSig (..)
+  , namedDataSigFromType
+  , TypeVariance (..)
+  , DataArg (..)
+
+    -- * Operator Types
+  , OpType
+  , OpPart (..)
+  , opTypeDeclarations
+  , OpTypeEnds
+
+    -- * Fully Resolved Representation
+  , AllDecls (..)
+  , emptyDecls
+
+    -- * Nested Module Representation
+  , Module (..)
+  , defaultModule
+  , moduleFromSubs
+  , modIsEmpty
+
+    -- * Adding Declarations to the Module
+  , modAddUse
+  , modAddSub
+  , modAddOpType
+  , modAddOpDecls
+  , modAddEffect
+  , modAddLet
+  , modAddData
+  ) where
 
 import Utility.Basics
 import Utility.AST
@@ -14,8 +57,11 @@ import qualified Data.Set as Set
 
 import Control.Monad.State.Strict
 
+-- | Associates a file path with a declaration
 data InFile a = (:/:)
-  { getFile :: FilePath
+  { -- | The file where the declaration can be found
+    getFile :: FilePath
+    -- | The innner declaration being stored
   , unfile :: a }
   deriving (Functor, Foldable, Traversable)
 
@@ -29,7 +75,9 @@ instance Eq a => Eq (InFile a) where
 instance Show a => Show (InFile a) where
   showsPrec i = showsPrec i . unfile
 
+-- | Class for showing a value with an externally provided name
 class ShowWithName a where
+  -- | Show the declaration using the provided name
   showWithName :: String -> a -> String
 
 instance ShowWithName a => ShowWithName (Meta a) where
@@ -38,14 +86,18 @@ instance ShowWithName a => ShowWithName (Meta a) where
 instance ShowWithName a => ShowWithName (InFile a) where
   showWithName name = showWithName name . unfile
 
+-- | Shows a key-value pair where the key is the name
 showDecl :: (ShowWithName a, Show s) => (s, a) -> String
 showDecl (name, decl) = showWithName (show name) decl
 
+-- | Shows every item in a map where the key is the name
 showDeclMap :: (ShowWithName a, Show s) => Map s a -> [String]
 showDeclMap = map showDecl . Map.toList
 
+-- | Represents the upper and lower bound for the precedence of an operator type
 type OpTypeEnds = (Maybe (Meta Path), Maybe (Meta Path))
 
+-- | A collection of all declarations in a package by absolute path
 data AllDecls = AllDecls
   { allOpTypes :: !(Map (Meta Path) (InFile OpTypeEnds))
   , allOpDecls :: !(Map (Meta Path) (InFile OpDecl))
@@ -74,6 +126,7 @@ instance Show AllDecls where
               Nothing -> ""
               Just upperBound -> " < (" ++ show upperBound ++ ")"
 
+-- | An empty collection of declarations
 emptyDecls :: AllDecls
 emptyDecls = AllDecls
   { allOpTypes = Map.empty
@@ -82,6 +135,7 @@ emptyDecls = AllDecls
   , allDatas = Map.empty
   , allLets = Map.empty }
 
+-- | A direct representation of a parsed module that hasn't been flattened yet
 data Module = Module
   { modUses :: ![InFile (Meta UseModule)]
   , modSubs :: !(Map Name [Module])
@@ -110,6 +164,7 @@ instance Show Module where
       showOpType (_ :/: ops) =
         "operator type " ++ intercalate " < " (map show ops)
 
+-- | An empty module with no declarations
 defaultModule :: Module
 defaultModule = Module
   { modUses = []
@@ -120,11 +175,13 @@ defaultModule = Module
   , modDatas = Map.empty
   , modLets = Map.empty }
 
+-- | Creates a module from a name and a set of sub-modules to associate with that name
 moduleFromSubs :: Name -> [Module] -> Module
 moduleFromSubs _ [] = defaultModule
 moduleFromSubs name mods = defaultModule
   { modSubs = Map.singleton name mods }
 
+-- | Checks if a given module is empty
 modIsEmpty :: Module -> Bool
 modIsEmpty m =
   null (modUses m)
@@ -134,21 +191,26 @@ modIsEmpty m =
   && Map.null (modDatas m)
   && Map.null (modLets m)
 
+-- | Adds a 'UseModule' to the module
 modAddUse :: Meta UseModule -> FilePath -> Module -> Module
 modAddUse use path mod = mod
   { modUses = path :/: use : modUses mod }
 
+-- | Adds a sub-module to the module
 modAddSub :: Name -> Module -> Module -> Module
 modAddSub name sub mod =
   if modIsEmpty sub then mod else mod
     { modSubs = Map.insertWith (flip (++)) name [sub] $ modSubs mod }
 
+-- | A list of parts of an operator type declaration
 type OpType = [OpPart]
 
+-- | A single term in an operator type declaration
 data OpPart
+  -- | A declaration of a new operator type
   = OpDeclare (Meta Name)
+  -- | A reference to an already declared operator type in parentheses
   | OpLink (Meta Path)
-  deriving (Ord, Eq)
 
 instance Show OpPart where
   show = \case
@@ -157,10 +219,12 @@ instance Show OpPart where
     OpLink path ->
       "(" ++ show path ++ ")"
 
+-- | Adds an 'OpType' declaration to the module
 modAddOpType :: OpType -> FilePath -> Module -> Module
 modAddOpType ops path mod = mod
   { modOpTypes = path :/: ops : modOpTypes mod }
 
+-- | Get a list of all of the newly-declared operator types in an 'OpType'
 opTypeDeclarations :: OpType -> [Name]
 opTypeDeclarations ops = do
   op <- ops
@@ -170,9 +234,13 @@ opTypeDeclarations ops = do
     OpLink _ ->
       mempty
 
+-- | Represents the associativity of an operation
 data Associativity
+  -- | Require explicit grouping whenever multiple operators are used
   = ANon
+  -- | Group @(a ? b ? c)@ as @((a ? b) ? c)@
   | ALeft
+  -- | Group @(a ? b ? c)@ as @(a ? (b ? c))@
   | ARight
 
 instance Show Associativity where
@@ -181,6 +249,7 @@ instance Show Associativity where
     ALeft  -> "left"
     ARight -> "right"
 
+-- | A declaration of a certain associativity and operator type for an operator
 data OpDecl = OpDecl
   { opAssoc :: Associativity
   , opType :: Meta Path }
@@ -195,8 +264,9 @@ instance ShowWithName OpDecl where
           ALeft -> " <left>"
           ARight -> " <right>"
 
+-- | Adds an 'OpDecl' for a list of operators to the module
 modAddOpDecls
-  :: MonadState CompileState m
+  :: AddError m
   => [Meta Name]
   -> OpDecl
   -> FilePath
@@ -216,6 +286,7 @@ modAddOpDecls names op path mod = do
         , errorMessage = "duplicate operator declaration for name `" ++ show name ++ "`" }
   return mod { modOpDecls = Map.union (Map.fromList newOps) oldOps }
 
+-- | A declaration of a new effect with an optional super-effect
 data EffectDecl = EffectDecl
   { effectSuper :: Maybe (Meta Path) }
 
@@ -227,8 +298,9 @@ instance ShowWithName EffectDecl where
         Just effect ->
           " : " ++ show effect
 
+-- | Adds an 'EffectDecl' to the module
 modAddEffect
-  :: MonadState CompileState m
+  :: AddError m
   => Meta Name
   -> EffectDecl
   -> FilePath
@@ -252,6 +324,7 @@ modAddEffect name decl path mod = do
       , errorMessage = "duplicate effect declaration for name `" ++ show name ++ "`" }
   return mod { modEffects = Map.insert name newDecl oldEffects }
 
+-- | A declaration for a top-level binding of an expression
 data LetDecl = LetDecl
   { letBody :: Meta Expr
   , letConstraints :: [Constraint] }
@@ -272,8 +345,9 @@ instance ShowWithName LetDecl where
           [] -> ""
           cs -> " with " ++ intercalate ", " (map show cs)
 
+-- | Adds a 'LetDecl' to the module
 modAddLet
-  :: MonadState CompileState m
+  :: AddError m
   => Meta Name
   -> LetDecl
   -> FilePath
@@ -291,23 +365,24 @@ modAddLet name decl path mod = do
       , errorMessage = "duplicate let binding for name `" ++ show name ++ "`" }
   return mod { modLets = Map.insert name newDecl oldLets }
 
+-- | Represents the variance of a type or effect parameter
 data TypeVariance
-  -- An uninferred variance for DataDecl parameter
+  -- | An uninferred variance for a parameter
   = VAnon AnonCount
-  -- Covariance, represented as (+) for high-order parameters
+  -- | Covariance, represented as @(+)@ for high-order parameters
   | VOutput
-  -- Contravariance, represented as (-) for high-order parameters
+  -- | Contravariance, represented as @(-)@ for high-order parameters
   | VInput
-  -- Invariance, represented as _ for high-order parameters
+  -- | Invariance, represented as @_@ for high-order parameters
   | VInvariant
-  deriving (Ord, Eq)
+  deriving Eq
 
 instance Show TypeVariance where
   show = \case
     VAnon _ -> "<unknown>"
     VOutput -> show SymbolOutput
     VInput -> show SymbolInput
-    VInvariant -> show SymbolInvariannt
+    VInvariant -> show SymbolInvariant
 
 instance Semigroup TypeVariance where
   VOutput <> x = x
@@ -316,19 +391,23 @@ instance Semigroup TypeVariance where
   _ <> VInvariant = VInvariant
   VInput <> VInput = VOutput
 
+-- | The symbol used to represent 'VOutput'
 pattern SymbolOutput :: Type
 pattern SymbolOutput = TNamed [] (DefaultMeta (Local (Operator "+")))
 
+-- | The symbol used to represent 'VInput'
 pattern SymbolInput :: Type
 pattern SymbolInput = TNamed [] (DefaultMeta (Local (Operator "-")))
 
-pattern SymbolInvariannt :: Type
-pattern SymbolInvariannt = TAnon AnonAny
+-- | The symbol used to represent 'VInvariant'
+pattern SymbolInvariant :: Type
+pattern SymbolInvariant = TAnon AnonAny
 
+-- | Represents the kind of a parameter for a 'DataDecl'
 data DataArg = DataArg
   { argVariance :: !TypeVariance
   , argParams :: [DataArg] }
-  deriving (Ord, Eq)
+  deriving Eq
 
 instance Show DataArg where
   show arg =
@@ -339,9 +418,7 @@ instance ShowWithName DataArg where
     | null argParams = name
     | otherwise = "(" ++ unwords (name : map show argParams) ++ ")"
 
-pattern NullaryArg :: TypeVariance -> DataArg
-pattern NullaryArg var = DataArg var []
-
+-- | Represents the effect and type parameters a 'DataDecl' can accept
 data DataSig = DataSig
   { dataEffects :: [(Meta String, TypeVariance)]
   , dataArgs :: [(Meta String, DataArg)] }
@@ -352,8 +429,10 @@ instance ShowWithName DataSig where
     where
       showArg (name, dataArg) = showWithName (unmeta name) dataArg
 
+-- | A single variant of a 'DataDecl'
 type DataVariant = (Meta Name, [Meta Type])
 
+-- | Represents a declaration of a new data type
 data DataDecl = DataDecl
   { dataMod :: Bool
   , dataSig :: !DataSig
@@ -368,8 +447,9 @@ instance ShowWithName DataDecl where
       showVariant (name, types) =
         show name ++ " " ++ unwords (map show types)
 
+-- | Adds a 'DataDecl' to the module
 modAddData
-  :: MonadState CompileState m
+  :: AddError m
   => Meta Name
   -> DataDecl
   -> FilePath
@@ -387,18 +467,20 @@ modAddData name decl path mod = do
       , errorMessage = "duplicate data type declaration for name `" ++ show name ++ "`" }
   return mod { modDatas = Map.insert name newDecl oldDatas }
 
+-- | A common subset of the possibilities for a type or effect
 data MaybeLowercase
   = MLNamed Path
   | MLPoly String
   | MLOther String
 
-extractLowercase :: MonadState CompileState m
+-- | Tries to extract a 'DataDecl' parameter if possible
+extractParameter :: AddError m
                  => (String -> m (Maybe (Meta String, TypeVariance)))
                  -> Maybe Span
                  -> String
                  -> MaybeLowercase
                  -> m (Maybe (Meta String, TypeVariance))
-extractLowercase err span kind = \case
+extractParameter err span kind = \case
   MLNamed (Path path) ->
     case path of
       [Identifier ('_':rest)] ->
@@ -420,11 +502,13 @@ extractLowercase err span kind = \case
   MLOther other ->
     err ("expected name for " ++ kind ++ " parameter, found `" ++ other ++ "` instead")
 
-dataArgFromType :: MonadState CompileState m
+-- | Parses a given type as a 'DataArg'
+dataArgFromType :: AddError m
                 => FilePath
                 -> Meta Type
                 -> m DataArg
 dataArgFromType file typeWithMeta =
+  -- It doesn't matter what is returned on error since it won't be needed until the next phase anyway
   case reduceApply typeWithMeta of
     Left (_, b) -> do
       addError CompileError
@@ -438,7 +522,7 @@ dataArgFromType file typeWithMeta =
       baseVariance <- case baseTy of
         SymbolOutput -> return VOutput
         SymbolInput -> return VInput
-        SymbolInvariannt -> return VInvariant
+        SymbolInvariant -> return VInvariant
         _ -> do
           addError CompileError
             { errorFile = Just file
@@ -452,7 +536,8 @@ dataArgFromType file typeWithMeta =
         { argVariance = baseVariance
         , argParams = paramsVariance }
 
-namedDataArgFromType :: MonadState CompileState m
+-- | Tries to parse a given type as a 'DataArg' with a name for the base
+namedDataArgFromType :: AddError m
                      => FilePath
                      -> Meta Type
                      -> m (Maybe (Meta String, DataArg))
@@ -475,7 +560,7 @@ namedDataArgFromType file typeWithMeta =
             , errorKind = Error
             , errorMessage = msg }
           return Nothing
-      nameAndVariance <- extractLowercase err baseSpan "type" $
+      nameAndVariance <- extractParameter err baseSpan "type" $
         case baseTy of
           TNamed [] path -> MLNamed $ unmeta path
           TPoly local -> MLPoly local
@@ -486,11 +571,12 @@ namedDataArgFromType file typeWithMeta =
           params <- forM args $ dataArgFromType file
           return $ Just (name, DataArg { argVariance = variance, argParams = params })
 
-dataAndArgsFromType :: MonadState CompileState m
-                    => FilePath
-                    -> Meta Type
-                    -> m (Maybe (Meta Name), [(Meta String, TypeVariance)], [(Meta String, DataArg)])
-dataAndArgsFromType file typeWithMeta =
+-- | Tries to parse a named 'DataSig' from a given type
+namedDataSigFromType :: AddError m
+                     => FilePath                       -- ^ The file where the data type is defined
+                     -> Meta Type                      -- ^ The type containing the signature to parse
+                     -> m (Maybe (Meta Name), DataSig) -- ^ The parsed name (if valid) and signature
+namedDataSigFromType file typeWithMeta =
   case reduceApply typeWithMeta of
     Left (_, b) -> do
       addError CompileError
@@ -499,7 +585,8 @@ dataAndArgsFromType file typeWithMeta =
         , errorKind = Error
         , errorMessage =
           "expected only a single operator for data type delcaration, found multiple instead" }
-      return (Nothing, [], [])
+      -- The data signature doesn't matter since the name is invalid anyway
+      return (Nothing, DataSig [] [])
     Right (ReducedApp Meta { unmeta = baseTy, metaSpan = nSpan } args) -> do
       (name, effs) <-
         let
@@ -538,16 +625,21 @@ dataAndArgsFromType file typeWithMeta =
         in
           case Set.toList $ setEffects $ unmeta effSet of
             [eff] ->
-              extractLowercase err (metaSpan eff) "effect" $
+              extractParameter err (metaSpan eff) "effect" $
                 case unmeta eff of
                   EffectNamed path -> MLNamed path
                   EffectPoly local -> MLPoly local
                   other -> MLOther (show other)
             _ -> err "effect parameters must each be in their own set of pipes, you cannot use `+` in between"
       vars <- forM args $ namedDataArgFromType file
-      return (name, catMaybes effs, catMaybes vars)
+      -- Errors can be ignored since they will be checked at the end of the phase (before the signature can be used)
+      return (name, DataSig (catMaybes effs) (catMaybes vars))
 
-variantFromType :: MonadState CompileState m => FilePath -> Meta Type -> m (Maybe (Meta DataVariant))
+-- | Tries to parse a 'DataVariant' from a given type
+variantFromType :: AddError m
+                => FilePath                     -- ^ The file where the data type is defined
+                -> Meta Type                    -- ^ The type containing the signature to parse
+                -> m (Maybe (Meta DataVariant)) -- ^ The parsed variant (if valid)
 variantFromType file typeWithMeta =
   case reduceApply typeWithMeta of
     Left (a, b) -> do

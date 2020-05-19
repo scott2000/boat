@@ -1,19 +1,17 @@
-module Pass.Parser (Parsable (..), parseFile) where
+-- | Parser functions for various types of expressions involving precedence
+module Parse.Expression where
 
-import Utility.Basics
-import Utility.AST
-import Utility.Program
-import Utility.Parser
+import Utility
+import Parse.Primitives
 
 import Text.Megaparsec
 import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as L
 
-import Data.Maybe
-import Data.Semigroup ((<>))
 import qualified Data.Set as Set
 import Control.Monad.State.Strict
 
+-- | Parse a single 'Name'
 parseName :: Parser Name
 parseName =
   parseParen <|> Identifier <$> identifier
@@ -23,139 +21,18 @@ parseName =
     parseUnary = label "keyword \"unary\"" $
       keyword "unary" >> nbsc >> Unary <$> unaryOp
 
+-- | Parse a single 'Path'
 parsePath :: Parser Path
 parsePath =
   Path <$> ((:) <$> try parseName <*> many (hidden (reservedOp PathDot) *> parseName))
 
-parseFile :: FilePath -> Parser Module
-parseFile path = do
-  trySpaces >>= \case
-    Right NoSpace ->
-      return ()
-    Right LineBreak ->
-      return ()
-    _ ->
-      fail "expected unindented top-level items for module"
-  parseModule defaultModule
-  where
-    parseModule m = do
-      m <-
-        parseUse
-        <|> parseMod
-        <|> parseLet
-        <|> parseData
-        <|> parseEffect
-        <|> parseOperator
-      option m (try lineBreak >> ((m <$ hidden eof) <|> parseModule m))
-      where
-        parseUse =
-          keyword "use" *> nbsc *> parseMeta parseUseModule <&> \use ->
-            modAddUse use path m
-
-        parseMod = do
-          keyword "mod"
-          name <- nbsc >> parseName
-          nbsc >> specialOp Assignment
-          sub <- blockOf $ parseModule defaultModule
-          return $ modAddSub name sub m
-
-        parseOperator = do
-          keyword "operator"
-          nbsc >> (keyword "type" >> blockOf operatorType) <|> operatorDecl
-          where
-            operatorType = do
-              ops <- parseSomeSeparatedList '<' operatorPart
-              return $ modAddOpType ops path m
-            operatorPart =
-              try (OpLink <$> parseMeta (char '(' *> nbsc *> parsePath <* nbsc <* char ')'))
-              <|> (OpDeclare <$> parseMeta parseName)
-            operatorDecl = do
-              opAssoc <- option ANon (operatorAssoc <* nbsc)
-              names <- someUntil (specialOp TypeAscription) $ parseMeta parseName
-              opType <- nbsc >> parseMeta parsePath
-              let decl = OpDecl { opAssoc, opType }
-              modAddOpDecls names decl path m
-            operatorAssoc =
-              (ALeft <$ expectLabel "left")
-              <|> (ARight <$ expectLabel "right")
-
-        parseEffect = do
-          keyword "effect"
-          name <- nbsc >> parseMeta parseName
-          effectSuper <- optional (try nbsc >> specialOp TypeAscription >> blockOf (parseMeta parsePath))
-          modAddEffect name EffectDecl { effectSuper } path m
-
-        parseLet = do
-          keyword "let"
-          name <- nbsc *> parseMeta parseName <* nbsc
-          maybeAscription <- optional (specialOp TypeAscription *> blockOf parserExpectEnd <* nbsc)
-          constraints <- (parseConstraints <* nbsc) <|> pure []
-          body <- specialOp Assignment >> blockOf parser
-          let
-            bodyWithAscription =
-              case maybeAscription of
-                Just ascription ->
-                  copySpan body $ ETypeAscribe body ascription
-                Nothing ->
-                  body
-            letDecl = LetDecl
-              { letBody = bodyWithAscription
-              , letConstraints = constraints }
-          modAddLet name letDecl path m
-
-        parseData = do
-          keyword "data" >> nbsc
-          isMod <- (keyword "mod" >> nbsc >> return True) <|> return False
-          nameAndParams <-
-            parserExpectEnd >>= dataAndArgsFromType path
-          nbsc >> specialOp Assignment
-          vars <- blockOf $
-            someBetweenLines (parserExpectEnd >>= variantFromType path)
-          case (nameAndParams, catMaybes vars) of
-            ((Just name, effs, params), vars) ->
-              let
-                dataDecl = DataDecl
-                  { dataMod = isMod
-                  , dataSig = DataSig
-                    { dataArgs = params
-                    , dataEffects = effs }
-                  , dataVariants = vars }
-              in
-                modAddData name dataDecl path m
-            _ ->
-              return m
-
--- TODO: remove all uses of `try` with `parseName` after finding another solution to `_` keyword parsing
-
-parseConstraints :: Parser [Constraint]
-parseConstraints = do
-  keyword "with"
-  blockOf $ parseSomeCommaList parseConstraint
-
-parseConstraint :: Parser Constraint
-parseConstraint =
-  pure IsSubEffectOf
-  <*> parseEffect
-  <*  nbsc
-  <*  specialOp TypeAscription
-  <*  nbsc
-  <*> blockOf parseEffectSet
-
-parseEffectSet :: Parser EffectSet
-parseEffectSet = do
-  effects <- parseSomeSeparatedList '+' (parseMeta parseEffect)
-  return EffectSet { setEffects = Set.fromList effects }
-
-parseEffect :: Parser Effect
-parseEffect = label "effect" $
-  parseCapIdent "effect" (EffectNamed . unmeta) EffectPoly
-  <|> (keyword "_" >> EffectAnon <$> getNewAnon)
-
+-- | Parse a single 'UseModule'
 parseUseModule :: Parser UseModule
 parseUseModule =
   (UseModule <$> try (parseMeta parseName) <*> parseUseContents)
   <|> (UseAny <$ keyword "_")
 
+-- | Parse a single 'UseContents'
 parseUseContents :: Parser UseContents
 parseUseContents =
   (reservedOp PathDot >> UseDot <$> parseMeta parseUseModule)
@@ -166,21 +43,46 @@ parseUseContents =
     parenInner =
       parseSomeCommaList $ parseMeta parseUseModule
 
-parseSomeCommaList :: Parser a -> Parser [a]
-parseSomeCommaList = parseSomeSeparatedList ','
+-- | Parse a set of effects separated by a plus symbol
+parseEffectSet :: Parser EffectSet
+parseEffectSet = do
+  effects <- parseSomeSeparatedList '+' (parseMeta parseEffect)
+  return EffectSet { setEffects = Set.fromList effects }
 
-parseSomeSeparatedList :: Char -> Parser a -> Parser [a]
-parseSomeSeparatedList sep p =
-  (:) <$> p <*> manyCommas
-  where
-    manyCommas = option [] $ do
-      try (spaces >> char sep) >> spaces
-      option [] ((:) <$> p <*> manyCommas)
+-- | Parse a single 'Effect'
+parseEffect :: Parser Effect
+parseEffect = label "effect" $
+  parseCapIdent "effect" (EffectNamed . unmeta) EffectPoly
+  <|> (keyword "_" >> EffectAnon <$> getNewAnon)
 
+-- | Parse an identifier in one of two given ways depending on capitalization
+parseCapIdent :: String
+              -> (Meta Path -> a)
+              -> (String -> a)
+              -> Parser a
+parseCapIdent kind named localBind = do
+  pathWithMeta <- parseMeta parsePath
+  let path = unmeta pathWithMeta
+  case extractLocalPath path of
+    Just name ->
+      return $ localBind $ name
+    Nothing ->
+      let components = unpath path in
+      case last components of
+        Identifier name
+          | isLocalIdentifier name ->
+            let alt = Path $ init components ++ [Identifier $ capFirst name] in
+            addFail (metaSpan pathWithMeta)
+              ("invalid path for " ++ kind ++ ", did you mean to capitalize it like `" ++ show alt ++ "`?")
+        _ ->
+          return $ named $ pathWithMeta
+
+-- | Represents a parsed infix operator (including those surrounded by backticks)
 data InfixOp = InfixOp
   { infixBacktick :: Bool
   , infixPath :: Meta Path }
 
+-- | Parse an infix operator, or fail with a special operator and its span
 infixOp :: Parser (Either (Span, SpecialOp) InfixOp)
 infixOp = label "operator" (backtickOp <|> normalOp)
   where
@@ -193,11 +95,15 @@ infixOp = label "operator" (backtickOp <|> normalOp)
         (span, PlainOp op) ->
           Right $ InfixOp False $ metaWithSpan span $ Local $ Operator op
 
+-- | A class for an expression that can be parsed that uses operator precedence
 class (Show a, ExprLike a) => Parsable a where
+  -- | Parse a single basic expression
   parseOne :: Parser a
+  -- | Try to parse a given special operator
   parseSpecial :: (Span, SpecialOp) -> Maybe (Prec -> Meta a -> Parser (Meta a))
   parseSpecial _ = Nothing
 
+-- | Parse an expression inside of parentheses
 paren :: Parsable a => Parser (Meta a)
 paren =
   parseMeta (char '(' *> (emptyParen <|> fullParen))
@@ -205,9 +111,11 @@ paren =
     emptyParen = opUnit <$ char ')'
     fullParen = opParen <$> blockOf parser <* spaces <* char ')'
 
+-- | Parse a plain expression or an expression surrounded in parentheses, but don't allow prefix operators
 parserNoPrefix :: Parsable a => Parser (Meta a)
 parserNoPrefix = parseMeta parseOne <|> hidden paren
 
+-- | Parse a single expression, including ones with a prefix operator
 parserPartial :: Parsable a => Parser (Meta a)
 parserPartial = hidden parsePrefix <|> parserNoPrefix
   where
@@ -224,29 +132,46 @@ parserPartial = hidden parsePrefix <|> parserNoPrefix
           return path
       opUnary path <$> parserPrec compactPrec
 
+-- | A number representing the precedence of an operation
 type Prec = Int
 
+-- | A special precedence for when an expression will be terminated by a special operator
 expectEndPrec :: Prec
 expectEndPrec = -1
 
-minPrec, normalPrec, applyPrec, compactPrec :: Prec
-minPrec     = 0
-normalPrec  = 1
-applyPrec   = 2
+-- | The default precedence for an expression
+minPrec :: Prec
+minPrec = 0
+
+-- | The precedence for a regular operator surrounded by whitespace
+normalPrec :: Prec
+normalPrec = 1
+
+-- | The precedence for function application
+applyPrec :: Prec
+applyPrec = 2
+
+-- | The precedence for a compact operator not surrounded by whitespace
+compactPrec :: Prec
 compactPrec = 3
 
+-- | Parse a single expression
 parser :: Parsable a => Parser (Meta a)
 parser = parserPrec minPrec
 
+-- | Parse a single expression, but expect to be terminated by a special operator
 parserExpectEnd :: Parsable a => Parser (Meta a)
 parserExpectEnd = parserPrec expectEndPrec
 
+-- | Parse a single expression, but require parentheses for spaces to be used
 parserNoSpace :: Parsable a => Parser (Meta a)
 parserNoSpace = parserPrec applyPrec
 
+-- | Parse a single expression at a certain precedence level (the most general way to parse something)
 parserPrec :: Parsable a => Prec -> Parser (Meta a)
 parserPrec prec = parserPartial >>= parserBase prec
 
+-- | Continue parsing after an expression with a given precedence level
 parserBase :: forall a. Parsable a => Prec -> Meta a -> Parser (Meta a)
 parserBase prec current =
   join (seqOpApp <|> return (return current))
@@ -355,15 +280,18 @@ parserBase prec current =
               end <- parseMeta $ reservedOp PipeSeparator
               metaWithEnds current end <$> eitherToFail (eApply current $ metaWithEnds start end effects)
 
+-- | Convert a result using 'Either' to fail parsing instead
 eitherToFail :: Either (Meta String) a -> Parser a
 eitherToFail (Right x) = return x
 eitherToFail (Left Meta { unmeta = msg, metaSpan }) = addFail metaSpan msg
 
+-- | Extend an already-parsed expression by parsing another expression at a precedence and calling a function
 metaExtendPrec :: Parsable b => (Meta a -> Meta b -> c) -> Prec -> Meta a -> Parser (Meta c)
 metaExtendPrec f prec current =
   parserPrec prec <&> \next ->
     metaWithEnds current next $ f current next
 
+-- | Like 'metaExtendPrec', but with the function called to get the result may fail
 metaExtendFail
   :: Parsable b
   => (Meta a -> Meta b -> Either (Meta String) c)
@@ -406,7 +334,7 @@ instance Parsable Type where
 
 instance Parsable Expr where
   parseOne = label "expression" $
-    -- identifiers must come first to avoid matching keyword prefix
+    -- Identifiers must come first to avoid matching keyword prefix
     parseExprIdent
     <|> parseExprIndex
     <|> parseLet
@@ -418,6 +346,7 @@ instance Parsable Expr where
     Just $ metaExtendPrec ETypeAscribe
   parseSpecial _ = Nothing
 
+-- | Parse an identifier for an expression using the current local variable bindings in scope
 parseExprIdent :: Parser Expr
 parseExprIdent = do
   path <- try parsePath
@@ -431,6 +360,7 @@ parseExprIdent = do
     Nothing ->
       return $ EGlobal path
 
+-- | Parse a DeBruijn expression index to refer to an unnamed local variable
 parseExprIndex :: Parser Expr
 parseExprIndex = do
   (span, num) <- getSpan $ do
@@ -453,11 +383,13 @@ parseExprIndex = do
         _ ->
           ("found De Bruijn index of " ++ show num ++ ", but only " ++ show count ++ " bindings are in scope")
 
+-- | Parse a function expression
 parseFunction :: Parser Expr
 parseFunction = do
   keyword "fun"
   EValue . VFun <$> blockOf matchCases
 
+-- | Parse a let expression
 parseLet :: Parser Expr
 parseLet = do
   keyword "let"
@@ -468,6 +400,7 @@ parseLet = do
   expr <- withBindings (bindingsForPat pat) parser
   return $ ELet pat val expr
 
+-- | Parse a match expression
 parseMatch :: Parser Expr
 parseMatch =
   pure EMatchIn
@@ -475,6 +408,7 @@ parseMatch =
   <*> blockOf (some (try nbsc >> parserNoSpace))
   <*> blockOf matchCases
 
+-- | Parse a use expression
 parseExprUse :: Parser Expr
 parseExprUse =
   pure EUse
@@ -484,25 +418,16 @@ parseExprUse =
   <*  lineBreak
   <*> parser
 
+-- | Parse a set of pattern match cases
 matchCases :: Parser [MatchCase]
 matchCases = someBetweenLines matchCase
 
+-- | Parse a single 'MatchCase'
 matchCase :: Parser MatchCase
 matchCase = do
   pats <- someUntil (specialOp FunctionArrow) parserNoSpace
   expr <- withBindings (pats >>= bindingsForPat) $ blockOf parser
   return (pats, expr)
-
-someBetweenLines :: Parser a -> Parser [a]
-someBetweenLines p = (:) <$> p <*> many (try lineBreak >> p)
-
-someUntil :: Parser a -> Parser b -> Parser [b]
-someUntil end p =
-  (:) <$> p <*> manyUntil end p
-
-manyUntil :: Parser a -> Parser b -> Parser [b]
-manyUntil end p =
-  spaces >> (([] <$ end) <|> someUntil end p)
 
 instance Parsable Pattern where
   parseOne = label "pattern" $
@@ -513,25 +438,4 @@ instance Parsable Pattern where
   parseSpecial (_, TypeAscription) =
     Just $ metaExtendPrec PTypeAscribe
   parseSpecial _ = Nothing
-
-parseCapIdent :: String
-              -> (Meta Path -> a)
-              -> (String -> a)
-              -> Parser a
-parseCapIdent kind named localBind = do
-  pathWithMeta <- parseMeta parsePath
-  let path = unmeta pathWithMeta
-  case extractLocalPath path of
-    Just name ->
-      return $ localBind $ name
-    Nothing ->
-      let components = unpath path in
-      case last components of
-        Identifier name
-          | isLocalIdentifier name ->
-            let alt = Path $ init components ++ [Identifier $ capFirst name] in
-            addFail (metaSpan pathWithMeta)
-              ("invalid path for " ++ kind ++ ", did you mean to capitalize it like `" ++ show alt ++ "`?")
-        _ ->
-          return $ named $ pathWithMeta
 

@@ -1,10 +1,7 @@
-module Pass.InferVariance (inferVariance) where
+-- | Infers variance information for data type declarations for use in type inference
+module Analyze.InferVariance where
 
-import Utility.Basics
-import Utility.ErrorPrint
-import Utility.TopSort
-import Utility.AST
-import Utility.Program
+import Utility
 
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -15,23 +12,28 @@ import Control.Monad.State.Strict
 import Control.Monad.Writer.Strict
 import Control.Monad.Trans.Maybe
 
+-- | A constraint that can be placed on a data type parameter
 data VarianceConstraint = VarianceConstraint
   { vBase :: TypeVariance
   , vDeps :: [AnonCount] }
 
+-- | The constraint given to parameters used directly in variants
 defaultConstraint :: VarianceConstraint
 defaultConstraint = VarianceConstraint
   { vBase = VOutput
   , vDeps = [] }
 
+-- | Modifies a constraint to be contained in another constrained parameter
 addStep :: TypeVariance -> VarianceConstraint -> VarianceConstraint
 addStep (VAnon anon) cs =
   cs { vDeps = anon : vDeps cs }
 addStep other cs =
   cs { vBase = other <> vBase cs }
 
+-- | A map of data type declarations
 type DeclMap = Map (Meta Path) (InFile DataDecl)
 
+-- | Finds the data types used by each data type so they can be sorted
 declDeps :: InFile DataDecl -> [Meta Path]
 declDeps (_ :/: DataDecl { dataVariants }) =
   Set.toList $ execWriter $ mapM_ variantDeps dataVariants
@@ -49,18 +51,20 @@ declDeps (_ :/: DataDecl { dataVariants }) =
         _ ->
           return ()
 
+-- | A record of the constraints placed on a given inference variable
 data InferVariable
   = InvariantVariable
   | InferVariable
     { outputVariables :: Set [AnonCount]
     , inputVariables :: Set [AnonCount] }
 
+-- | An inference variable with no constraints
 emptyInferVariable :: InferVariable
 emptyInferVariable = InferVariable
   { outputVariables = Set.empty
   , inputVariables = Set.empty }
 
--- TODO add short circuiting for (Out [], In []) -> Inv
+-- | Adds a constraint to an inference variable
 addConstraint :: VarianceConstraint -> InferVariable -> InferVariable
 addConstraint _ InvariantVariable = InvariantVariable
 addConstraint VarianceConstraint { vBase, vDeps } i =
@@ -72,23 +76,31 @@ addConstraint VarianceConstraint { vBase, vDeps } i =
     VInvariant ->
       InvariantVariable
 
+-- | 'StateT' for storing information about uninferred variables
+type Infer = StateT InferState CompileIO
+
+-- | Stores information about which declarations have been resolved and what constraints exists
 data InferState = InferState
-  { iResolvedDecls :: !DeclMap
+  { -- | A map of declarations that have already been resolved
+    iResolvedDecls :: !DeclMap
+    -- | A map of declarations that are currently being resolved and aren't fully known
   , iUnresolvedDecls :: !DeclMap
+    -- | A map of unresolved inference variables that have yet to be substituted
   , iUnresolvedVars :: !(Map AnonCount InferVariable) }
 
+-- | The default state with nothing inferred yet
 defaultInferState :: InferState
 defaultInferState = InferState
   { iResolvedDecls = Map.empty
   , iUnresolvedDecls = Map.empty
   , iUnresolvedVars = Map.empty }
 
-type Infer = StateT InferState CompileIO
-
+-- | Removes the unneeded parameter names from a 'DataSig'
 removeNames :: DataSig -> ([TypeVariance], [DataArg])
 removeNames DataSig { dataEffects, dataArgs } =
   (map snd dataEffects, map snd dataArgs)
 
+-- | Looks up a data type declaration's parameters
 lookupDecl :: Meta Path -> Infer ([TypeVariance], [DataArg])
 lookupDecl Meta { unmeta = Core (Operator "->") } =
   return ([VOutput], [DataArg VInput [], DataArg VOutput []])
@@ -101,6 +113,7 @@ lookupDecl path = do
         Just decl -> return $ removeNames $ dataSig $ unfile decl
         Nothing -> lift $ compilerBug $ "lookupDecl couldn't find `" ++ show path ++ "`"
 
+-- | Inserts a new constraint to an inference variable
 insertConstraint :: AnonCount -> VarianceConstraint -> Infer ()
 insertConstraint anon c = do
   modify $ \i -> i { iUnresolvedVars = Map.alter update anon $ iUnresolvedVars i }
@@ -110,6 +123,7 @@ insertConstraint anon c = do
         Nothing -> emptyInferVariable
         Just old -> old
 
+-- | Infers variance information for the parameters of every data type declaration
 inferVariance :: AllDecls -> CompileIO AllDecls
 inferVariance decls = do
   i <- execStateT runInfer defaultInferState
@@ -118,6 +132,7 @@ inferVariance decls = do
     runInfer =
       mapM_ inferDeclSCC $ topSortMap declDeps $ allDatas decls
 
+-- | Infers variance information for a single 'SCC' of the graph of data types
 inferDeclSCC :: SCC (Meta Path, InFile DataDecl) -> Infer ()
 inferDeclSCC scc = do
   modify $ \i -> i { iUnresolvedDecls = unresolved }
@@ -125,7 +140,7 @@ inferDeclSCC scc = do
     addError CompileError
       { errorFile = Just file
       , errorSpan = metaSpan name
-      , errorKind = Info
+      , errorKind = if hasCycles then Warning else Info
       , errorMessage = (if hasCycles then "" else "not ") ++ "involved in cycle" }
   -- TODO finish
   where
@@ -136,12 +151,15 @@ inferDeclSCC scc = do
         CyclicSCC decls ->
           (True, Map.fromList decls)
 
+-- | Information about all parameters of a data type declaration
 type DataInfo = Map String (ExprKind, DataArg)
 
+-- | Gets the 'AnonCount' of an uninferred parameter
 getAnon :: DataArg -> AnonCount
 getAnon DataArg { argVariance = VAnon anon } = anon
 getAnon _ = error "getAnon called with inferred variance"
 
+-- | Adds constraints for a data type's variant
 inferVariant :: FilePath -> DataInfo -> Meta DataVariant -> Infer ()
 inferVariant file dataInfo Meta { unmeta = (_, types) } =
   void $ runMaybeT $ forM_ types $ inferTypeNoArg defaultConstraint
@@ -167,7 +185,7 @@ inferVariant file dataInfo Meta { unmeta = (_, types) } =
             , errorMessage =
             "cannot find parameter `" ++ name ++ "` in scope, " ++
             if length name > 3 then
-              -- most type variables are short, so if it's longer than 3 characters it's probably wrong
+              -- Most type variables are short, so if it's longer than 3 characters it's probably wrong
               "did you mean to capitalize it?"
             else
               "did you forget to declare it?" }

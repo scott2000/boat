@@ -1,4 +1,13 @@
-module Utility.ErrorPrint (exitIfErrors, finishAndCheckErrors, addFatal, compilerBug, compilerBugRawIO) where
+-- | Utilities for checking for errors and for formatting error messages
+module Utility.ErrorPrint
+  ( CompileError (..)
+  , addError
+  , addFatal
+  , exitIfErrors
+  , finishAndCheckErrors
+  , compilerBug
+  , compilerBugRawIO
+  ) where
 
 import Utility.Basics
 
@@ -13,6 +22,14 @@ import Control.Monad.State.Strict
 
 import System.Console.ANSI
 
+-- | Add a fatal error (like 'addError', but never returns)
+addFatal :: CompileError -> CompileIO a
+addFatal e = do
+  addError e
+  exitIfErrors
+  compilerBug "addFatal did not exit!"
+
+-- | If any errors occurred, print them and exit with failure
 exitIfErrors :: CompileIO ()
 exitIfErrors = do
   count <- gets compileErrorCount
@@ -25,6 +42,7 @@ exitIfErrors = do
     printErrors
     lift $ exitFailure
 
+-- | Print any errors generated during compilation
 finishAndCheckErrors :: CompileIO ()
 finishAndCheckErrors = do
   exitIfErrors
@@ -36,16 +54,12 @@ finishAndCheckErrors = do
     , errorMessage = "compiled successfully with " ++ show count }
   printErrors
 
-addFatal :: CompileError -> CompileIO a
-addFatal e = do
-  addError e
-  exitIfErrors
-  compilerBug "addFatal did not exit!"
-
+-- | Header printed before an error message for a compiler bug
 compilerBugBaseMessage :: String
 compilerBugBaseMessage =
   "something went wrong when compiling your code! (please report this compiler bug)\n"
 
+-- | Prints an error message and exits (for use in code that should be unreachable)
 compilerBug :: String -> CompileIO a
 compilerBug msg = do
   addError CompileError
@@ -56,6 +70,7 @@ compilerBug msg = do
   printErrors
   lift $ exitFailure
 
+-- | Like 'compilerBug', but doesn't require 'CompileIO' and prints a raw message
 compilerBugRawIO :: String -> IO a
 compilerBugRawIO err = do
   prettyCompileErrors $ Set.singleton CompileError
@@ -65,44 +80,52 @@ compilerBugRawIO err = do
     , errorMessage = compilerBugBaseMessage ++ err }
   exitFailure
 
+-- | Prints all errors that have been generated
 printErrors :: CompileIO ()
 printErrors =
   gets compileErrors >>= lift . prettyCompileErrors
 
+-- | Describes how a line of text should be printed in an error message
 data LineStyle
-  -- Does no highlighting
+  -- | Does no highlighting
   = Plain
-  -- Skips a certain number of lines with the given separator
+  -- | Skips a certain number of lines with the given separator
   | Skip !Int
-  -- Multilines everything after hlStart
+  -- | Starts a multiline highlight block
   | MultilineStart
     { hlStart :: !Int }
-  -- Multilines entire line
+  -- | Continues a multiline highlight block
   | MultilineContinue
-  -- Multilines up until hlEnd
+  -- | Ends a multiline highlight block
   | MultilineEnd
     { hlEnd :: !Int}
-  -- Adds an underline after the line
+  -- | Underlines a certain section of the line
   | Underline
     { hlStart :: !Int
     , hlEnd :: !Int }
 
+-- | A styled line is a line and the style to be used to print it
 type StyledLine = (LineStyle, String)
 
+-- | Prints the escape sequence to set a certain color
 setColor :: Color -> IO ()
 setColor color =
   setSGR [SetColor Foreground Vivid color]
 
+-- | Prints the escape sequence to set a certain color, but makes it bold
 setBoldColor :: Color -> IO ()
 setBoldColor color =
   setSGR [SetConsoleIntensity BoldIntensity, SetColor Foreground Vivid color]
 
+-- | Prints the escape sequence to reset the color back to the terminal's default
 resetColor :: IO ()
 resetColor = setSGR [Reset]
 
+-- | The separator used for skipped lines
 breakSeparator :: String
 breakSeparator = "..."
 
+-- | Prints all of the styled lines with a certain color starting from a certain line number
 prettyLines :: Color -> Int -> [StyledLine] -> IO ()
 prettyLines color firstLine lines = do
   printBlank
@@ -198,6 +221,13 @@ prettyLines color firstLine lines = do
           putStrLn ""
           printAll True (lineNumber+1) rest
 
+-- | Checks if a line contains only spaces
+isBlank :: String -> Bool
+isBlank [] = True
+isBlank (' ':xs) = isBlank xs
+isBlank _ = False
+
+-- Makes initial blank lines be skipped when printing them
 trimLines :: [StyledLine] -> [StyledLine]
 trimLines [] = []
 trimLines (styledLine@(style, line) : rest) =
@@ -211,19 +241,40 @@ trimLines (styledLine@(style, line) : rest) =
       MultilineContinue -> True
       _ -> False
 
+-- | Finds the first column without spaces in a line
+firstColumn :: String -> Maybe Int
+firstColumn str = go 1 str
+  where
+    go n = \case
+      ' ':rest ->
+        go (n+1) rest
+      [] -> Nothing
+      _ -> Just n
+
+-- | Finds the first column without spaces in a line, or 1 if the line is blank
+firstColumnOr1 :: String -> Int
+firstColumnOr1 = fromMaybe 1 . firstColumn
+
+-- | Stores the state of a file as it is being traversed
 data PrettyErrorState = PrettyErrorState
-  { peCurrentFile :: !(Maybe FilePath)
+  { -- | The file that is currently loaded
+    peCurrentFile :: !(Maybe FilePath)
+    -- | Any lines that occurred before the current position, in reverse order
   , peBefore :: ![String]
+    -- | Any remaining lines in the current file (requires a loaded file)
   , peAfter :: [String]
+    -- | The current line number of the cursor in the file
   , peLine :: !Int }
 
+-- | Default state with no file loaded
 peDefault :: PrettyErrorState
 peDefault = PrettyErrorState
   { peCurrentFile = Nothing
   , peBefore = []
-  , peAfter = undefined
+  , peAfter = error "peAfter accessed uninitialized"
   , peLine = 0 }
 
+-- | Makes sure the requested file has been loaded
 setFile :: FilePath -> StateT PrettyErrorState IO ()
 setFile file = do
   s <- get
@@ -235,6 +286,7 @@ setFile file = do
       , peAfter = lines contents
       , peLine = 1 }
 
+-- | Advances to the requested line in the current file
 advanceToLine :: Int -> StateT PrettyErrorState IO ()
 advanceToLine startLine = do
   s <- get
@@ -255,23 +307,7 @@ advanceToLine startLine = do
             []     -> ("", [])
             (x:xs) -> (x, xs)
 
-firstColumn :: String -> Maybe Int
-firstColumn str = go 1 str
-  where
-    go n = \case
-      ' ':rest ->
-        go (n+1) rest
-      [] -> Nothing
-      _ -> Just n
-
-isBlank :: String -> Bool
-isBlank [] = True
-isBlank (' ':xs) = isBlank xs
-isBlank _ = False
-
-firstColumnOr1 :: String -> Int
-firstColumnOr1 = fromMaybe 1 . firstColumn
-
+-- | Given a starting and ending position, finds the context lines and highlighted lines
 getLineRangeAndContext :: Position -> Position -> StateT PrettyErrorState IO ([String], [String])
 getLineRangeAndContext spanStart spanEnd = do
   advanceToLine startLine
@@ -299,6 +335,7 @@ getLineRangeAndContext spanStart spanEnd = do
     startLine = posLine spanStart
     lineCount = posLine spanEnd - startLine + 1
 
+-- | Takes the first and last items of a list of 2 or more items
 takeEnds :: [a] -> (a, [a], a)
 takeEnds (first:rest) = go [] rest
   where
@@ -306,7 +343,10 @@ takeEnds (first:rest) = go [] rest
       (first, reverse acc, last)
     go acc (next:rest) =
       go (next:acc) rest
+    go _ [] = error "takeEnds called with singleton list"
+takeEnds [] = error "takeEnds called with empty list"
 
+-- | Styles the context lines, removing any unnecessary lines
 createContextLines :: Bool -> [String] -> [StyledLine]
 createContextLines hlAtStart context =
   if len <= 3 then
@@ -315,6 +355,7 @@ createContextLines hlAtStart context =
     [ (Plain, head context)
     , (Skip (len-2), breakSeparator)
     , (Plain, last context) ]
+    -- Include the previous line before the error if the error is at the start of the line
   else
     mapPlain (take 2 context) ++
     [(Skip (len-3), breakSeparator)]
@@ -322,6 +363,7 @@ createContextLines hlAtStart context =
     len = length context
     mapPlain = map $ (,) Plain
 
+-- | Styles the middle of a multiline seclection, skipping middle lines if it's too long
 createMidSelection :: [String] -> [StyledLine]
 createMidSelection lines =
   if len <= 5 then
@@ -340,6 +382,15 @@ createMidSelection lines =
     last2 bc@[_, _] = bc
     last2 (_:rest) = last2 rest
 
+-- | Gets the color associated with an 'ErrorKind' for highlighting the code
+errorColor :: ErrorKind -> Color
+errorColor = \case
+  Info    -> Blue
+  Warning -> Yellow
+  Error   -> Red
+  Done    -> Green
+
+-- | Formats and prints all compile errors in the set
 prettyCompileErrors :: Set CompileError -> IO ()
 prettyCompileErrors errs =
   evalStateT (go $ Set.toList errs) peDefault

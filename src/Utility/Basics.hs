@@ -1,17 +1,62 @@
-module Utility.Basics where
+-- | Basic definitions that will be used in all other modules
+module Utility.Basics
+  ( -- * Paths and Names
+    Name (..)
+  , parsePackageName
+  , parseModuleName
+  , pattern Underscore
+  , Path (..)
+  , (.|.)
+  , pattern Core
+  , pattern Local
+  , pattern EmptyPath
+  , pattern Generated
+
+    -- * Global Compiler State
+  , MonadCompile
+  , CompileIO
+  , CompileState (..)
+  , compileStateFromOptions
+  , CompileOptions (..)
+  , CompileError (..)
+  , ErrorKind (..)
+  , AddError
+  , addError
+  , ErrorCount (..)
+  , AnonCount
+  , pattern AnonAny
+  , getNewAnon
+
+    -- * Positions and Spans
+  , Position (..)
+  , Span (..)
+  , pointSpan
+
+    -- * Formatting and Capitalization
+  , plural
+  , aOrAn
+  , isCap
+  , capFirst
+  , lowerFirst
+
+    -- * General Helper Functions
+  , mapGet
+  , (<&>)
+  ) where
 
 import Data.Char
 import Data.Word
 import Data.List
 import Data.String
 
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
 
 import Control.Monad.State.Strict
 
-import System.Console.ANSI.Types (Color (..))
-
+-- | An identifier to be used to name items
 data Name
   = Identifier String
   | Operator String
@@ -27,6 +72,7 @@ instance Show Name where
     Operator op -> "(" ++ op ++ ")"
     Unary u -> "(unary " ++ u ++ ")"
 
+-- | A path consisting of a series of names separated by dots
 newtype Path = Path
   { unpath :: [Name] }
   deriving (Ord, Eq)
@@ -43,28 +89,31 @@ instance IsString Path where
         where
           (first:rest) = split cs
 
+-- | Add a name to the end of a 'Path'
 (.|.) :: Path -> Name -> Path
 (Path p) .|. name = Path (p ++ [name])
 
+-- | Place an item in the Core module
 pattern Core :: Name -> Path
 pattern Core name = Path ["Core", name]
 
+-- | Make an unqualified 'Path'
 pattern Local :: Name -> Path
 pattern Local name = Path [name]
 
+-- | A name starting with an underscore which will not be exported
+pattern Underscore :: String -> Name
+pattern Underscore name = Identifier ('_':name)
+
+-- | Make an empty 'Path'
 pattern EmptyPath :: Path
 pattern EmptyPath = Path []
 
+-- | Placeholder filename for compiler-generated code
 pattern Generated :: FilePath
 pattern Generated = "<compiler-generated>"
 
-type CompileIO = StateT CompileState IO
-
-data CompileOptions = CompileOptions
-  { compileTarget :: !FilePath
-  , compilePackageName :: !Name }
-  deriving Show
-
+-- | Helper function for 'parsePackageName' and 'parseModuleName'
 parseIdentIn :: String -> Bool -> String -> Either String Name
 parseIdentIn kind requireUpper name =
   case name of
@@ -94,43 +143,72 @@ parseIdentIn kind requireUpper name =
   where
     isAlphaNumAscii x = (x == '_' || isAlpha x || isDigit x) && isAscii x
 
+-- | Parse a package name (used for parsing a command-line argument)
 parsePackageName :: String -> Either String Name
 parsePackageName = parseIdentIn "package name" True
 
+-- | Parse a module name (used for parsing directory names for modules)
 parseModuleName :: String -> Either String Name
 parseModuleName = parseIdentIn "module names" False
 
+-- | A unique identifier used for inference
 type AnonCount = Word64
 
+-- | Matches any `AnonCount`, defaulting to 0 if used in an expression
 pattern AnonAny :: Word64
 pattern AnonAny <- _
   where AnonAny = 0
 
-data CompileState = CompileState
-  { compileOptions :: !CompileOptions
-  , compileErrors :: !(Set CompileError)
-  , compileErrorCount :: !ErrorCount
-  , compileAnonTypes :: !AnonCount }
+-- | Constraint for a 'Monad' that supports modifying compiler state (e.g. 'CompileIO')
+type MonadCompile = MonadState CompileState
 
+-- | 'StateT' used for all stages of compilation to store state
+type CompileIO = StateT CompileState IO
+
+-- | A record used to store state throughout compilation
+data CompileState = CompileState
+  { -- | The options given to the compiler
+    compileOptions :: !CompileOptions
+    -- | The set of errors emitted during compilation
+  , compileErrors :: !(Set CompileError)
+    -- | The count of each type of error emitted
+  , compileErrorCount :: !ErrorCount
+    -- | The last unique 'AnonCount' that was given out
+  , compileAnonCount :: !AnonCount }
+
+-- | A record of options provided as command-line arguments
+data CompileOptions = CompileOptions
+  { -- | The requested file or directory to be compiled
+    compileTarget :: !FilePath
+    -- | The requested name for the package
+  , compilePackageName :: !Name }
+
+-- | Creates a 'CompileState' from 'CompileOptions'
 compileStateFromOptions :: CompileOptions -> CompileState
 compileStateFromOptions opts = CompileState
   { compileOptions = opts
   , compileErrors = Set.empty
   , compileErrorCount = ErrorCount 0 0
-  , compileAnonTypes = 1 }
+  , compileAnonCount = AnonAny }
 
-getNewAnon :: MonadState CompileState m => m AnonCount
+-- | Gets a new unique 'AnonCount' for an inference variable
+getNewAnon :: MonadCompile m => m AnonCount
 getNewAnon = do
   s <- get
-  let oldCount = compileAnonTypes s
-  put s { compileAnonTypes = oldCount + 1 }
-  return oldCount
+  let newCount = compileAnonCount s + 1
+  put s { compileAnonCount = newCount }
+  return newCount
 
+-- | An error encountered during compilation
 data CompileError = CompileError
-  { errorFile :: Maybe FilePath
-  , errorSpan :: Maybe Span
-  , errorKind :: ErrorKind
-  , errorMessage :: String }
+  { -- | The file in which the error occurred (optional)
+    errorFile :: !(Maybe FilePath)
+    -- | The span at which the error occurred (requires a file)
+  , errorSpan :: !(Maybe Span)
+    -- | The kind of error that occurred
+  , errorKind :: !ErrorKind
+    -- | The error message to print
+  , errorMessage :: !String }
   deriving Eq
 
 instance Ord CompileError where
@@ -140,11 +218,13 @@ instance Ord CompileError where
     <> errorKind a `compare` errorKind b
     <> errorMessage a `compare` errorMessage b
     where
+      -- Empty files and spans should appear last
       Nothing `reversedMaybe` Nothing = EQ
       Nothing `reversedMaybe` Just _  = GT
       Just _  `reversedMaybe` Nothing = LT
       Just a  `reversedMaybe` Just b  = a `compare` b
 
+-- | Stores the number of each type of error (useful for determining when to stop compilation)
 data ErrorCount = ErrorCount
   { errorCount :: !Int
   , warningCount :: !Int }
@@ -156,28 +236,7 @@ instance Show ErrorCount where
     ErrorCount e w ->
       plural e "error" ++ " (and " ++ plural w "warning" ++ ")"
 
-plural :: Int -> String -> String
-plural 0 w = "no " ++ w ++ "s"
-plural 1 w = "1 " ++ w
-plural n w = show n ++ " " ++ w ++ "s"
-
-aOrAn :: String -> String
-aOrAn str = article ++ str
-  where
-    article =
-      if isVowel $ head str then
-        "an "
-      else
-        "a "
-    -- this only works for lowercase letters but that's fine
-    isVowel = \case
-      'a' -> True
-      'e' -> True
-      'i' -> True
-      'o' -> True
-      'u' -> True
-      _ -> False
-
+-- | Adds a new error to the 'ErrorCount'
 updateErrorCount :: ErrorKind -> ErrorCount -> ErrorCount
 updateErrorCount Error c = c
   { errorCount = errorCount c + 1 }
@@ -185,6 +244,7 @@ updateErrorCount Warning c = c
   { warningCount = warningCount c + 1 }
 updateErrorCount _ c = c
 
+-- | Represents the different kinds of possible error messages
 data ErrorKind
   = Info
   | Warning
@@ -199,20 +259,18 @@ instance Show ErrorKind where
     Error   -> "error"
     Done    -> "done"
 
-addError :: MonadState CompileState m => CompileError -> m ()
+-- | Constraint for a 'Monad' that supports adding errors (e.g. 'CompileIO')
+type AddError = MonadCompile
+
+-- | Emits a single 'CompileError' for later printing
+addError :: AddError m => CompileError -> m ()
 addError err =
   modify $ \s -> s
     { compileErrors = Set.insert err $ compileErrors s
     , compileErrorCount =
       updateErrorCount (errorKind err) $ compileErrorCount s }
 
-errorColor :: ErrorKind -> Color
-errorColor = \case
-  Info    -> Blue
-  Warning -> Yellow
-  Error   -> Red
-  Done    -> Green
-
+-- | A position in a file consisting of a line number and column number (starting at 1)
 data Position = Position
   { posLine :: !Int
   , posColumn :: !Int }
@@ -222,7 +280,7 @@ instance Show Position where
   show Position { posLine, posColumn } =
     show posLine ++ ":" ++ show posColumn
 
--- location is the interval [spanStart, spanEnd)
+-- | A range of text in the interval [spanStart, spanEnd) to be associated with parsed code
 data Span = Span
   { spanStart :: !Position
   , spanEnd :: !Position }
@@ -235,22 +293,58 @@ instance Semigroup Span where
   Span { spanStart } <> Span { spanEnd } =
     Span { spanStart, spanEnd }
 
+-- | Creates a 'Span' of a single character from a 'Position'
 pointSpan :: Position -> Span
 pointSpan pos = Span
   { spanStart = pos
   , spanEnd = pos { posColumn = posColumn pos + 1 } }
 
-(<&>) :: Functor f => f a -> (a -> b) -> f b
-(<&>) = flip fmap
+-- | Prepends a number to a string with an optional plural suffix
+plural :: Int -> String -> String
+plural 0 w = "no " ++ w ++ "s"
+plural 1 w = "1 " ++ w
+plural n w = show n ++ " " ++ w ++ "s"
 
+-- | Prepends an indefinite article to a string depending on whether it starts with a vowel
+aOrAn :: String -> String
+aOrAn str = article ++ str
+  where
+    article =
+      if isLowerVowel $ toLower $ head str then
+        "an "
+      else
+        "a "
+    isLowerVowel = \case
+      'a' -> True
+      'e' -> True
+      'i' -> True
+      'o' -> True
+      'u' -> True
+      _ -> False
+
+-- | Checks if a character is considered uppercase (A-Z or _)
 isCap :: Char -> Bool
 isCap ch
   | ch `elem` ['A'..'Z'] || ch == '_' = True
   | otherwise = False
 
+-- | Converts the first character in a string to uppercase
 capFirst :: String -> String
 capFirst (x:xs) = toUpper x : xs
 
+-- | Converts the first character in a string to lowercase
 lowerFirst :: String -> String
 lowerFirst (x:xs) = toLower x : xs
+
+-- | A version of 'Map.lookup' that calls 'error' with the key if it fails
+mapGet :: (Show k, Ord k) => k -> Map k v -> v
+mapGet key m =
+  case Map.lookup key m of
+    Just v -> v
+    Nothing ->
+      error ("map does not contain key: " ++ show key)
+
+-- | A flipped version of 'fmap'
+(<&>) :: Functor f => f a -> (a -> b) -> f b
+(<&>) = flip fmap
 

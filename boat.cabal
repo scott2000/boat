@@ -19,11 +19,15 @@ executable boat
                        Utility.TopSort,
                        Utility.AST,
                        Utility.Program,
-                       Utility.Parser,
-                       Pass.Parser,
-                       Pass.NameResolve,
-                       Pass.AssocOps
-                       Pass.InferVariance
+                       Utility,
+                       Parse.Primitives,
+                       Parse.Expression,
+                       Parse.Module,
+                       Parse,
+                       Analyze.NameResolve,
+                       Analyze.AssocOps
+                       Analyze.InferVariance,
+                       Analyze
   default-extensions:  FlexibleContexts,
                        FlexibleInstances,
                        NamedFieldPuns,
@@ -36,6 +40,7 @@ executable boat
                        Rank2Types,
                        MultiParamTypeClasses,
                        ScopedTypeVariables,
+                       ConstraintKinds,
                        DeriveFunctor,
                        DeriveFoldable,
                        DeriveTraversable
