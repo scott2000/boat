@@ -509,14 +509,14 @@ dataArgFromType :: AddError m
                 -> m DataArg
 dataArgFromType file typeWithMeta =
   -- It doesn't matter what is returned on error since it won't be needed until the next phase anyway
-  case reduceApply typeWithMeta of
-    Left (_, b) -> do
+  case reduceApplyNoInfix typeWithMeta of
+    Left path -> do
       addError CompileError
         { errorFile = Just file
-        , errorSpan = metaSpan b
+        , errorSpan = metaSpan path
         , errorKind = Error
         , errorMessage =
-          "cannot resolve operator precedence (try not to use infix operators for variance)" }
+          "type parameter variances must use prefix notation" }
       return $ DataArg VInvariant []
     Right (ReducedApp Meta { unmeta = baseTy, metaSpan = baseSpan } args) -> do
       baseVariance <- case baseTy of
@@ -542,14 +542,14 @@ namedDataArgFromType :: AddError m
                      -> Meta Type
                      -> m (Maybe (Meta String, DataArg))
 namedDataArgFromType file typeWithMeta =
-  case reduceApply typeWithMeta of
-    Left (a, _) -> do
+  case reduceApplyNoInfix typeWithMeta of
+    Left path -> do
       addError CompileError
         { errorFile = Just file
-        , errorSpan = metaSpan a
+        , errorSpan = metaSpan path
         , errorKind = Error
         , errorMessage =
-          "expected a type parameter, not a series of infix operators" }
+          "expected a type parameter, not an infix operator" }
       return Nothing
     Right (ReducedApp Meta { unmeta = baseTy, metaSpan = baseSpan } args) -> do
       let

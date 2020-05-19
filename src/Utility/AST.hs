@@ -26,6 +26,7 @@ module Utility.AST
   -- * Functions and Type Applications
   , ReducedApp (..)
   , reduceApply
+  , reduceApplyNoInfix
   , findBase
   , pattern TAnyFuncArrow
   , pattern TEffFuncArrow
@@ -318,6 +319,22 @@ reduceApply typeWithMeta =
       Right $ ReducedApp (copySpan path $ TNamed [] path) [ty]
     TBinOp path a b ->
       Right $ ReducedApp (copySpan path $ TNamed [] path) [a, b]
+    _ ->
+      Right $ ReducedApp typeWithMeta []
+
+-- | Try to reduce all applications but don't allow infix operators
+reduceApplyNoInfix :: Meta Type -> Either (Meta Path) ReducedApp
+reduceApplyNoInfix typeWithMeta =
+  case unmeta typeWithMeta of
+    TApp a b -> do
+      ReducedApp ty args <- reduceApplyNoInfix a
+      Right $ ReducedApp ty (args ++ [b])
+    TParen ty ->
+      reduceApplyNoInfix ty
+    TUnaryOp path _ ->
+      Left path
+    TBinOp path _ _ ->
+      Left path
     _ ->
       Right $ ReducedApp typeWithMeta []
 
