@@ -526,6 +526,7 @@ expensiveCheckDisjoint :: InferVariable -> Bool
 expensiveCheckDisjoint InferVariable { outputVariables, inputVariables } =
   Set.disjoint (normalizeVariables outputVariables) (normalizeVariables inputVariables)
 
+-- | An inference variable with its associated 'AnonCount'
 type InferEntry = (AnonCount, InferVariable)
 
 -- | Describes the possible results of trying to resolve a cycle
