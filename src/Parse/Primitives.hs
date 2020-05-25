@@ -257,7 +257,7 @@ getFilePath =
 
 -- | Adds new bindings for local variables to the parser to be run
 withBindings :: [Maybe String] -> Parser a -> Parser a
-withBindings bindings = local $ \s -> s { exprBindings = reverse bindings ++ exprBindings s }
+withBindings bindings = local \s -> s { exprBindings = reverse bindings ++ exprBindings s }
 
 -- | Looks up a local variable binding and returns an index if it was found
 findBindingFor :: String -> Parser (Maybe Int)
@@ -443,7 +443,7 @@ word = do
 
 -- | Parses a single identifier
 identifier :: Parser String
-identifier = label "identifier" $ do
+identifier = label "identifier" do
   offset <- getOffset
   ident <- word
   if isKeyword ident then do
@@ -455,7 +455,7 @@ identifier = label "identifier" $ do
 -- | Parses an expected keyword
 keyword :: String -> Parser ()
 keyword expected =
-  expectStr expected $ try $ do
+  expectStr expected $ try do
     offset <- getOffset
     ident <- word
     if ident == expected then
@@ -534,10 +534,10 @@ anyOperator = do
 
 -- | Parses a specific requested operator
 anySpecificOp :: AnyOperator -> Parser ()
-anySpecificOp expected = label (show $ show expected) $ try $ do
+anySpecificOp expected = label (show $ show expected) $ try do
   offset <- getOffset
   op <- anyOperator
-  when (op /= expected) $ do
+  when (op /= expected) do
     setOffset offset
     unexpectedStr $ show op
 
@@ -555,7 +555,7 @@ plainOp = anySpecificOp . NonReservedOp . PlainOp
 
 -- | Parses any non-reserved operator
 nonReservedOp :: Parser NonReservedOp
-nonReservedOp = label "operator" $ try $ do
+nonReservedOp = label "operator" $ try do
   offset <- getOffset
   anyOperator >>= \case
     ReservedOp op -> do
@@ -566,7 +566,7 @@ nonReservedOp = label "operator" $ try $ do
 
 -- | Parses a plain operator or a function arrow
 plainOrArrowOp :: Parser PlainOp
-plainOrArrowOp = label "operator" $ try $ do
+plainOrArrowOp = label "operator" $ try do
   offset <- getOffset
   nonReservedOp >>= \case
     SpecialOp FunctionArrow ->
@@ -579,7 +579,7 @@ plainOrArrowOp = label "operator" $ try $ do
 
 -- | Parses a unary operator which is also just a plain operator
 unaryOp :: Parser PlainOp
-unaryOp = label "unary operator" $ try $ do
+unaryOp = label "unary operator" $ try do
   offset <- getOffset
   nonReservedOp >>= \case
     SpecialOp op -> do
@@ -627,7 +627,7 @@ parseSomeSeparatedList :: Char -> Parser a -> Parser [a]
 parseSomeSeparatedList sep p =
   (:) <$> p <*> manyCommas
   where
-    manyCommas = option [] $ do
+    manyCommas = option [] do
       try (spaces >> char sep) >> spaces
       option [] ((:) <$> p <*> manyCommas)
 

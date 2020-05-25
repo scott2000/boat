@@ -411,7 +411,7 @@ insertData path decl = do
         { allDecls = decls
           { allDatas = Map.insert path decl datas } }
 
--- | Resolve a 'LetDecl'
+-- | Resolve a @LetDecl@
 insertLet :: Meta Path -> InFile LetDecl -> NR ()
 insertLet path decl = do
   s <- get
@@ -489,7 +489,7 @@ nameResolveAll :: Path -> [Module] -> NR ()
 nameResolveAll path mods = do
   forM_ mods $ nameResolveEach path
   unusedIds <- gets unusedIds
-  forM_ (IntMap.elems unusedIds) $ \(file :/: span) ->
+  forM_ (IntMap.elems unusedIds) \(file :/: span) ->
     lift $ lift $ addError CompileError
       { errorFile = Just file
       , errorSpan = Just span
@@ -504,7 +504,7 @@ nameResolveEach path mod =
     $ foldl' (flip (addUse path)) go (modUses mod)
   where
     go = do
-      forM_ (Map.toList $ modSubs mod) $ \(name, mods) ->
+      forM_ (Map.toList $ modSubs mod) \(name, mods) ->
         forM_ mods $ nameResolveEach (path .|. name)
       mapM_ nameResolveOpType $ modOpTypes mod
       mapM_ nameResolveOpDecl $ Map.toList $ modOpDecls mod
@@ -603,7 +603,7 @@ nameResolveEach path mod =
       let dataName = (path .|.) <$> name
       insertData dataName $ file :/: decl
         { dataVariants = variants }
-      forM variants $ \var ->
+      forM variants \var ->
         let
           (name, types) = unmeta var
           constructorPath
@@ -621,7 +621,7 @@ nameResolveEach path mod =
                   EValue $ VFun [
                     ( replicate count $ meta $ PBind Nothing
                     , copySpan var $ EDataCons variantPath $
-                      [0 .. count-1] <&> \n -> meta $ EIndex n Nothing )]
+                      reverse [0 .. count-1] <&> \n -> meta $ EIndex n Nothing )]
             , letConstraints = [] }
       where
         nameResolveVariant (name, types) =
@@ -643,7 +643,7 @@ nameResolvePath file check kind span path@(Path parts@(head:rest)) = do
       Names { finalNames, otherNames } <- ask
       case Map.lookup head finalNames of
         Just (Right (path, item, _, id)) ->
-          checkRec path item $ do
+          checkRec path item do
             clearId id
             return $ Path (unpath path ++ parts)
         Just (Left paths) ->
@@ -685,7 +685,7 @@ nameResolvePath file check kind span path@(Path parts@(head:rest)) = do
               wrongKind subPath "module"
 
     clearId id =
-      modify $ \s -> s
+      modify \s -> s
         { unusedIds = IntMap.delete id $ unusedIds s }
 
     pathErr msg = do

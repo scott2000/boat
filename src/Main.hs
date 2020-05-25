@@ -38,8 +38,8 @@ main = do
   options <- parseArgs currentDirectory
   phase <- newIORef PhaseInit
   evalStateT (startCompile phase) (compileStateFromOptions options) `catches`
-    [ Handler $ \(e :: ExitCode) -> throwIO e
-    , Handler $ \(e :: SomeException) -> do
+    [ Handler \(e :: ExitCode) -> throwIO e
+    , Handler \(e :: SomeException) -> do
         phaseMsg <- readIORef phase <&> \case
           PhaseInit -> "initialization"
           PhaseParser -> "parsing"
@@ -74,10 +74,8 @@ main = do
 -- | Starts the compilation process by running each pass in order
 startCompile :: IORef Phase -> CompileIO ()
 startCompile phase = do
-  path <- gets (compileTarget . compileOptions)
-
   setPhase phase PhaseParser
-  mods <- parse path
+  mods <- parse
   exitIfErrors
   lift $ putStrLn ("\n" ++ intercalate "\n" (map show mods))
 
@@ -99,10 +97,12 @@ startCompile phase = do
 
   setPhase phase PhaseInferVariance
   allDecls <- inferVariance allDecls
+  exitIfErrors
 
   lift $ putStrLn $ "\nInferred variances:\n"
-  lift $ forM_ (Map.toList $ allDatas allDecls) $ \(name, _ :/: DataDecl { dataSig }) ->
-    putStrLn $ showWithName (show name) dataSig
+  lift $ forM_ (Map.toList $ allDatas allDecls) $
+    \(name, _ :/: DataDecl { dataSig = DataSig { dataEffects, dataArgs } }) -> putStrLn $
+      show name ++ effectSuffixStr (map (show . snd) dataEffects) ++ unwords ("" : map (show . snd) dataArgs)
 
   finishAndCheckErrors
   where

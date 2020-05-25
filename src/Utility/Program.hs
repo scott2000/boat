@@ -6,7 +6,8 @@ module Utility.Program
   , Associativity (..)
   , OpDecl (..)
   , EffectDecl (..)
-  , LetDecl (..)
+  , LetDecl
+  , LetDeclWith (..)
 
     -- * Data Types
   , DataDecl (..)
@@ -14,8 +15,10 @@ module Utility.Program
   , variantFromType
   , DataSig (..)
   , namedDataSigFromType
+  , pattern UnnamedArg
   , TypeVariance (..)
   , DataArg (..)
+  , pattern NullaryArg
 
     -- * Operator Types
   , OpType
@@ -24,7 +27,8 @@ module Utility.Program
   , OpTypeEnds
 
     -- * Fully Resolved Representation
-  , AllDecls (..)
+  , AllDecls
+  , AllDeclsWith (..)
   , emptyDecls
 
     -- * Nested Module Representation
@@ -98,12 +102,15 @@ showDeclMap = map showDecl . Map.toList
 type OpTypeEnds = (Maybe (Meta Path), Maybe (Meta Path))
 
 -- | A collection of all declarations in a package by absolute path
-data AllDecls = AllDecls
+type AllDecls = AllDeclsWith ()
+
+-- | A collection of all declarations in a package by absolute path (with some type information)
+data AllDeclsWith ty = AllDecls
   { allOpTypes :: !(Map (Meta Path) (InFile OpTypeEnds))
   , allOpDecls :: !(Map (Meta Path) (InFile OpDecl))
   , allEffects :: !(Map (Meta Path) (InFile EffectDecl))
   , allDatas :: !(Map (Meta Path) (InFile DataDecl))
-  , allLets :: !(Map (Meta Path) (InFile LetDecl)) }
+  , allLets :: !(Map (Meta Path) (InFile (LetDeclWith ty))) }
 
 instance Show AllDecls where
   show AllDecls { allOpTypes, allOpDecls, allEffects, allDatas, allLets } =
@@ -277,7 +284,7 @@ modAddOpDecls names op path mod = do
     oldOps = modOpDecls mod
     opDecl = path :/: op
     newOps = names <&> \name -> (name, opDecl)
-  forM_ names $ \name ->
+  forM_ names \name ->
     when (Map.member name oldOps) $
       addError CompileError
         { errorFile = Just path
@@ -325,8 +332,11 @@ modAddEffect name decl path mod = do
   return mod { modEffects = Map.insert name newDecl oldEffects }
 
 -- | A declaration for a top-level binding of an expression
-data LetDecl = LetDecl
-  { letBody :: Meta Expr
+type LetDecl = LetDeclWith ()
+
+-- | A declaration for a top-level binding of an expression (with some type information)
+data LetDeclWith ty = LetDecl
+  { letBody :: MetaR ExprWith ty
   , letConstraints :: [Constraint] }
 
 instance ShowWithName LetDecl where
@@ -345,7 +355,7 @@ instance ShowWithName LetDecl where
           [] -> ""
           cs -> " with " ++ intercalate ", " (map show cs)
 
--- | Adds a 'LetDecl' to the module
+-- | Adds a @LetDecl@ to the module
 modAddLet
   :: AddError m
   => Meta Name
@@ -379,10 +389,10 @@ data TypeVariance
 
 instance Show TypeVariance where
   show = \case
-    VAnon _ -> "<unknown>"
+    VAnon _ -> "(?)"
     VOutput -> show SymbolOutput
     VInput -> show SymbolInput
-    VInvariant -> show SymbolInvariant
+    VInvariant -> "_"
 
 instance Semigroup TypeVariance where
   VOutput <> x = x
@@ -392,16 +402,12 @@ instance Semigroup TypeVariance where
   VInput <> VInput = VOutput
 
 -- | The symbol used to represent 'VOutput'
-pattern SymbolOutput :: Type
-pattern SymbolOutput = TNamed [] (DefaultMeta (Local (Operator "+")))
+pattern SymbolOutput :: Path
+pattern SymbolOutput = Local (Operator "+")
 
 -- | The symbol used to represent 'VInput'
-pattern SymbolInput :: Type
-pattern SymbolInput = TNamed [] (DefaultMeta (Local (Operator "-")))
-
--- | The symbol used to represent 'VInvariant'
-pattern SymbolInvariant :: Type
-pattern SymbolInvariant = TAnon AnonAny
+pattern SymbolInput :: Path
+pattern SymbolInput = Local (Operator "-")
 
 -- | Represents the kind of a parameter for a 'DataDecl'
 data DataArg = DataArg
@@ -418,6 +424,14 @@ instance ShowWithName DataArg where
     | null argParams = name
     | otherwise = "(" ++ unwords (name : map show argParams) ++ ")"
 
+-- | Makes a 'DataArg' that accepts no additional parameters
+pattern NullaryArg :: TypeVariance -> DataArg
+pattern NullaryArg variance = DataArg variance []
+
+-- | Used in place of a name for arguments that weren't named
+pattern UnnamedArg :: Meta String
+pattern UnnamedArg = DefaultMeta "_"
+
 -- | Represents the effect and type parameters a 'DataDecl' can accept
 data DataSig = DataSig
   { dataEffects :: [(Meta String, TypeVariance)]
@@ -425,7 +439,7 @@ data DataSig = DataSig
 
 instance ShowWithName DataSig where
   showWithName name DataSig { dataArgs, dataEffects } =
-    name ++ effectSuffixStr (map (show . fst) dataEffects) ++ unwords ("" : map showArg dataArgs)
+    name ++ effectSuffixStr (map (unmeta . fst) dataEffects) ++ unwords ("" : map showArg dataArgs)
     where
       showArg (name, dataArg) = showWithName (unmeta name) dataArg
 
@@ -471,6 +485,7 @@ modAddData name decl path mod = do
 data MaybeLowercase
   = MLNamed Path
   | MLPoly String
+  | MLAnon
   | MLOther String
 
 -- | Tries to extract a 'DataDecl' parameter if possible
@@ -481,6 +496,10 @@ extractParameter :: AddError m
                  -> MaybeLowercase
                  -> m (Maybe (Meta String, TypeVariance))
 extractParameter err span kind = \case
+  MLNamed SymbolOutput ->
+    unnamed VOutput
+  MLNamed SymbolInput ->
+    unnamed VInput
   MLNamed (Path path) ->
     case path of
       [Identifier ('_':rest)] ->
@@ -496,11 +515,17 @@ extractParameter err span kind = \case
         err (kind ++ " parameter name must be lowercase, did you mean `" ++ lowerFirst name ++ "`?")
       _ ->
         err (kind ++ " parameter name must be unqualified, did you mean `" ++ show (last path) ++ "`?")
-  MLPoly local -> do
-    anon <- getNewAnon
-    return $ Just ((meta local) { metaSpan = span }, VAnon anon)
+  MLPoly local ->
+    getNewAnon >>= justParam local . VAnon
+  MLAnon ->
+    unnamed VInvariant
   MLOther other ->
     err ("expected name for " ++ kind ++ " parameter, found `" ++ other ++ "` instead")
+  where
+    justParam name var =
+      return $ Just ((meta name) { metaSpan = span }, var)
+    unnamed var =
+      justParam "_" var
 
 -- | Parses a given type as a 'DataArg'
 dataArgFromType :: AddError m
@@ -520,9 +545,9 @@ dataArgFromType file typeWithMeta =
       return $ DataArg VInvariant []
     Right (ReducedApp Meta { unmeta = baseTy, metaSpan = baseSpan } args) -> do
       baseVariance <- case baseTy of
-        SymbolOutput -> return VOutput
-        SymbolInput -> return VInput
-        SymbolInvariant -> return VInvariant
+        TNamed [] (DefaultMeta SymbolOutput) -> return VOutput
+        TNamed [] (DefaultMeta SymbolInput) -> return VInput
+        TAnon _ -> return VInvariant
         _ -> do
           addError CompileError
             { errorFile = Just file
@@ -564,6 +589,7 @@ namedDataArgFromType file typeWithMeta =
         case baseTy of
           TNamed [] path -> MLNamed $ unmeta path
           TPoly local -> MLPoly local
+          TAnon _ -> MLAnon
           other -> MLOther (show other)
       case nameAndVariance of
         Nothing -> return Nothing
@@ -613,7 +639,7 @@ namedDataSigFromType file typeWithMeta =
               err nSpan ("data type name must be capitalized, did you mean `" ++ capFirst local ++ "`?")
             other ->
               err nSpan ("expected a name for the data type, found `" ++ show other ++ "` instead")
-      effs <- forM effs $ \effSet ->
+      effs <- forM effs \effSet ->
         let
           err msg = do
             addError CompileError
@@ -629,7 +655,7 @@ namedDataSigFromType file typeWithMeta =
                 case unmeta eff of
                   EffectNamed path -> MLNamed path
                   EffectPoly local -> MLPoly local
-                  other -> MLOther (show other)
+                  EffectAnon _ -> MLAnon
             _ -> err "effect parameters must each be in their own set of pipes, you cannot use `+` in between"
       vars <- forM args $ namedDataArgFromType file
       -- Errors can be ignored since they will be checked at the end of the phase (before the signature can be used)

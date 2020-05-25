@@ -1,7 +1,9 @@
 -- | Defines everything related to the AST used to store parsed code
 module Utility.AST
   ( -- * Metadata
-    Meta (..)
+    Meta
+  , MetaR
+  , MetaWith (..)
   , meta
   , metaWithSpan
   , copySpan
@@ -11,9 +13,13 @@ module Utility.AST
     -- * Basic Expressions
   , ExprKind (..)
   , MatchCase
-  , Expr (..)
-  , Value (..)
-  , Pattern (..)
+  , MatchCaseWith
+  , Expr
+  , ExprWith (..)
+  , Value
+  , ValueWith (..)
+  , Pattern
+  , PatternWith (..)
   , bindingsForPat
   , Type (..)
   , EffectSet (..)
@@ -64,23 +70,29 @@ import qualified Data.Set as Set
 
 import Control.Monad.Identity
 
--- | Stores a value with some additional metadata
-data Meta a = Meta
+-- | Stores a value with optional span metadata
+type Meta = MetaWith ()
+
+-- | Helper for recursive versions of 'MetaWith'
+type MetaR expr ty = MetaWith ty (expr ty)
+
+-- | Stores a value with optional span metadata and some type information
+data MetaWith ty a = Meta
   { -- | The inner value being stored
     unmeta :: a
     -- | The location of the value in its source file
   , metaSpan :: !(Maybe Span)
     -- | The type of a value (if inferred and applicable)
-  , metaTy :: !(Maybe Type) }
+  , metaTy :: !ty }
   deriving (Functor, Foldable, Traversable)
 
-instance Ord a => Ord (Meta a) where
-  a `compare` b = unmeta a `compare` unmeta b
+instance (Ord ty, Ord a) => Ord (MetaWith ty a) where
+  m0 `compare` m1 = unmeta m0 `compare` unmeta m1 <> metaTy m0 `compare` metaTy m1
 
-instance Eq a => Eq (Meta a) where
+instance (Eq ty, Eq a) => Eq (MetaWith ty a) where
   m0 == m1 = unmeta m0 == unmeta m1 && metaTy m0 == metaTy m1
 
-instance Show a => Show (Meta a) where
+instance Show a => Show (MetaWith ty a) where
   showsPrec i = showsPrec i . unmeta
 
 -- | Stores a value with no additional metadata
@@ -88,7 +100,7 @@ meta :: a -> Meta a
 meta x = Meta
   { unmeta = x
   , metaSpan = Nothing
-  , metaTy = Nothing }
+  , metaTy = () }
 
 -- | Stores a value with a 'Span' taken from another
 copySpan :: Meta a -> b -> Meta b
@@ -167,7 +179,7 @@ newtype EffectSet = EffectSet
 
 instance After EffectSet where
   after m =
-    mapM $ \EffectSet { setEffects } ->
+    mapM \EffectSet { setEffects } ->
       EffectSet <$> Set.fromList <$> mapM (after m) (Set.toList setEffects)
 
 instance Show EffectSet where
@@ -177,15 +189,18 @@ instance Show EffectSet where
 
 -- | An effect that can occur in impure code
 data Effect
-  = EffectNamed Path      -- ^ A named effect
-  | EffectPoly String     -- ^ A lowercase effect variable
-  | EffectAnon AnonCount  -- ^ An effect left blank to be inferred
+  -- | A named effect
+  = EffectNamed Path
+  -- | A lowercase effect variable
+  | EffectPoly String
+  -- | An effect left blank to be inferred
+  | EffectAnon AnonCount
   deriving (Ord, Eq)
 
 instance After Effect where
   after m x = do
     x' <- aEffect m x
-    forM x' $ \case
+    forM x' \case
       EffectNamed path ->
         EffectNamed <$> aPath m KEffect (path <$ x')
       other ->
@@ -203,7 +218,7 @@ effectSuffix = effectSuffixStr . map show
 
 -- | Same as 'effectSuffix', but accepts strings instead
 effectSuffixStr :: [String] -> String
-effectSuffixStr = concatMap $ \effect ->
+effectSuffixStr = concatMap \effect ->
   " |" ++ effect ++ "|"
 
 -- | A constraint from a with-clause in a declaration
@@ -248,11 +263,18 @@ instance Show UseContents where
 
 -- | The type of an expression
 data Type
-  = TUnit                                       -- ^ The @()@ type
-  | TNamed [Meta EffectSet] (Meta Path)         -- ^ A named type and any effect arguments
-  | TPoly String                                -- ^ A lowercase type variable
-  | TAnon AnonCount                             -- ^ A type left blank to be inferred
-  | TApp (Meta Type) (Meta Type)                -- ^ An application of a type argument to a type
+  -- | The @()@ type
+  = TUnit
+  -- | A named type and any effect arguments
+  | TNamed [Meta EffectSet] (Meta Path)
+  -- | A lowercase type variable
+  | TPoly String
+  -- | A type left blank to be inferred
+  | TAnon AnonCount
+  -- | An application of a type argument to a type
+  | TApp (Meta Type) (Meta Type)
+
+  -- Unassociated operators
   | TParen (Meta Type)
   | TUnaryOp (Meta Path) (Meta Type)
   | TBinOp (Meta Path) (Meta Type) (Meta Type)
@@ -261,7 +283,7 @@ data Type
 instance After Type where
   after m x = do
     x' <- aType m x
-    forM x' $ \case
+    forM x' \case
       TNamed effs path ->
         TNamed <$> mapM (after m) effs <*> afterPath m KType path
       TApp a b ->
@@ -390,12 +412,18 @@ pattern EffectPure :: Effect
 pattern EffectPure = EffectNamed (Core (Identifier "Pure"))
 
 -- | A concrete value produced by evaluating an expression
-data Value
-  = VUnit                   -- ^ The @()@ value
-  | VFun [MatchCase]        -- ^ A function value with match cases for its inputs
-  | VDataCons Path [Value]  -- ^ An evaluated data constructor
+type Value = ValueWith ()
 
-instance Show Value where
+-- | A concrete value produced by evaluating an expression (with some type information)
+data ValueWith ty
+  -- | The @()@ value
+  = VUnit
+  -- | A function value with match cases for its inputs
+  | VFun [MatchCaseWith ty]
+  -- | An evaluated data constructor
+  | VDataCons Path [ValueWith ty]
+
+instance Show (ValueWith ty) where
   show = \case
     VUnit -> "()"
     VFun cases ->
@@ -405,44 +433,62 @@ instance Show Value where
     VDataCons path vals ->
       "(" ++ show path ++ " " ++ intercalate " " (map show vals) ++ ")"
 
-instance Eq Value where
+instance Eq ty => Eq (ValueWith ty) where
   VUnit == VUnit = True
   VFun c0 == VFun c1 =
     c0 == c1
   _ == _ = False
 
 -- | A single case in a function or match expression
-type MatchCase = ([Meta Pattern], Meta Expr)
+type MatchCase = MatchCaseWith ()
+
+-- | A single case in a function or match expression (with some type information)
+type MatchCaseWith ty = ([Meta Pattern], MetaR ExprWith ty)
 
 -- | Shows a set of match cases, optionally allowing them to be on one line if short
-showCases :: Bool -> [MatchCase] -> String
+showCases :: Bool -> [MatchCaseWith ty] -> String
 showCases True [c] = indent (showCase c)
 showCases _ cases = "\n  " ++ intercalate "\n  " (map showCase cases)
 
 -- | Shows a single match case
-showCase :: MatchCase -> String
+showCase :: MatchCaseWith ty -> String
 showCase (pats, expr) = intercalate " " (map show pats) ++ " ->" ++ indent (show expr)
 
 -- | An expression that can be used to produce a 'Value'
-data Expr
-  = EValue Value                                -- ^ Lifts a 'Value' to be an expression
-  | EGlobal Path                                -- ^ A global binding for a value
-  | EIndex Int (Maybe String)                   -- ^ A local value with an index and optional name
-  | EApp (Meta Expr) (Meta Expr)                -- ^ An application of an argument to a function
-  | ESeq (Meta Expr) (Meta Expr)                -- ^ Evaluates one expression and returns the other
-  | ELet (Meta Pattern) (Meta Expr) (Meta Expr) -- ^ Binds an expression to a pattern for its body
-  | EMatchIn [Meta Expr] [MatchCase]            -- ^ Matches some expressions against some match cases
-  | EUse (Meta UseModule) (Meta Expr)           -- ^ Imports some values into scope for its body
-  | ETypeAscribe (Meta Expr) (Meta Type)        -- ^ Ascribes a type to an expression
-  | EDataCons Path [Meta Expr]                  -- ^ The same as 'VDataCons' but with expression arguments
-  | EParen (Meta Expr)
-  | EUnaryOp (Meta Path) (Meta Expr)
-  | EBinOp (Meta Path) (Meta Expr) (Meta Expr)
+type Expr = ExprWith ()
+
+-- | An expression that can be used to produce a 'Value' (with some type information)
+data ExprWith ty
+  -- | Lifts a 'Value' to be an expression
+  = EValue (ValueWith ty)
+  -- | A global binding for a value
+  | EGlobal Path
+  -- | A local value with an index and optional name
+  | EIndex Int (Maybe String)
+  -- | An application of an argument to a function
+  | EApp (MetaR ExprWith ty) (MetaR ExprWith ty)
+  -- | Evaluates one expression and returns the other
+  | ESeq (MetaR ExprWith ty) (MetaR ExprWith ty)
+  -- | Binds an expression to a pattern for its body
+  | ELet (Meta Pattern) (MetaR ExprWith ty) (MetaR ExprWith ty)
+  -- | Matches some expressions against some match cases
+  | EMatchIn [MetaR ExprWith ty] [MatchCaseWith ty]
+  -- | Imports some values into scope for its body
+  | EUse (Meta UseModule) (MetaR ExprWith ty)
+  -- | Ascribes a type to an expression
+  | ETypeAscribe (MetaR ExprWith ty) (Meta Type)
+  -- | The same as 'VDataCons' but for expressions
+  | EDataCons Path [MetaR ExprWith ty]
+
+  -- Unassociated operators
+  | EParen (MetaR ExprWith ty)
+  | EUnaryOp (Meta Path) (MetaR ExprWith ty)
+  | EBinOp (Meta Path) (MetaR ExprWith ty) (MetaR ExprWith ty)
 
 instance After Expr where
   after m x = do
     x' <- aExpr m x
-    forM x' $ \case
+    forM x' \case
       EValue (VFun cases) ->
         EValue . VFun <$> afterCases cases
       EGlobal path ->
@@ -473,10 +519,10 @@ instance After Expr where
         return other
     where
       afterCases =
-        mapM $ \(pats, expr) ->
+        mapM \(pats, expr) ->
           (,) <$> forM pats (after m) <*> after m expr
 
-instance Eq Expr where
+instance Eq ty => Eq (ExprWith ty) where
   EValue v0 == EValue v1 =
     v0 == v1
   EGlobal n0 == EGlobal n1 =
@@ -500,7 +546,7 @@ instance Eq Expr where
   -- EParen, EUnaryOp, and EBinOp are omitted as they will be removed by later passes
   _ == _ = False
 
-instance Show Expr where
+instance Show (ExprWith ty) where
   show = \case
     EValue val -> show val
     EGlobal name -> show name
@@ -534,20 +580,30 @@ instance Show Expr where
       "{" ++ show op ++ " " ++ show lhs ++ " " ++ show rhs ++ "}"
 
 -- | A pattern which can match a value and bind variables
-data Pattern
-  = PUnit                                             -- ^ The @()@ pattern
-  | PAny                                              -- ^ Matches anything and ignores it
-  | PBind (Maybe String)                              -- ^ Matches anything and creates a binding
-  | PCons (Meta Path) [Meta Pattern]                  -- ^ Tries to match a data type constructor
-  | PTypeAscribe (Meta Pattern) (Meta Type)           -- ^ Ascribes a type to a pattern
-  | PParen (Meta Pattern)
-  | PUnaryOp (Meta Path) (Meta Pattern)
-  | PBinOp (Meta Path) (Meta Pattern) (Meta Pattern)
+type Pattern = PatternWith ()
+
+-- | A pattern which can match a value and bind variables (with some type information)
+data PatternWith ty
+  -- | The @()@ pattern
+  = PUnit
+  -- | Matches anything and ignores it
+  | PAny
+  -- | Matches anything and creates a binding
+  | PBind (Maybe String)
+  -- | Tries to match a data type constructor
+  | PCons (Meta Path) [MetaR PatternWith ty]
+  -- | Ascribes a type to a pattern
+  | PTypeAscribe (MetaR PatternWith ty) (Meta Type)
+
+  -- Unassociated operators
+  | PParen (MetaR PatternWith ty)
+  | PUnaryOp (Meta Path) (MetaR PatternWith ty)
+  | PBinOp (Meta Path) (MetaR PatternWith ty) (MetaR PatternWith ty)
 
 instance After Pattern where
   after m x = do
     x' <- aPattern m x
-    forM x' $ \case
+    forM x' \case
       PCons path xs ->
         PCons <$> afterPath m KPattern path <*> mapM (after m) xs
       PTypeAscribe a ty ->
@@ -561,7 +617,7 @@ instance After Pattern where
       other ->
         return other
 
-instance Eq Pattern where
+instance Eq ty => Eq (PatternWith ty) where
   PUnit   == PUnit   = True
   PAny    == PAny    = True
   PBind _ == PBind _ = True
@@ -572,7 +628,7 @@ instance Eq Pattern where
   -- PParen, PUnaryOp, and PBinOp are omitted as they will be removed by later passes
   _ == _ = False
 
-instance Show Pattern where
+instance Show (PatternWith ty) where
   show = \case
     PUnit -> "()"
     PAny -> "_"

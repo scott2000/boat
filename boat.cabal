@@ -33,6 +33,7 @@ executable boat
                        NamedFieldPuns,
                        RecordWildCards,
                        RecursiveDo,
+                       BlockArguments,
                        OverloadedStrings,
                        PatternSynonyms,
                        LambdaCase,

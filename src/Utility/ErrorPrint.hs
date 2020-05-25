@@ -33,7 +33,7 @@ addFatal e = do
 exitIfErrors :: CompileIO ()
 exitIfErrors = do
   count <- gets compileErrorCount
-  when (errorCount count /= 0) $ do
+  when (errorCount count /= 0) do
     addError CompileError
       { errorFile = Nothing
       , errorSpan = Nothing
@@ -126,14 +126,14 @@ breakSeparator :: String
 breakSeparator = "..."
 
 -- | Prints all of the styled lines with a certain color starting from a certain line number
-prettyLines :: Color -> Int -> [StyledLine] -> IO ()
-prettyLines color firstLine lines = do
+prettyLines :: Color -> Int -> Int -> [StyledLine] -> IO ()
+prettyLines color firstLine lastLine lines = do
   printBlank
   printAll True firstLine lines
   where
     numberLength :: Int
     numberLength =
-      length $ show $ firstLine + length lines
+      length $ show lastLine
 
     hasMultiline :: Bool
     hasMultiline = any isMultilineStart lines
@@ -151,7 +151,7 @@ prettyLines color firstLine lines = do
     printLineHeader :: String -> Bool -> IO ()
     printLineHeader str isMultiline = do
       setBoldColor Blue
-      putStr (str ++ replicate (numberLength - length str) ' ' ++ " | ")
+      putStr (replicate (numberLength - length str) ' ' ++ str ++ " | ")
       if hasMultiline then
         if isMultiline then do
           setColor color
@@ -175,7 +175,7 @@ prettyLines color firstLine lines = do
           putStrLn line
           printAll False (lineNumber+1) rest
         Skip n -> do
-          when (not blankLast) $ do
+          when (not blankLast) do
             setBoldColor Blue
             putStr line
             resetColor
@@ -278,7 +278,7 @@ peDefault = PrettyErrorState
 setFile :: FilePath -> StateT PrettyErrorState IO ()
 setFile file = do
   s <- get
-  when (peCurrentFile s /= Just file) $ do
+  when (peCurrentFile s /= Just file) do
     contents <- lift $ readFile file
     put PrettyErrorState
       { peCurrentFile = Just file
@@ -408,6 +408,7 @@ prettyCompileErrors errs =
               let
                 startColumn = posColumn spanStart
                 endColumn = posColumn spanEnd
+                endLine = posLine spanEnd
                 hlAtStart = startColumn <= firstColumnOr1 (head lines)
                 contextStyledLines = createContextLines hlAtStart context
                 contextStartLine = startLine - length context
@@ -419,7 +420,7 @@ prettyCompileErrors errs =
                     [(MultilineStart startColumn, start)]
                     ++ createMidSelection middle
                     ++ [(MultilineEnd endColumn, end)]
-              lift $ prettyLines color contextStartLine $
+              lift $ prettyLines color contextStartLine endLine $
                 trimLines $ contextStyledLines ++ styledLines
               printFooter
             Nothing -> do
@@ -435,7 +436,7 @@ prettyCompileErrors errs =
       go es
       where
         color = errorColor $ errorKind e
-        printFooter = lift $ do
+        printFooter = lift do
           setBoldColor color
           let tag = "[" ++ show (errorKind e) ++ "]"
           putStr tag

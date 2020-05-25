@@ -120,7 +120,7 @@ parserPartial :: Parsable a => Parser (Meta a)
 parserPartial = hidden parsePrefix <|> parserNoPrefix
   where
     parsePrefix :: forall a. Parsable a => Parser (Meta a)
-    parsePrefix = parseMeta $ do
+    parsePrefix = parseMeta do
       path <- do
         path <- try $ parseMeta (Local . Unary <$> unaryOp)
         spaceAfter <- isSpace <$> nbsc
@@ -177,7 +177,7 @@ parserBase prec current =
   join (seqOpApp <|> return (return current))
   where
     seqOpApp =
-      try $ do
+      try do
         offset <- getOffset
         trySpaces >>= \case
           Right NoSpace -> opOrApp False
@@ -206,7 +206,7 @@ parserBase prec current =
         Nothing ->
           empty
       where
-        op = try $ do
+        op = try do
           offset <- getOffset
           infixOp >>= \case
             Left special ->
@@ -222,7 +222,7 @@ parserBase prec current =
             Right Whitespace ->
               f True
             Right LineBreak ->
-              return $ Just $ do
+              return $ Just do
                 setOffset offsetAfterOp
                 fail "line break never allowed after operator"
             Left err
@@ -241,7 +241,7 @@ parserBase prec current =
                 else
                   return Nothing
               Just p ->
-                parseSpaceAfterOperator offset $ \_ ->
+                parseSpaceAfterOperator offset \_ ->
                   return $ Just $ p normalPrec current
           else
             return Nothing
@@ -256,7 +256,7 @@ parserBase prec current =
               else
                 compactPrec
           if prec <= opPrec then
-            return $ Just $ do
+            return $ Just do
               bin <- metaExtendPrec (opBinary $ infixPath parsedOp) opPrec current
               if prec == opPrec then
                 return bin
@@ -308,7 +308,7 @@ instance Parsable Type where
     <|> (keyword "_" >> TAnon <$> getNewAnon)
 
   parseSpecial (span, FunctionArrow) =
-    Just $ metaExtendPrec $ \lhs rhs ->
+    Just $ metaExtendPrec \lhs rhs ->
       let
         arrow = metaWithSpan span $ Core $ Operator "->"
         withNoEff = metaWithSpan span $ TNamed [] arrow
@@ -316,7 +316,7 @@ instance Parsable Type where
       in
         TApp firstApp rhs
   parseSpecial (span, SplitArrow) =
-    Just $ \prec lhs -> do
+    Just \prec lhs -> do
       effects <- parseMeta parseEffectSet
       nbsc
       (endSpan, _) <- getSpan $ plainOp "|>"
@@ -363,7 +363,7 @@ parseExprIdent = do
 -- | Parse a DeBruijn expression index to refer to an unnamed local variable
 parseExprIndex :: Parser Expr
 parseExprIndex = do
-  (span, num) <- getSpan $ do
+  (span, num) <- getSpan do
     reservedOp QuestionMark
     try L.decimal <|> return 0
   count <- countBindings

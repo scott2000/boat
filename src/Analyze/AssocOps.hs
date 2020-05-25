@@ -61,12 +61,12 @@ lookupPath path =
 
 -- | Adds a vertex to the graph with a set of lower precedence vertices
 addVertex :: IntSet -> Assoc ()
-addVertex v = modify $ \s -> s
+addVertex v = modify \s -> s
   { assocGraph = assocGraph s |> v }
 
 -- | Updates the set of lower precedence vertices for a given vertex
 updateVertex :: Vertex -> (IntSet -> IntSet) -> Assoc ()
-updateVertex index f = modify $ \s -> s
+updateVertex index f = modify \s -> s
   { assocGraph = Seq.adjust' f index $ assocGraph s }
 
 -- | Finds the ordering between two vertices in a graph, if it exists
@@ -191,14 +191,14 @@ updateExprs
             return True
           Just current ->
             case (Map.lookup current allOpDecls, Map.lookup next allOpDecls) of
-              (Nothing, Nothing) -> MaybeT $ do
+              (Nothing, Nothing) -> MaybeT do
                 missing current
                 missing next
                 return Nothing
-              (Nothing, _) -> MaybeT $ do
+              (Nothing, _) -> MaybeT do
                 missing current
                 return Nothing
-              (_, Nothing) -> MaybeT $ do
+              (_, Nothing) -> MaybeT do
                 missing next
                 return Nothing
               (Just (_ :/: a), Just (_ :/: b)) ->
@@ -223,7 +223,7 @@ updateExprs
                         ++ "` has a different associativity than `" ++ show aOp
                         ++ "` (" ++ show aAssoc ++ " != " ++ show bAssoc ++ ")"
         where
-          notAllowed msg = MaybeT $ do
+          notAllowed msg = MaybeT do
             addError CompileError
               { errorFile = Just file
               , errorSpan = metaSpan next

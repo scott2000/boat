@@ -22,6 +22,7 @@ module Utility.Basics
   , ErrorKind (..)
   , AddError
   , addError
+  , addSecondaryError
   , ErrorCount (..)
   , AnonCount
   , pattern AnonAny
@@ -188,7 +189,7 @@ compileStateFromOptions :: CompileOptions -> CompileState
 compileStateFromOptions opts = CompileState
   { compileOptions = opts
   , compileErrors = Set.empty
-  , compileErrorCount = ErrorCount 0 0
+  , compileErrorCount = ErrorCount 0 0 False
   , compileAnonCount = AnonAny }
 
 -- | Gets a new unique 'AnonCount' for an inference variable
@@ -227,22 +228,26 @@ instance Ord CompileError where
 -- | Stores the number of each type of error (useful for determining when to stop compilation)
 data ErrorCount = ErrorCount
   { errorCount :: !Int
-  , warningCount :: !Int }
+  , warningCount :: !Int
+  , hasPrimaryError :: !Bool }
 
 instance Show ErrorCount where
   show = \case
-    ErrorCount e 0 -> plural e "error"
-    ErrorCount 0 w -> plural w "warning"
-    ErrorCount e w ->
+    ErrorCount e 0 _ -> plural e "error"
+    ErrorCount 0 w _ -> plural w "warning"
+    ErrorCount e w _ ->
       plural e "error" ++ " (and " ++ plural w "warning" ++ ")"
 
 -- | Adds a new error to the 'ErrorCount'
-updateErrorCount :: ErrorKind -> ErrorCount -> ErrorCount
-updateErrorCount Error c = c
+updateErrorCount :: Bool -> ErrorKind -> ErrorCount -> ErrorCount
+updateErrorCount False Error c = c
   { errorCount = errorCount c + 1 }
-updateErrorCount Warning c = c
+updateErrorCount True Error c = c
+  { errorCount = errorCount c + 1
+  , hasPrimaryError = True }
+updateErrorCount _ Warning c = c
   { warningCount = warningCount c + 1 }
-updateErrorCount _ c = c
+updateErrorCount _ _ c = c
 
 -- | Represents the different kinds of possible error messages
 data ErrorKind
@@ -265,10 +270,24 @@ type AddError = MonadCompile
 -- | Emits a single 'CompileError' for later printing
 addError :: AddError m => CompileError -> m ()
 addError err =
-  modify $ \s -> s
+  modify \s -> s
     { compileErrors = Set.insert err $ compileErrors s
     , compileErrorCount =
-      updateErrorCount (errorKind err) $ compileErrorCount s }
+      updateErrorCount True (errorKind err) $ compileErrorCount s }
+
+-- | Emits a single 'CompileError' for later printing only if no errors have been added by 'addError'
+addSecondaryError :: AddError m => CompileError -> m ()
+addSecondaryError err =
+  modify \s ->
+    let
+      errorCount = compileErrorCount s
+    in
+      if hasPrimaryError errorCount then
+        s
+      else s
+        { compileErrors = Set.insert err $ compileErrors s
+        , compileErrorCount =
+          updateErrorCount False (errorKind err) errorCount }
 
 -- | A position in a file consisting of a line number and column number (starting at 1)
 data Position = Position

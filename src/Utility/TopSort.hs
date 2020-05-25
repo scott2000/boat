@@ -1,11 +1,16 @@
 -- | Utilities for topological sorting
 module Utility.TopSort
-  ( SCC (..)
-  , topSortSet
+  ( -- * Reverse Topological Sort
+    topSortSet
   , topSortMap
+
+    -- * Strongly Connected Components
+  , SCC (..)
+  , flattenSCC
+  , isSCCAcyclic
   ) where
 
-import Data.Graph (SCC (..), stronglyConnComp)
+import Data.Graph (SCC (..), stronglyConnComp, flattenSCC)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Map.Strict (Map)
@@ -28,4 +33,10 @@ topSortMap f m =
     -- Use the indices in the Map as vertices for the graph
     toVertex k = Map.findIndex k m
     toGraph (k, v) = ((k, v), toVertex k, map toVertex $ f v)
+
+-- | Checks is a 'SCC' is an 'AcyclicSCC'
+isSCCAcyclic :: SCC a -> Bool
+isSCCAcyclic = \case
+  AcyclicSCC _ -> True
+  CyclicSCC _ -> False
 

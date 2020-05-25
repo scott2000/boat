@@ -12,8 +12,9 @@ import Data.List (sort)
 import Control.Monad.State.Strict
 
 -- | Parse source code from a given path
-parse :: FilePath -> CompileIO [Module]
-parse path = do
+parse :: CompileIO [Module]
+parse = do
+  path <- gets (compileTarget . compileOptions)
   isDir <- lift $ doesDirectoryExist path
   if isDir then
     parseDirectory path
@@ -23,11 +24,11 @@ parse path = do
       case takeExtension path of
         ".boat" ->
           parseSingleFile path <&> prependModule []
-        other -> lift $ do
+        other -> lift do
           let ext = if null other then "no extension" else other
           putStrLn ("Error: expected extension of .boat for file, found " ++ ext)
           exitFailure
-    else lift $ do
+    else lift do
       putStrLn ("Error: cannot find file or directory at `" ++ path ++ "`")
       exitFailure
 
