@@ -15,20 +15,20 @@ import Control.Monad.State.Strict
 parse :: CompileIO [Module]
 parse = do
   path <- gets (compileTarget . compileOptions)
-  isDir <- lift $ doesDirectoryExist path
+  isDir <- liftIO $ doesDirectoryExist path
   if isDir then
     parseDirectory path
   else do
-    isFile <- lift $ doesFileExist path
+    isFile <- liftIO $ doesFileExist path
     if isFile then
       case takeExtension path of
         ".boat" ->
           parseSingleFile path <&> prependModule []
-        other -> lift do
+        other -> liftIO do
           let ext = if null other then "no extension" else other
           putStrLn ("Error: expected extension of .boat for file, found " ++ ext)
           exitFailure
-    else lift do
+    else liftIO do
       putStrLn ("Error: cannot find file or directory at `" ++ path ++ "`")
       exitFailure
 
@@ -62,13 +62,13 @@ prependModule mods mod
 -- | Parse everything in a given path
 parseAll :: FilePath -> CompileIO Module
 parseAll path = do
-  isDir <- lift $ doesDirectoryExist path
+  isDir <- liftIO $ doesDirectoryExist path
   if isDir then
     case parseModuleName $ takeFileName path of
       Right name ->
         moduleFromSubs name <$> parseDirectory path
       Left err -> do
-        shouldWarn <- lift $ containsBoatFiles path
+        shouldWarn <- liftIO $ containsBoatFiles path
         when shouldWarn $
           addError CompileError
             { errorFile = Just path
@@ -86,7 +86,7 @@ parseAll path = do
 -- | Parse everything in a given directory
 parseDirectory :: FilePath -> CompileIO [Module]
 parseDirectory path = do
-  files <- lift $ sort <$> listDirectory path
+  files <- liftIO $ sort <$> listDirectory path
   forEach files []
   where
     forEach []          mods = return mods

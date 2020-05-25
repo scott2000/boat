@@ -40,6 +40,7 @@ executable boat
                        KindSignatures,
                        Rank2Types,
                        MultiParamTypeClasses,
+                       GeneralizedNewtypeDeriving,
                        ScopedTypeVariables,
                        ConstraintKinds,
                        DeriveFunctor,

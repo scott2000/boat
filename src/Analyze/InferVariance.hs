@@ -159,7 +159,7 @@ lookupDecl path = do
     Nothing ->
       case Map.lookup path iResolvedDecls of
         Just decl -> return $ removeNames $ dataSig $ unfile decl
-        Nothing -> lift $ compilerBug $ "lookupDecl couldn't find `" ++ show path ++ "`"
+        Nothing -> compilerBug $ "lookupDecl couldn't find `" ++ show path ++ "`"
 
 -- | Inserts a new constraint to an inference variable
 insertConstraint :: AnonCount -> VarianceConstraint -> Infer ()
@@ -185,7 +185,7 @@ inferDeclSCC scc = do
     , iResolvedVars = Map.empty
     , iUnresolvedVars = Map.map (const emptyInferVariable) anonMap }
   forM_ unresolvedList \(_, file :/: decl) -> do
-    dataInfo <- lift $ makeDataInfo file $ dataSig decl
+    dataInfo <- makeDataInfo file $ dataSig decl
     forM_ (dataVariants decl) $ generateConstraints file dataInfo
   unresolvedVars <- gets iUnresolvedVars
   if isSCCAcyclic scc then
@@ -240,7 +240,7 @@ makeDataInfo file DataSig { dataEffects, dataArgs } =
     add Meta { unmeta = name, metaSpan } info = do
       m <- get
       if Map.member name m then do
-        lift $ addError CompileError
+        addError CompileError
           { errorFile = Just file
           , errorSpan = metaSpan
           , errorKind = Error
@@ -344,7 +344,7 @@ generateConstraints file dataInfo Meta { unmeta = (_, types) } =
       case Map.lookup name dataInfo of
         Just (Just (eff, arg))
           | eff == expected -> return arg
-          | otherwise -> MaybeT $ lift do
+          | otherwise -> MaybeT do
             addError CompileError
               { errorFile = Just file
               , errorSpan = span
@@ -355,7 +355,7 @@ generateConstraints file dataInfo Meta { unmeta = (_, types) } =
         Just Nothing ->
           -- Indicates that there were multiple parameters with this name so nothing can be done
           MaybeT $ return Nothing
-        Nothing -> MaybeT $ lift do
+        Nothing -> MaybeT do
           addError CompileError
             { errorFile = Just file
             , errorSpan = span
@@ -374,7 +374,7 @@ generateConstraints file dataInfo Meta { unmeta = (_, types) } =
       matchArgs resolveAnon expected actual >>= \case
         Nothing -> return ()
         Just err -> MaybeT do
-          lift $ addMatchError file actualSpan err
+          addMatchError file actualSpan err
           return Nothing
       where
         resolveAnon exp anon =
@@ -397,7 +397,7 @@ generateConstraints file dataInfo Meta { unmeta = (_, types) } =
           lift $ insertConstraint (getAnon arg) c
           return $ argParams arg
         TAnon _ -> MaybeT do
-          lift $ addError CompileError
+          addError CompileError
             { errorFile = Just file
             , errorSpan = metaSpan ty
             , errorKind = Error
@@ -408,7 +408,7 @@ generateConstraints file dataInfo Meta { unmeta = (_, types) } =
             [] -> MaybeT do
               runMaybeT $ inferType (addStep VInvariant c) b
               let (base, baseCount) = findBase a
-              lift $ addError CompileError
+              addError CompileError
                 { errorFile = Just file
                 , errorSpan = metaSpan b
                 , errorKind = Error
@@ -434,7 +434,7 @@ generateConstraints file dataInfo Meta { unmeta = (_, types) } =
               EffectPoly name -> do
                 arg <- lookupNamed KEffect (metaSpan eff) name
                 lift $ insertConstraint (getAnon arg) effC
-              EffectAnon _ -> lift $ lift $
+              EffectAnon _ ->
                 addError CompileError
                   { errorFile = Just file
                   , errorSpan = metaSpan eff
@@ -461,7 +461,7 @@ unwrapVariable (file :/: span) InferVariable { outputVariables, inputVariables }
     (FullyDetermined, NoConstraints) -> return VOutput
     (NoConstraints, FullyDetermined) -> return VInput
     (NoConstraints, NoConstraints) -> do
-      lift $ addError CompileError
+      addError CompileError
         { errorFile = Just file
         , errorSpan = span
         , errorKind = Error
@@ -469,9 +469,9 @@ unwrapVariable (file :/: span) InferVariable { outputVariables, inputVariables }
           "cannot infer variance of unused parameter, use (+), (-), or _ instead" }
       return VInvariant
     (FullyDetermined, FullyDetermined) ->
-      lift $ compilerBug "unwrapVariable called on unsimplified inference variable"
+      compilerBug "unwrapVariable called on unsimplified inference variable"
     _ ->
-      lift $ compilerBug "unwrapVariable called on uninferrable inference variable"
+      compilerBug "unwrapVariable called on uninferrable inference variable"
   where
     check s =
       case Set.lookupMax s of
@@ -587,7 +587,7 @@ inferConstraintSCC anonMap scc = do
                 Nothing ->
                   -- Otherwise, just pick the first entry in the cycle
                   fst $ head vars
-          lift $ addError CompileError
+          addError CompileError
             { errorFile = Just file
             , errorSpan = span
             , errorKind = Error

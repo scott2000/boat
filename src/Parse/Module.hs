@@ -7,14 +7,13 @@ import Parse.Expression
 
 import Text.Megaparsec
 import Text.Megaparsec.Char
-import Control.Monad.State.Strict
 
 import Data.Maybe
 
 -- | Run 'parseFile' on a certain path and return the parsed module
 parseSingleFile :: FilePath -> CompileIO Module
 parseSingleFile path = do
-  file <- lift $ readFile path
+  file <- liftIO $ readFile path
   let parserT = runCustomParser $ parseFile path
   runParserT parserT path file >>= \case
     Left err -> do

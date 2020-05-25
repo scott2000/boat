@@ -146,7 +146,7 @@ addToGraph (path, file :/: ends) =
         h = showLast higher
         p = showLast path
         showErr msg =
-          lift $ addFatal CompileError
+          addFatal CompileError
             { errorFile = Just file
             , errorSpan = metaSpan path
             , errorKind = Error

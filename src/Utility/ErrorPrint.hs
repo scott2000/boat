@@ -1,12 +1,20 @@
 -- | Utilities for checking for errors and for formatting error messages
 module Utility.ErrorPrint
-  ( CompileError (..)
+  ( -- * Basic Errors
+    CompileError (..)
+  , AddError
   , addError
+  , addSecondaryError
+
+    -- * Fatal Errors
+  , AddFatal
   , addFatal
-  , exitIfErrors
-  , finishAndCheckErrors
   , compilerBug
   , compilerBugRawIO
+
+    -- * Error Printing
+  , exitIfErrors
+  , finishAndCheckErrors
   ) where
 
 import Utility.Basics
@@ -22,17 +30,20 @@ import Control.Monad.State.Strict
 
 import System.Console.ANSI
 
+-- | Constraint for a 'Monad' that supports adding fatal errors (e.g. 'CompileIO')
+type AddFatal = MonadCompile
+
 -- | Add a fatal error (like 'addError', but never returns)
-addFatal :: CompileError -> CompileIO a
+addFatal :: AddFatal m => CompileError -> m a
 addFatal e = do
   addError e
   exitIfErrors
   compilerBug "addFatal did not exit!"
 
 -- | If any errors occurred, print them and exit with failure
-exitIfErrors :: CompileIO ()
+exitIfErrors :: MonadCompile m => m ()
 exitIfErrors = do
-  count <- gets compileErrorCount
+  count <- liftCompile $ gets compileErrorCount
   when (errorCount count /= 0) do
     addError CompileError
       { errorFile = Nothing
@@ -40,13 +51,13 @@ exitIfErrors = do
       , errorKind = Error
       , errorMessage = "stopping due to " ++ show count }
     printErrors
-    lift $ exitFailure
+    liftIO exitFailure
 
 -- | Print any errors generated during compilation
-finishAndCheckErrors :: CompileIO ()
+finishAndCheckErrors :: MonadCompile m => m ()
 finishAndCheckErrors = do
   exitIfErrors
-  count <- gets compileErrorCount
+  count <- liftCompile $ gets compileErrorCount
   addError CompileError
     { errorFile = Nothing
     , errorSpan = Nothing
@@ -60,7 +71,7 @@ compilerBugBaseMessage =
   "something went wrong when compiling your code! (please report this compiler bug)\n"
 
 -- | Prints an error message and exits (for use in code that should be unreachable)
-compilerBug :: String -> CompileIO a
+compilerBug :: AddFatal m => String -> m a
 compilerBug msg = do
   addError CompileError
     { errorFile = Nothing
@@ -68,7 +79,7 @@ compilerBug msg = do
     , errorKind = Error
     , errorMessage = compilerBugBaseMessage ++ "error message: " ++ msg }
   printErrors
-  lift $ exitFailure
+  liftIO exitFailure
 
 -- | Like 'compilerBug', but doesn't require 'CompileIO' and prints a raw message
 compilerBugRawIO :: String -> IO a
@@ -81,9 +92,9 @@ compilerBugRawIO err = do
   exitFailure
 
 -- | Prints all errors that have been generated
-printErrors :: CompileIO ()
+printErrors :: MonadCompile m => m ()
 printErrors =
-  gets compileErrors >>= lift . prettyCompileErrors
+  liftCompile (gets compileErrors >>= liftIO . prettyCompileErrors)
 
 -- | Describes how a line of text should be printed in an error message
 data LineStyle

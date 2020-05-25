@@ -37,7 +37,7 @@ main = do
   currentDirectory <- getCurrentDirectory
   options <- parseArgs currentDirectory
   phase <- newIORef PhaseInit
-  evalStateT (startCompile phase) (compileStateFromOptions options) `catches`
+  evalStateT (runCompileIO $ startCompile phase) (compileStateFromOptions options) `catches`
     [ Handler \(e :: ExitCode) -> throwIO e
     , Handler \(e :: SomeException) -> do
         phaseMsg <- readIORef phase <&> \case
@@ -77,7 +77,7 @@ startCompile phase = do
   setPhase phase PhaseParser
   mods <- parse
   exitIfErrors
-  lift $ putStrLn ("\n" ++ intercalate "\n" (map show mods))
+  liftIO $ putStrLn ("\n" ++ intercalate "\n" (map show mods))
 
   when (null mods) $
     addError CompileError
@@ -93,14 +93,14 @@ startCompile phase = do
   setPhase phase PhaseAssocOps
   allDecls <- assocOps allDecls
   exitIfErrors
-  lift $ putStrLn $ "\nFully resolved and associated:\n\n" ++ show allDecls
+  liftIO $ putStrLn $ "\nFully resolved and associated:\n\n" ++ show allDecls
 
   setPhase phase PhaseInferVariance
   allDecls <- inferVariance allDecls
   exitIfErrors
 
-  lift $ putStrLn $ "\nInferred variances:\n"
-  lift $ forM_ (Map.toList $ allDatas allDecls) $
+  liftIO $ putStrLn $ "\nInferred variances:\n"
+  liftIO $ forM_ (Map.toList $ allDatas allDecls) $
     \(name, _ :/: DataDecl { dataSig = DataSig { dataEffects, dataArgs } }) -> putStrLn $
       show name ++ effectSuffixStr (map (show . snd) dataEffects) ++ unwords ("" : map (show . snd) dataArgs)
 
@@ -108,5 +108,5 @@ startCompile phase = do
   where
     setPhase :: IORef Phase -> Phase -> CompileIO ()
     setPhase phase newPhase =
-      lift $ writeIORef phase newPhase
+      liftIO $ writeIORef phase newPhase
 

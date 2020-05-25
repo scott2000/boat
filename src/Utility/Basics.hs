@@ -13,8 +13,9 @@ module Utility.Basics
   , pattern Generated
 
     -- * Global Compiler State
-  , MonadCompile
-  , CompileIO
+  , MonadCompile (..)
+  , liftIO
+  , CompileIO (..)
   , CompileState (..)
   , compileStateFromOptions
   , CompileOptions (..)
@@ -56,6 +57,10 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 
 import Control.Monad.State.Strict
+import Control.Monad.Reader
+import Control.Monad.Trans.Maybe
+
+import Text.Megaparsec (ParsecT, Stream)
 
 -- | An identifier to be used to name items
 data Name
@@ -160,11 +165,30 @@ pattern AnonAny :: Word64
 pattern AnonAny <- _
   where AnonAny = 0
 
--- | Constraint for a 'Monad' that supports modifying compiler state (e.g. 'CompileIO')
-type MonadCompile = MonadState CompileState
+-- | Represents a monad containing a 'CompileIO', allowing modifications to compile state
+class MonadIO m => MonadCompile m where
+  -- | Lift a computation from 'CompileIO'
+  liftCompile :: CompileIO a -> m a
+
+instance MonadCompile CompileIO where
+  liftCompile = id
+
+instance MonadCompile m => MonadCompile (StateT s m) where
+  liftCompile = lift . liftCompile
+
+instance MonadCompile m => MonadCompile (ReaderT s m) where
+  liftCompile = lift . liftCompile
+
+instance MonadCompile m => MonadCompile (MaybeT m) where
+  liftCompile = lift . liftCompile
+
+instance (MonadCompile m, Stream s) => MonadCompile (ParsecT e s m) where
+  liftCompile = lift . liftCompile
 
 -- | 'StateT' used for all stages of compilation to store state
-type CompileIO = StateT CompileState IO
+newtype CompileIO a = CompileIO
+  { runCompileIO :: StateT CompileState IO a }
+  deriving (Applicative, Functor, Monad, MonadIO, MonadState CompileState)
 
 -- | A record used to store state throughout compilation
 data CompileState = CompileState
@@ -194,7 +218,7 @@ compileStateFromOptions opts = CompileState
 
 -- | Gets a new unique 'AnonCount' for an inference variable
 getNewAnon :: MonadCompile m => m AnonCount
-getNewAnon = do
+getNewAnon = liftCompile do
   s <- get
   let newCount = compileAnonCount s + 1
   put s { compileAnonCount = newCount }
@@ -270,7 +294,7 @@ type AddError = MonadCompile
 -- | Emits a single 'CompileError' for later printing
 addError :: AddError m => CompileError -> m ()
 addError err =
-  modify \s -> s
+  liftCompile $ modify \s -> s
     { compileErrors = Set.insert err $ compileErrors s
     , compileErrorCount =
       updateErrorCount True (errorKind err) $ compileErrorCount s }
@@ -278,7 +302,7 @@ addError err =
 -- | Emits a single 'CompileError' for later printing only if no errors have been added by 'addError'
 addSecondaryError :: AddError m => CompileError -> m ()
 addSecondaryError err =
-  modify \s ->
+  liftCompile $ modify \s ->
     let
       errorCount = compileErrorCount s
     in

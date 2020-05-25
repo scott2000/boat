@@ -269,7 +269,7 @@ addUse path (file :/: useWithMeta) nr =
     Meta { unmeta = UseAny, metaSpan = Just span } -> do
       -- The span is required here because the automatic `use _` doesn't have a span
       -- and we only want to catch imports made by the programmer
-      lift $ lift $ addError CompileError
+      addError CompileError
         { errorFile = Just file
         , errorSpan = Just span
         , errorKind = Warning
@@ -278,7 +278,7 @@ addUse path (file :/: useWithMeta) nr =
     Meta { unmeta = use, metaSpan } -> do
       case use of
         UseModule name (UseAll []) ->
-          lift $ lift $ addError CompileError
+          addError CompileError
             { errorFile = Just file
             , errorSpan = metaSpan
             , errorKind = Warning
@@ -319,7 +319,7 @@ addUse path (file :/: useWithMeta) nr =
               in
                 withNames names' $ add (path .|. name) sub rest nr
             _ -> do
-              lift $ lift $ addError CompileError
+              addError CompileError
                 { errorFile = Just file
                 , errorSpan = metaSpan
                 , errorKind = Error
@@ -344,7 +344,7 @@ addUse path (file :/: useWithMeta) nr =
                     Item { itemSub = Just sub } ->
                       foldr (add subPath sub) nr rest
                     _ -> do
-                      lift $ lift $ addError CompileError
+                      addError CompileError
                         { errorFile = Just file
                         , errorSpan = metaSpan
                         , errorKind = Error
@@ -352,7 +352,7 @@ addUse path (file :/: useWithMeta) nr =
                           "cannot import items from `" ++ show subPath ++ "` because it is not a module" }
                       nr
             Nothing -> do
-              lift $ lift $ addError CompileError
+              addError CompileError
                 { errorFile = Just file
                 , errorSpan = metaSpan
                 , errorKind = Error
@@ -378,7 +378,7 @@ insertEffect path decl = do
     effects = allEffects decls
   case Map.lookupIndex path effects of
     Just i ->
-      lift $ lift $ addError CompileError
+      addError CompileError
         { errorFile = Just $ getFile decl
         , errorSpan = metaSpan path
         , errorKind = Error
@@ -399,7 +399,7 @@ insertData path decl = do
     datas = allDatas decls
   case Map.lookupIndex path datas of
     Just i ->
-      lift $ lift $ addError CompileError
+      addError CompileError
         { errorFile = Just $ getFile decl
         , errorSpan = metaSpan path
         , errorKind = Error
@@ -420,7 +420,7 @@ insertLet path decl = do
     lets = allLets decls
   case Map.lookupIndex path lets of
     Just i ->
-      lift $ lift $ addError CompileError
+      addError CompileError
         { errorFile = Just $ getFile decl
         , errorSpan = metaSpan path
         , errorKind = Error
@@ -441,7 +441,7 @@ insertOpType path newOp = do
     ops = allOpTypes decls
   case Map.lookupIndex path ops of
     Just i ->
-      lift $ lift $ addError CompileError
+      addError CompileError
         { errorFile = Just $ getFile newOp
         , errorSpan = metaSpan path
         , errorKind = Error
@@ -462,7 +462,7 @@ insertOpDecl path decl = do
     ops = allOpDecls decls
   case Map.lookupIndex path ops of
     Just i ->
-      lift $ lift $ addError CompileError
+      addError CompileError
         { errorFile = Just $ getFile decl
         , errorSpan = metaSpan path
         , errorKind = Error
@@ -490,7 +490,7 @@ nameResolveAll path mods = do
   forM_ mods $ nameResolveEach path
   unusedIds <- gets unusedIds
   forM_ (IntMap.elems unusedIds) \(file :/: span) ->
-    lift $ lift $ addError CompileError
+    addError CompileError
       { errorFile = Just file
       , errorSpan = Just span
       , errorKind = Warning
@@ -515,7 +515,7 @@ nameResolveEach path mod =
     nameResolveOpType (file :/: ops) =
       case ops of
         OpLink path : [] ->
-          lift $ lift $ addError CompileError
+          addError CompileError
             { errorFile = Just file
             , errorSpan = metaSpan path
             , errorKind = Warning
@@ -539,7 +539,7 @@ nameResolveEach path mod =
             insertOpType ((path .|.) <$> name) (file :/: (lower, next))
             afterDeclare lower rest
           OpLink path : _ ->
-            lift $ lift $ addError CompileError
+            addError CompileError
               { errorFile = Just file
               , errorSpan = metaSpan path
               , errorKind = Error
@@ -589,7 +589,7 @@ nameResolveEach path mod =
             Just <$> (forM effect $ nameResolvePath file isEffect "effect" $ metaSpan effect)
       case super of
         Just Meta { unmeta = Core (Identifier "Pure"), metaSpan } ->
-          lift $ lift $ addError CompileError
+          addError CompileError
             { errorFile = Just file
             , errorSpan = metaSpan
             , errorKind = Error
@@ -689,7 +689,7 @@ nameResolvePath file check kind span path@(Path parts@(head:rest)) = do
         { unusedIds = IntMap.delete id $ unusedIds s }
 
     pathErr msg = do
-      lift $ lift $ addError CompileError
+      addError CompileError
         { errorFile = Just file
         , errorSpan = span
         , errorKind = Error
