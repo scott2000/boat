@@ -188,7 +188,7 @@ instance (MonadCompile m, Stream s) => MonadCompile (ParsecT e s m) where
 -- | 'StateT' used for all stages of compilation to store state
 newtype CompileIO a = CompileIO
   { runCompileIO :: StateT CompileState IO a }
-  deriving (Applicative, Functor, Monad, MonadIO, MonadState CompileState)
+  deriving (Functor, Applicative, Monad, MonadIO, MonadState CompileState)
 
 -- | A record used to store state throughout compilation
 data CompileState = CompileState

@@ -176,14 +176,13 @@ isKeyword w = w `elem`
   , "mod"
   , "operator"
   , "type"
+  , "effect"
   , "data"
   , "let"
   , "with"
   , "fun"
   , "match"
-  , "in"
-  , "unary"
-  , "effect" ]
+  , "unary" ]
 
 -- | Checks if a character is valid at the start of an identifier
 isIdentFirst :: Char -> Bool

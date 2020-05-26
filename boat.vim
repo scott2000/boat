@@ -1,7 +1,7 @@
 " Vim syntax file
 " Language: Boat
 " Maintainer: Scott Taylor
-" Latest Revision: 15 October 2019
+" Latest Revision: 26 May 2020
 
 if exists("b:current_syntax")
   finish
@@ -9,8 +9,8 @@ endif
 
 syn iskeyword a-z,A-Z,48-57,_
 
-syn keyword boatUse         use _
-syn keyword boatKeywords    mod effect let with data operator type fun match in if then else
+syn keyword boatUse         _ use
+syn keyword boatKeywords    mod operator type effect data let with fun match if then else
 syn keyword boatWrongKey    unary
 syn match   boatNum         '\<[0-9]\+(_[0-9]\+)*\>'
 syn match   boatType        '\<\([A-Z][A-Za-z0-9_]*\|_\+[A-Z][A-Za-z0-9_]*\)\>' contains=@NoSpell
