@@ -25,7 +25,6 @@ type NR = ReaderT Names (StateT NameState CompileIO)
 data Explicitness
   = Implicit
   | Explicit
-  deriving Show
 
 -- | A map of names in scope to the specific item they refer to, or to a set of ambiguous paths
 type NameSet mark = Map Name (Either (Set Path) (Path, Item, Explicitness, mark))
@@ -52,7 +51,6 @@ data Names = Names
   , otherNames :: NameSet ()
     -- | Local identifiers bound by patterns or as parameters for a data type
   , localNames :: Set String}
-  deriving Show
 
 -- | A scope with no names present
 defaultNames :: Names
@@ -109,7 +107,7 @@ data Item = Item
   , isEffect :: Bool
   , isPattern :: Bool
   , isOperatorType :: Bool }
-  deriving (Show, Ord, Eq)
+  deriving Eq
 
 instance Semigroup Item where
   a <> b = Item
@@ -180,7 +178,7 @@ anyItem = Item
 -- | A mapping from names to items
 newtype NameTable = NameTable
   { getNameTable :: Map Name Item }
-  deriving (Show, Ord, Eq)
+  deriving Eq
 
 instance Semigroup NameTable where
   NameTable a <> NameTable b =
