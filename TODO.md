@@ -1,6 +1,6 @@
 # TODO List
 
-- Add flag for `--explain-errors`
+- Double check for redundant code in data type variant/signature parsing
 - Add warnings for invalid syntax that looks like Haskell, ML, Rust, etc.
   - Accept `val`/`var`/`const` instead of `let` and emit an error
   - Add error for `struct`/`enum`/`class` suggesting `data`

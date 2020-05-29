@@ -10,8 +10,6 @@ import Control.Monad.Trans.Maybe
 
 import Data.Sequence (Seq, (|>))
 import qualified Data.Sequence as Seq
-import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
 import Data.IntSet (IntSet)
 import qualified Data.IntSet as IntSet
 
@@ -29,13 +27,13 @@ data AssocState = AssocState
   { -- | Directed acyclic graph describing the ordering between each vertex
     assocGraph :: Graph
     -- | Map from operator type path to its vertex in the graph
-  , assocPaths :: Map (Meta Path) (InFile Vertex) }
+  , assocPaths :: PathMap Vertex }
 
 -- | An 'AssocState' with no operator types
 defaultAssocState :: AssocState
 defaultAssocState = AssocState
   { assocGraph = Seq.empty
-  , assocPaths = Map.empty }
+  , assocPaths = pathMapEmpty }
 
 -- | Associates all operators in every expression based on their operator types
 assocOps :: AllDecls -> CompileIO AllDecls
@@ -51,13 +49,13 @@ addPath :: Meta Path -> FilePath -> Assoc Vertex
 addPath path file = do
   s <- get
   let index = Seq.length $ assocGraph s
-  put s { assocPaths = Map.insert path (file :/: index) $ assocPaths s }
+  put s { assocPaths = pathMapInsert path (file :/: index) $ assocPaths s }
   return index
 
 -- | Looks up a path and returns the index of the vertex
-lookupPath :: Meta Path -> Assoc Vertex
+lookupPath :: Path -> Assoc Vertex
 lookupPath path =
-  unfile . mapGet path <$> gets assocPaths
+  unfile . pathMapGet path <$> gets assocPaths
 
 -- | Adds a vertex to the graph with a set of lower precedence vertices
 addVertex :: IntSet -> Assoc ()
@@ -92,31 +90,37 @@ checkVertexOrdering graph a b =
 -- | Sorts the operator types into the order they should be added to the graph
 getSortedAcyclic :: AllDecls -> CompileIO [(Meta Path, InFile OpTypeEnds)]
 getSortedAcyclic AllDecls { allOpTypes } =
-  checkForCycles $ topSortMap concatEnds allOpTypes
+  checkForCycles $ topSortPathMap concatEnds allOpTypes
   where
     concatEnds = \case
-      _ :/: (Nothing,  Nothing)  -> []
-      _ :/: (Nothing,  (Just b)) -> [b]
-      _ :/: ((Just a), Nothing)  -> [a]
-      _ :/: ((Just a), (Just b)) -> [a, b]
+      (Nothing, Nothing) -> []
+      (Nothing, Just b)  -> [unmeta b]
+      (Just a,  Nothing) -> [unmeta a]
+      (Just a,  Just b)  -> [unmeta a, unmeta b]
 
     checkForCycles = \case
       [] ->
         return []
       AcyclicSCC node : rest ->
-        (node :) <$> checkForCycles rest
+        (pathMapConvert node :) <$> checkForCycles rest
       CyclicSCC nodes : rest -> do
         let
-          (Meta { metaSpan }, file :/: _) = head nodes
+          (_, (metaSpan, file :/: _)) = head nodes
           nodeList =
             intercalate ", " $ map (show . fst) nodes
-        addError CompileError
+        addError compileError
           { errorFile = Just file
           , errorSpan = metaSpan
-          , errorKind = Error
+          , errorCategory = Just ECAssocOps
+          , errorExplain = Just $
+            " The links to other operator types in an operator type declaration cannot rely on any of" ++
+            " the operator types currently being defined in their definitions. If this were allowed," ++
+            " it would be possible to make a loop of operator precedences where an operator is both above" ++
+            " and below another operator in precedence, which would be ambiguous. Make sure that each" ++
+            " operator type declaration only links to previously defined operator types."
           , errorMessage =
-            "cyclic dependencies for operator type declarations\n" ++
-            "(nodes in cycle: " ++ nodeList ++ ")" }
+            " cyclic dependencies for operator type declarations\n" ++
+            " (nodes in cycle: " ++ nodeList ++ ")" }
         checkForCycles rest
 
 -- | Adds a new operator type declaration to the graph
@@ -128,16 +132,16 @@ addToGraph (path, file :/: ends) =
       addVertex IntSet.empty
     (Nothing, Just higher) -> do
       index <- addPath path file
-      higherVertex <- lookupPath higher
+      higherVertex <- lookupPath $ unmeta higher
       updateVertex higherVertex $ IntSet.insert index
       addVertex IntSet.empty
     (Just lower, Nothing) -> do
       addPath path file
-      lowerVertex <- lookupPath lower
+      lowerVertex <- lookupPath $ unmeta lower
       addVertex $ IntSet.singleton lowerVertex
     (Just lower, Just higher) -> do
-      lowerVertex <- lookupPath lower
-      higherVertex <- lookupPath higher
+      lowerVertex <- lookupPath $ unmeta lower
+      higherVertex <- lookupPath $ unmeta higher
       graph <- gets assocGraph
       let
         ordering = checkVertexOrdering graph lowerVertex higherVertex
@@ -146,12 +150,19 @@ addToGraph (path, file :/: ends) =
         h = showLast higher
         p = showLast path
         showErr msg =
-          addFatal CompileError
+          addFatal compileError
             { errorFile = Just file
             , errorSpan = metaSpan path
-            , errorKind = Error
-            , errorMessage = msg
-              ++ ",\nso `" ++ p ++ "` cannot be added in between" }
+            , errorCategory = Just ECAssocOps
+            , errorExplain = Just $
+              " When specifying the precedence of an operator type, an upper and lower bound may be" ++
+              " specified by placing them in parentheses. These upper and lower bounds must already" ++
+              " have an established ordering between them if they are both included, and the upper" ++
+              " bound must have higher precedence than the lower bound. This ensures that if you don't" ++
+              " specify the relative ordering of two operator types, that they will never have a" ++
+              " defined ordering between them."
+            , errorMessage = ' ' : msg
+              ++ ", so `" ++ p ++ "` cannot be added in between" }
       case ordering of
         Nothing ->
           showErr $
@@ -174,15 +185,15 @@ updateExprs
   AssocState { assocGraph, assocPaths }
   decls@AllDecls { allOpDecls }
   = do
-    allDatas <- mapM updateData $ allDatas decls
-    allLets <- mapM updateLet $ allLets decls
+    allDatas <- PathMap <$> (mapM updateData $ unPathMap $ allDatas decls)
+    allLets <- PathMap <$> (mapM updateLet $ unPathMap $ allLets decls)
     return decls { allDatas, allLets }
     where
-      comparePaths :: Meta Path -> Meta Path -> Maybe Ordering
+      comparePaths :: Path -> Path -> Maybe Ordering
       comparePaths a b =
         checkVertexOrdering assocGraph (v a) (v b)
         where
-          v path = unfile $ mapGet path assocPaths
+          v path = unfile $ pathMapGet path assocPaths
 
       allow :: FilePath -> Maybe (Meta Path) -> Meta Path -> MaybeT CompileIO Bool
       allow file current next =
@@ -190,7 +201,8 @@ updateExprs
           Nothing ->
             return True
           Just current ->
-            case (Map.lookup current allOpDecls, Map.lookup next allOpDecls) of
+            case ( pathMapLookup (unmeta current) allOpDecls
+                 , pathMapLookup (unmeta next) allOpDecls ) of
               (Nothing, Nothing) -> MaybeT do
                 missing current
                 missing next
@@ -203,8 +215,8 @@ updateExprs
                 return Nothing
               (Just (_ :/: a), Just (_ :/: b)) ->
                 let
-                  aOp = opType a
-                  bOp = opType b
+                  aOp = unmeta $ opType a
+                  bOp = unmeta $ opType b
                 in case comparePaths aOp bOp of
                   Nothing -> notAllowed $
                     "there is no established precedence between `" ++ show aOp
@@ -224,21 +236,21 @@ updateExprs
                         ++ "` (" ++ show aAssoc ++ " != " ++ show bAssoc ++ ")"
         where
           notAllowed msg = MaybeT do
-            addError CompileError
+            addError compileError
               { errorFile = Just file
               , errorSpan = metaSpan next
-              , errorKind = Error
-              , errorMessage = msg
-                ++ ",\n so explicit grouping is required" }
+              , errorCategory = Just ECAssocOps
+              , errorMessage = ' ' : msg
+                ++ ", so explicit grouping is required" }
             return Nothing
           missing path =
-            addError CompileError
+            addError compileError
               { errorFile = Just file
               , errorSpan = metaSpan path
-              , errorKind = Error
+              , errorCategory = Just ECAssocOps
               , errorMessage =
-                "operator `" ++ show path ++ "` has not been assigned an "
-                ++ "operator precedence,\nso explicit grouping is required" }
+                " operator `" ++ show path ++ "` has not been assigned an operator precedence," ++
+                " so explicit grouping is required" }
 
       unwrap :: MaybeT CompileIO a -> CompileIO a
       unwrap m = runMaybeT m >>= \case
@@ -278,20 +290,23 @@ updateExprs
                   goBin current (applyBinary binaryOp a b)
                 else
                   return a
+              _ ->
+                compilerBug "associateList: operator found at end of list"
 
       updateSome file = reassociate $ associateList file
 
-      updateData :: InFile DataDecl -> CompileIO (InFile DataDecl)
-      updateData (file :/: decl) = do
+      updateData :: (Maybe Span, InFile DataDecl) -> CompileIO (Maybe Span, InFile DataDecl)
+      updateData (span, file :/: decl) = do
         variants <- mapM (mapM updateVariant) $ dataVariants decl
-        return (file :/: decl { dataVariants = variants })
+        return (span, file :/: decl { dataVariants = variants })
         where
           updateVariant (name, types) =
             (,) name <$> mapM (updateSome file) types
 
-      updateLet :: InFile LetDecl -> CompileIO (InFile LetDecl)
-      updateLet (file :/: decl) =
-        (file :/:) . (\x -> decl { letBody = x }) <$> updateSome file (letBody decl)
+      updateLet :: (Maybe Span, InFile LetDecl) -> CompileIO (Maybe Span, InFile LetDecl)
+      updateLet (span, file :/: decl) = do
+        body <- updateSome file $ letBody decl
+        return (span, file :/: decl { letBody = body })
 
 -- | A type of function that can reassociate a list of unassociated expressions
 type Associator m = forall t. ContainsOp t => [UnOpOrExpr t] -> m (Meta t)

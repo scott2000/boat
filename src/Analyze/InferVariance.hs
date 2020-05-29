@@ -9,6 +9,7 @@ import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
 
+import Control.Applicative
 import Control.Monad.State.Strict
 import Control.Monad.Writer.Strict
 import Control.Monad.Trans.Maybe
@@ -31,12 +32,9 @@ addStep (VAnon anon) cs =
 addStep other cs =
   cs { vBase = other <> vBase cs }
 
--- | A map of data type declarations
-type DeclMap = Map (Meta Path) (InFile DataDecl)
-
 -- | Finds the data types used by each data type so they can be sorted
-declDeps :: InFile DataDecl -> [Meta Path]
-declDeps (_ :/: DataDecl { dataVariants }) =
+declDeps :: DataDecl -> [Path]
+declDeps DataDecl { dataVariants } =
   Set.toList $ execWriter $ mapM_ variantDeps dataVariants
   where
     variantDeps = mapM_ typeDeps . snd . unmeta
@@ -46,7 +44,7 @@ declDeps (_ :/: DataDecl { dataVariants }) =
         TAnyFuncArrow _ ->
           return ()
         TNamed _ name ->
-          tell $ Set.singleton name
+          tell $ Set.singleton $ unmeta name
         TApp a b ->
           typeDeps a >> typeDeps b
         _ ->
@@ -82,6 +80,8 @@ addConstraint VarianceConstraint { vBase, vDeps } i =
         i { inputVariables = Set.insert vDeps $ inputVariables i }
     VInvariant ->
       InvariantVariable
+    _ ->
+      error "addConstraint called with VAnon"
 
 -- | Find the inference variables that constraint a given variable
 variableDeps :: InferVariable -> [AnonCount]
@@ -127,9 +127,9 @@ type Infer = StateT InferState CompileIO
 -- | Stores information about which declarations have been resolved and what constraints exists
 data InferState = InferState
   { -- | A map of declarations that have already been resolved
-    iResolvedDecls :: !DeclMap
+    iResolvedDecls :: !(PathMap DataDecl)
     -- | A map of declarations that are currently being resolved and aren't fully known
-  , iUnresolvedDecls :: !DeclMap
+  , iUnresolvedDecls :: !(PathMap DataDecl)
     -- | A map of resolved inference variables that may be substituted
   , iResolvedVars :: !(Map AnonCount TypeVariance)
     -- | A map of unresolved inference variables that have yet to be substituted
@@ -138,8 +138,8 @@ data InferState = InferState
 -- | The default state with nothing inferred yet
 defaultInferState :: InferState
 defaultInferState = InferState
-  { iResolvedDecls = Map.empty
-  , iUnresolvedDecls = Map.empty
+  { iResolvedDecls = pathMapEmpty
+  , iUnresolvedDecls = pathMapEmpty
   , iResolvedVars = Map.empty
   , iUnresolvedVars = Map.empty }
 
@@ -149,17 +149,16 @@ removeNames DataSig { dataEffects, dataArgs } =
   (map snd dataEffects, map snd dataArgs)
 
 -- | Looks up a data type declaration's parameters
-lookupDecl :: Meta Path -> Infer ([TypeVariance], [DataArg])
-lookupDecl Meta { unmeta = Core (Operator "->") } =
+lookupDecl :: Path -> Infer ([TypeVariance], [DataArg])
+lookupDecl (Core (Operator "->")) =
   return ([VOutput], [DataArg VInput [], DataArg VOutput []])
 lookupDecl path = do
   InferState { iResolvedDecls, iUnresolvedDecls } <- get
-  case Map.lookup path iUnresolvedDecls of
-    Just decl -> return $ removeNames $ dataSig $ unfile decl
+  case pathMapLookup path iUnresolvedDecls <|> pathMapLookup path iResolvedDecls of
+    Just (_ :/: decl) ->
+      return $ removeNames $ dataSig decl
     Nothing ->
-      case Map.lookup path iResolvedDecls of
-        Just decl -> return $ removeNames $ dataSig $ unfile decl
-        Nothing -> compilerBug $ "lookupDecl couldn't find `" ++ show path ++ "`"
+      compilerBug $ "lookupDecl couldn't find `" ++ show path ++ "`"
 
 -- | Inserts a new constraint to an inference variable
 insertConstraint :: AnonCount -> VarianceConstraint -> Infer ()
@@ -174,17 +173,17 @@ inferVariance decls = do
   return decls { allDatas = iResolvedDecls i }
   where
     runInfer =
-      mapM_ inferDeclSCC $ topSortMap declDeps $ allDatas decls
+      mapM_ inferDeclSCC $ topSortPathMap declDeps $ allDatas decls
 
 -- | Infers variance information for a single 'SCC' of the graph of data types
-inferDeclSCC :: SCC (Meta Path, InFile DataDecl) -> Infer ()
+inferDeclSCC :: SCC (ReversedPath, (Maybe Span, InFile DataDecl)) -> Infer ()
 inferDeclSCC scc = do
   let anonMap = foldr addAnons Map.empty unresolvedList
   modify \i -> i
     { iUnresolvedDecls = unresolvedMap
     , iResolvedVars = Map.empty
     , iUnresolvedVars = Map.map (const emptyInferVariable) anonMap }
-  forM_ unresolvedList \(_, file :/: decl) -> do
+  forM_ unresolvedList \(_, (_, file :/: decl)) -> do
     dataInfo <- makeDataInfo file $ dataSig decl
     forM_ (dataVariants decl) $ generateConstraints file dataInfo
   unresolvedVars <- gets iUnresolvedVars
@@ -199,28 +198,28 @@ inferDeclSCC scc = do
     { iResolvedDecls = foldr (addResolved resolvedVars) (iResolvedDecls i) unresolvedList }
   where
     unresolvedList = flattenSCC scc
-    unresolvedMap = Map.fromList unresolvedList
+    unresolvedMap = PathMap $ Map.fromList unresolvedList
 
-    addAnons (_, file :/: DataDecl { dataSig = DataSig { dataEffects, dataArgs } }) m =
+    addAnons (_, (_, file :/: DataDecl { dataSig = DataSig { dataEffects, dataArgs } })) m =
       foldr addEff (foldr addArg m dataArgs) dataEffects
       where
         -- Ignore arguments that weren't specified by name
-        addEff (UnnamedArg, _) = id
         addEff (name, VAnon var) = Map.insert var (file :/: metaSpan name)
+        addEff _ = id
         addArg (UnnamedArg, _) = id
         addArg (name, arg) = Map.insert (getAnon arg) (file :/: metaSpan name)
 
-    addResolved rvars (name, file :/: decl) =
-      Map.insert name $ file :/: decl
-        { dataSig = resDataSig $ dataSig decl }
+    addResolved rvars (name, (span, file :/: decl)) =
+      pathMapInsert' name (span, file :/: decl
+        { dataSig = resDataSig $ dataSig decl })
       where
         resDataSig DataSig { dataEffects, dataArgs } = DataSig
           { dataEffects = map resEff dataEffects
           , dataArgs = map resArg dataArgs }
-        resEff eff@(UnnamedArg, _) = eff
         resEff (name, VAnon var) = (name, mapGet var rvars)
-        resArg arg@(UnnamedArg, _) = arg
+        resEff eff = eff
         resArg (name, DataArg (VAnon var) args) = (name, DataArg (mapGet var rvars) args)
+        resArg arg = arg
 
 -- | Information about all parameters of a data type declaration
 type DataInfo = Map String (Maybe (ExprKind, DataArg))
@@ -240,10 +239,9 @@ makeDataInfo file DataSig { dataEffects, dataArgs } =
     add Meta { unmeta = name, metaSpan } info = do
       m <- get
       if Map.member name m then do
-        addError CompileError
+        addError compileError
           { errorFile = Just file
           , errorSpan = metaSpan
-          , errorKind = Error
           , errorMessage = "the name `" ++ name ++ "` has already been taken by another parameter" }
         put $ Map.insert name Nothing m
       else
@@ -275,20 +273,19 @@ instance Show MatchArgsError where
 -- | Emits a 'MatchArgsError' in the given file at the given span
 addMatchError :: AddError m => FilePath -> Maybe Span -> MatchArgsError -> m ()
 addMatchError file span err =
-  add CompileError
+  addError compileError
     { errorFile = Just file
     , errorSpan = span
-    , errorKind = Error
-    , errorMessage = show err }
-  where
-    add =
+    , errorKind =
       case err of
         GeneralMismatch _ _ ->
           -- Use a secondary error since this error is potentially complex and may be caused by a previous error
-          addSecondaryError
+          SpecialError SecondaryError
         _ ->
           -- Basic errors such as forgetting an argument are simple to understand so use a primary error
-          addError
+          Error
+    , errorCategory = Just ECInferVariance
+    , errorMessage = show err }
 
 -- | Matches the expected arguments with the actual arguments for a type
 matchArgs :: Monad m
@@ -341,33 +338,19 @@ generateConstraints file dataInfo Meta { unmeta = (_, types) } =
   where
     lookupNamed :: ExprKind -> Maybe Span -> String -> MaybeT Infer DataArg
     lookupNamed expected span name =
-      case Map.lookup name dataInfo of
-        Just (Just (eff, arg))
+      case mapGet name dataInfo of
+        Just (eff, arg)
           | eff == expected -> return arg
           | otherwise -> MaybeT do
-            addError CompileError
+            addError compileError
               { errorFile = Just file
               , errorSpan = span
-              , errorKind = Error
               , errorMessage =
                 show eff ++ " parameter `" ++ name ++ "` cannot be used as " ++ aOrAn (show expected) }
             return Nothing
-        Just Nothing ->
+        Nothing ->
           -- Indicates that there were multiple parameters with this name so nothing can be done
           MaybeT $ return Nothing
-        Nothing -> MaybeT do
-          addError CompileError
-            { errorFile = Just file
-            , errorSpan = span
-            , errorKind = Error
-            , errorMessage =
-            "cannot find parameter `" ++ name ++ "` in scope, " ++
-            if length name > 3 then
-              -- Most type variables are short, so if it's longer than 3 characters it's probably wrong
-              "did you mean to capitalize it?"
-            else
-              "did you forget to declare it?" }
-          return Nothing
 
     matchArgs' :: Maybe Span -> [DataArg] -> [DataArg] -> MaybeT Infer ()
     matchArgs' actualSpan expected actual =
@@ -389,7 +372,7 @@ generateConstraints file dataInfo Meta { unmeta = (_, types) } =
     inferType c ty =
       case unmeta ty of
         TNamed effs name -> do
-          (dataEffects, dataArgs) <- lift $ lookupDecl name
+          (dataEffects, dataArgs) <- lift $ lookupDecl $ unmeta name
           zipWithM_ matchEff effs dataEffects
           return dataArgs
         TPoly name -> do
@@ -397,10 +380,9 @@ generateConstraints file dataInfo Meta { unmeta = (_, types) } =
           lift $ insertConstraint (getAnon arg) c
           return $ argParams arg
         TAnon _ -> MaybeT do
-          addError CompileError
+          addError compileError
             { errorFile = Just file
             , errorSpan = metaSpan ty
-            , errorKind = Error
             , errorMessage = "type in data type variant cannot be left blank" }
           return Nothing
         TApp a b ->
@@ -408,10 +390,9 @@ generateConstraints file dataInfo Meta { unmeta = (_, types) } =
             [] -> MaybeT do
               runMaybeT $ inferType (addStep VInvariant c) b
               let (base, baseCount) = findBase a
-              addError CompileError
+              addError compileError
                 { errorFile = Just file
                 , errorSpan = metaSpan b
-                , errorKind = Error
                 , errorMessage =
                 "parameter `" ++ show base ++ "` " ++
                   if baseCount == 0 then
@@ -435,10 +416,9 @@ generateConstraints file dataInfo Meta { unmeta = (_, types) } =
                 arg <- lookupNamed KEffect (metaSpan eff) name
                 lift $ insertConstraint (getAnon arg) effC
               EffectAnon _ ->
-                addError CompileError
+                addError compileError
                   { errorFile = Just file
                   , errorSpan = metaSpan eff
-                  , errorKind = Error
                   , errorMessage = "effect in data type variant cannot be left blank" }
               _ -> return ()
           where
@@ -461,10 +441,13 @@ unwrapVariable (file :/: span) InferVariable { outputVariables, inputVariables }
     (FullyDetermined, NoConstraints) -> return VOutput
     (NoConstraints, FullyDetermined) -> return VInput
     (NoConstraints, NoConstraints) -> do
-      addError CompileError
+      addError compileError
         { errorFile = Just file
         , errorSpan = span
-        , errorKind = Error
+        , errorCategory = Just ECInferVariance
+        , errorExplain = Just $
+          " Since this parameter is not used, it is not necessary to give it a name." ++
+          " Instead, you can directly replace it with whichever variance you want it to have."
         , errorMessage =
           "cannot infer variance of unused parameter, use (+), (-), or _ instead" }
       return VInvariant
@@ -523,6 +506,7 @@ normalizeVariables = Set.map (simplifyRepeats . sort)
 
 -- | Check whether the inference variable has completely disjoint sets of constraints
 expensiveCheckDisjoint :: InferVariable -> Bool
+expensiveCheckDisjoint InvariantVariable = False
 expensiveCheckDisjoint InferVariable { outputVariables, inputVariables } =
   Set.disjoint (normalizeVariables outputVariables) (normalizeVariables inputVariables)
 
@@ -587,10 +571,21 @@ inferConstraintSCC anonMap scc = do
                 Nothing ->
                   -- Otherwise, just pick the first entry in the cycle
                   fst $ head vars
-          addError CompileError
+          addError compileError
             { errorFile = Just file
             , errorSpan = span
-            , errorKind = Error
+            , errorCategory = Just ECInferVariance
+            , errorExplain = Just $
+              " The Boat compiler looks at how a parameter is used in order to determine its variance" ++
+              " so that programs don't need to explicitly state it in most cases. However, in this case" ++
+              " the parameter is never actually used directly in any data types (it is just being passed" ++
+              " to another data type recursively). Because of this, the compiler doesn't have enough" ++
+              " information to determine how the parameter is supposed to be used.\n\n" ++
+              " If it is possible, remove the parameter from the data type or replace its uses in the" ++
+              " data type variants with a specific type instead of a parameter. Otherwise, you may have" ++
+              " to use it directly in some way in order to resolve this issue. One solution is to make a" ++
+              " type like `data Phantom (+) = Phantom` that ignores its argument but gives it a variance" ++
+              " and then add it as a parameter to a variant of the data type."
             , errorMessage =
               "parameter is never used concretely so its variance cannot be inferred\n" ++
               "(consider removing the parameter if possible or using it concretely somewhere)" }

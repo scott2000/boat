@@ -20,10 +20,12 @@ module Utility.Basics
   , compileStateFromOptions
   , CompileOptions (..)
   , CompileError (..)
+  , compileError
   , ErrorKind (..)
+  , SpecialError (..)
+  , ErrorCategory (..)
   , AddError
   , addError
-  , addSecondaryError
   , ErrorCount (..)
   , AnonCount
   , pattern AnonAny
@@ -206,14 +208,20 @@ data CompileOptions = CompileOptions
   { -- | The requested file or directory to be compiled
     compileTarget :: !FilePath
     -- | The requested name for the package
-  , compilePackageName :: !Name }
+  , compilePackageName :: !Name
+    -- | Whether error explanations are enabled
+  , compileExplainErrors :: !Bool }
 
 -- | Creates a 'CompileState' from 'CompileOptions'
 compileStateFromOptions :: CompileOptions -> CompileState
 compileStateFromOptions opts = CompileState
   { compileOptions = opts
   , compileErrors = Set.empty
-  , compileErrorCount = ErrorCount 0 0 False
+  , compileErrorCount = ErrorCount
+    { errorCount = 0
+    , warningCount = 0
+    , hasPrimaryError = False
+    , hasExplainError = False }
   , compileAnonCount = AnonAny }
 
 -- | Gets a new unique 'AnonCount' for an inference variable
@@ -232,8 +240,12 @@ data CompileError = CompileError
   , errorSpan :: !(Maybe Span)
     -- | The kind of error that occurred
   , errorKind :: !ErrorKind
-    -- | The error message to print
-  , errorMessage :: !String }
+    -- | The general category of error (for explanations)
+  , errorCategory :: !(Maybe ErrorCategory)
+    -- | An explanation that is more specific to this error
+  , errorExplain :: !(Maybe String)
+    -- | The basic error message to print
+  , errorMessage :: String }
   deriving Eq
 
 instance Ord CompileError where
@@ -241,6 +253,8 @@ instance Ord CompileError where
     errorFile a `reversedMaybe` errorFile b
     <> errorSpan a `reversedMaybe` errorSpan b
     <> errorKind a `compare` errorKind b
+    <> errorCategory a `compare` errorCategory b
+    <> errorExplain a `compare` errorExplain b
     <> errorMessage a `compare` errorMessage b
     where
       -- Empty files and spans should appear last
@@ -249,29 +263,43 @@ instance Ord CompileError where
       Just _  `reversedMaybe` Nothing = LT
       Just a  `reversedMaybe` Just b  = a `compare` b
 
+-- | A default 'CompileError' containing everything but a message
+compileError :: CompileError
+compileError = CompileError
+  { errorFile = Nothing
+  , errorSpan = Nothing
+  , errorKind = Error
+  , errorCategory = Nothing
+  , errorExplain = Nothing
+  , errorMessage = error "compileError was not given an error message" }
+
+-- | A general category of error that may need an in-depth explanation
+data ErrorCategory
+  = ECAssocOps
+  | ECInferVariance
+  deriving (Ord, Eq)
+
 -- | Stores the number of each type of error (useful for determining when to stop compilation)
 data ErrorCount = ErrorCount
   { errorCount :: !Int
   , warningCount :: !Int
-  , hasPrimaryError :: !Bool }
+  , hasPrimaryError :: !Bool
+  , hasExplainError :: !Bool }
 
 instance Show ErrorCount where
-  show = \case
-    ErrorCount e 0 _ -> plural e "error"
-    ErrorCount 0 w _ -> plural w "warning"
-    ErrorCount e w _ ->
-      plural e "error" ++ " (and " ++ plural w "warning" ++ ")"
+  show ErrorCount { errorCount, warningCount }
+    | warningCount == 0 = plural errorCount "error"
+    | errorCount == 0 = plural warningCount "warning"
+    | otherwise = plural errorCount "error" ++ " (and " ++ plural warningCount "warning" ++ ")"
 
 -- | Adds a new error to the 'ErrorCount'
-updateErrorCount :: Bool -> ErrorKind -> ErrorCount -> ErrorCount
-updateErrorCount False Error c = c
-  { errorCount = errorCount c + 1 }
-updateErrorCount True Error c = c
+updateErrorCount :: ErrorKind -> ErrorCount -> ErrorCount
+updateErrorCount Error c = c
   { errorCount = errorCount c + 1
   , hasPrimaryError = True }
-updateErrorCount _ Warning c = c
+updateErrorCount Warning c = c
   { warningCount = warningCount c + 1 }
-updateErrorCount _ _ c = c
+updateErrorCount _ c = c
 
 -- | Represents the different kinds of possible error messages
 data ErrorKind
@@ -279,14 +307,23 @@ data ErrorKind
   | Warning
   | Error
   | Done
+  | Explain ErrorKind
+  | SpecialError SpecialError
   deriving (Ord, Eq)
 
 instance Show ErrorKind where
   show = \case
-    Info    -> "info"
-    Warning -> "warning"
-    Error   -> "error"
-    Done    -> "done"
+    Info      -> "info"
+    Warning   -> "warning"
+    Error     -> "error"
+    Done      -> "done"
+    Explain _ -> "explain"
+    _         -> "other"
+
+-- | A kind of error that is handled specially when being added
+data SpecialError
+  = SecondaryError
+  deriving (Ord, Eq)
 
 -- | Constraint for a 'Monad' that supports adding errors (e.g. 'CompileIO')
 type AddError = MonadCompile
@@ -294,24 +331,22 @@ type AddError = MonadCompile
 -- | Emits a single 'CompileError' for later printing
 addError :: AddError m => CompileError -> m ()
 addError err =
-  liftCompile $ modify \s -> s
-    { compileErrors = Set.insert err $ compileErrors s
-    , compileErrorCount =
-      updateErrorCount True (errorKind err) $ compileErrorCount s }
-
--- | Emits a single 'CompileError' for later printing only if no errors have been added by 'addError'
-addSecondaryError :: AddError m => CompileError -> m ()
-addSecondaryError err =
   liftCompile $ modify \s ->
-    let
-      errorCount = compileErrorCount s
-    in
-      if hasPrimaryError errorCount then
-        s
-      else s
-        { compileErrors = Set.insert err $ compileErrors s
-        , compileErrorCount =
-          updateErrorCount False (errorKind err) errorCount }
+    let count = compileErrorCount s in
+    case errorKind err of
+      SpecialError SecondaryError
+        | hasPrimaryError count -> s
+        | otherwise ->
+          add err { errorKind = Error } count { errorCount = errorCount count + 1 } s
+      kind ->
+        add err (updateErrorCount kind count) s
+  where
+    add err count s = s
+      { compileErrors = Set.insert err $ compileErrors s
+      , compileErrorCount =
+        case (errorCategory err, errorExplain err) of
+          (Nothing, Nothing) -> count
+          _ -> count { hasExplainError = True } }
 
 -- | A position in a file consisting of a line number and column number (starting at 1)
 data Position = Position
@@ -374,10 +409,12 @@ isCap ch
 -- | Converts the first character in a string to uppercase
 capFirst :: String -> String
 capFirst (x:xs) = toUpper x : xs
+capFirst _ = error "capFirst called on empty string"
 
 -- | Converts the first character in a string to lowercase
 lowerFirst :: String -> String
 lowerFirst (x:xs) = toLower x : xs
+lowerFirst _ = error "lowerFirst called on empty string"
 
 -- | A version of 'Map.lookup' that calls 'error' with the key if it fails
 mapGet :: (Show k, Ord k) => k -> Map k v -> v

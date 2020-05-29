@@ -142,12 +142,11 @@ convertParseErrors bundle =
             endPos
               | errLen == 1 = startPos
               | otherwise = pstateSourcePos $ reachOffsetNoLine (o+errLen-1) posState'
-          addError CompileError
+          addError compileError
             { errorFile = file
             , errorSpan = Just $ Span
               (Position (unPos $ sourceLine startPos) (unPos $ sourceColumn startPos))
               (Position (unPos $ sourceLine endPos) (unPos (sourceColumn endPos) + 1))
-            , errorKind = Error
             , errorMessage = errText }
           go posState' rest
       where
@@ -615,10 +614,9 @@ addFail maybeSpan msg = do
         pointSpan <$> getPos
       Just span ->
         return span
-  customFailure $ CustomFail CompileError
+  customFailure $ CustomFail compileError
     { errorFile = Just file
     , errorSpan = Just span
-    , errorKind = Error
     , errorMessage = msg }
 
 -- | Parses a list of items separated by a character

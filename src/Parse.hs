@@ -70,9 +70,8 @@ parseAll path = do
       Left err -> do
         shouldWarn <- liftIO $ containsBoatFiles path
         when shouldWarn $
-          addError CompileError
+          addError compileError
             { errorFile = Just path
-            , errorSpan = Nothing
             , errorKind = Warning
             , errorMessage =
               "folder contains .boat files but doesn't have a valid module name"

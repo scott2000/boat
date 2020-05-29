@@ -12,13 +12,13 @@ build-type:          Simple
 cabal-version:       >=1.10
 
 executable boat
-  ghc-options:         -Wall -Wno-name-shadowing -Wno-incomplete-patterns -Wno-unused-do-bind -Wno-unused-top-binds
+  ghc-options:         -Wall -Wno-name-shadowing -Wno-unused-do-bind -Wno-unused-top-binds
   main-is:             Main.hs
   other-modules:       Utility.Basics,
                        Utility.ErrorPrint,
-                       Utility.TopSort,
                        Utility.AST,
                        Utility.Program,
+                       Utility.TopSort,
                        Utility,
                        Parse.Primitives,
                        Parse.Expression,
@@ -56,6 +56,7 @@ executable boat
                        haskeline >=0.7,
                        filepath >=1.4,
                        directory >=1.3,
-                       optparse-applicative >=0.15
+                       optparse-applicative >=0.15,
+                       edit-distance >=0.2
   hs-source-dirs:      src
   default-language:    Haskell2010

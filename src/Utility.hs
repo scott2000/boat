@@ -2,14 +2,14 @@
 module Utility
   ( module Utility.Basics
   , module Utility.ErrorPrint
-  , module Utility.TopSort
   , module Utility.AST
   , module Utility.Program
+  , module Utility.TopSort
   ) where
 
 import Utility.Basics
 import Utility.ErrorPrint
-import Utility.TopSort
 import Utility.AST
 import Utility.Program
+import Utility.TopSort
 

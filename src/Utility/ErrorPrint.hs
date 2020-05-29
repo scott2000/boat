@@ -4,7 +4,6 @@ module Utility.ErrorPrint
     CompileError (..)
   , AddError
   , addError
-  , addSecondaryError
 
     -- * Fatal Errors
   , AddFatal
@@ -43,13 +42,17 @@ addFatal e = do
 -- | If any errors occurred, print them and exit with failure
 exitIfErrors :: MonadCompile m => m ()
 exitIfErrors = do
-  count <- liftCompile $ gets compileErrorCount
+  CompileState
+    { compileOptions = CompileOptions { compileExplainErrors }
+    , compileErrorCount = count } <- liftCompile get
   when (errorCount count /= 0) do
-    addError CompileError
-      { errorFile = Nothing
-      , errorSpan = Nothing
-      , errorKind = Error
-      , errorMessage = "stopping due to " ++ show count }
+    addError compileError
+      { errorMessage =
+        "stopping due to " ++ show count ++
+        if not compileExplainErrors && hasExplainError count then
+          "\n(try --explain-errors for more info)"
+        else
+          "" }
     printErrors
     liftIO exitFailure
 
@@ -58,10 +61,8 @@ finishAndCheckErrors :: MonadCompile m => m ()
 finishAndCheckErrors = do
   exitIfErrors
   count <- liftCompile $ gets compileErrorCount
-  addError CompileError
-    { errorFile = Nothing
-    , errorSpan = Nothing
-    , errorKind = Done
+  addError compileError
+    { errorKind = Done
     , errorMessage = "compiled successfully with " ++ show count }
   printErrors
 
@@ -73,28 +74,114 @@ compilerBugBaseMessage =
 -- | Prints an error message and exits (for use in code that should be unreachable)
 compilerBug :: AddFatal m => String -> m a
 compilerBug msg = do
-  addError CompileError
-    { errorFile = Nothing
-    , errorSpan = Nothing
-    , errorKind = Error
-    , errorMessage = compilerBugBaseMessage ++ "error message: " ++ msg }
+  addError compileError
+    { errorMessage = compilerBugBaseMessage ++ "error message: " ++ msg }
   printErrors
   liftIO exitFailure
 
 -- | Like 'compilerBug', but doesn't require 'CompileIO' and prints a raw message
 compilerBugRawIO :: String -> IO a
 compilerBugRawIO err = do
-  prettyCompileErrors $ Set.singleton CompileError
-    { errorFile = Nothing
-    , errorSpan = Nothing
-    , errorKind = Error
-    , errorMessage = compilerBugBaseMessage ++ err }
+  prettyCompileErrors False $ Set.singleton compileError
+    { errorMessage = compilerBugBaseMessage ++ err }
   exitFailure
 
 -- | Prints all errors that have been generated
 printErrors :: MonadCompile m => m ()
-printErrors =
-  liftCompile (gets compileErrors >>= liftIO . prettyCompileErrors)
+printErrors = liftCompile do
+  CompileState { compileErrors, compileOptions = CompileOptions { compileExplainErrors } } <- get
+  liftIO $ prettyCompileErrors compileExplainErrors compileErrors
+
+-- | Gets a printable explanation of an 'ErrorCategory'
+getExplanation :: ErrorCategory -> String
+getExplanation = \case
+  ECAssocOps ->
+    " Many programming languages have a predefined table of operators that describes the precedence" ++
+    " of each operator relative to each other. This comes with the limitation that either custom" ++
+    " operators must be assigned an arbitrary number to place them in the precedence table (like in" ++
+    " Haskell), or that custom operators are not allowed to decide a precedence or are disallowed" ++
+    " entirely. To avoid these issues, Boat allows operators to describe their precedence relation" ++
+    " to other operators directly.\n\n" ++
+    " In order to use two operators together without using explicit parentheses, Boat requires that" ++
+    " both operators have been assigned an operator type, and that either one operator type is defined" ++
+    " to have higher precedence than the other or, if they have the same operator type, that there" ++
+    " is a defined associativity for the operators (left or right) and the associativities are the same.\n\n" ++
+    " Because operators are done this way, it is entirely possible for two operators to have no" ++
+    " precedence relation at all, requiring explicit parentheses. This is a good feature because it" ++
+    " means that operators defined in separate packages will not interact in confusing or hard-to-predict" ++
+    " ways, but instead will simply require explicit parentheses. It is also important to note that" ++
+    " an operator does not always need to be given an operator type. In this case, it simply must always" ++
+    " be parenthesized when used with other operators."
+  ECInferVariance ->
+    " Although Boat does not allow subtypes in general, it does allow subtypes for effects." ++
+    " Because of this, the compiler must infer extra information about the variance of parameters" ++
+    " for data types. To understand why, first notice that `a -> b` is a subtype of `a -|IO|> b`," ++
+    " meaning it can be used wherever a function producing a side effect is expected. This is an example" ++
+    " of covariance, since the types are related in the same way that their effects are related.\n\n" ++
+    " But this is not always the case. Often, types are related in the *opposite* way such as in" ++
+    " function inputs. The type `(a -|IO|> b) -> c` is actually a subtype of `(a -> b) -> c`." ++
+    " This is because the first function is strictly more general; it can take all of the valid" ++
+    " inputs to the second function (pure functions) as well as taking additional inputs (impure" ++
+    " functions). Because this is reversed from the effects' relationship, it is called contravariance." ++
+    " The final kind of variance is called invariance. This occurs when the effect is used in both" ++
+    " ways, so it must always exactly match.\n\n" ++
+    " In Boat, covariance is called output variance and contravariance is called input variance to" ++
+    " make it easier to remember. These types of variance are represented by (+), (-), and _ respectively."
+
+-- | Splits a line into chunks that can be split across lines
+lineToChunks :: String -> [(Int, String)]
+lineToChunks = split [] []
+  where
+    toChunk []     n w = (n, w)
+    toChunk (c:cs) n w =
+      toChunk cs (n + 1) (c:w)
+
+    prepend []   text = text
+    prepend word text =
+      toChunk word 0 [] : text
+
+    joinFirst2 ((n0, w0):(n1, w1):rest) =
+      (n1 + 1 + n0, w1 ++ (' ' : w0)) : rest
+    joinFirst2 other = other
+
+    findBacktick initialWord initialRest =
+      go initialWord initialRest
+      where
+        go word = \case
+          [] ->
+            (initialWord, initialRest)
+          ('\n':_) ->
+            (initialWord, initialRest)
+          ('`':rest) ->
+            ('`':word, rest)
+          (next:rest) ->
+            findBacktick (next:word) rest
+
+    split word text = \case
+      [] ->
+        reverse $ joinFirst2 $ prepend word text
+      (' ':rest) ->
+        split [] (prepend word text) rest
+      ('\n':rest) ->
+        split "\n" (prepend word text) rest
+      ('`':rest) ->
+        let (word', rest') = findBacktick ('`':word) rest in
+        split word' text rest'
+      (next:rest) ->
+        split (next:word) text rest
+
+-- | Formats a paragraph to fit within a specified line width
+formatLineWidth :: Int -> String -> String
+formatLineWidth columns =
+  intercalate "\n" . map (format 0 . lineToChunks) . lines
+  where
+    format _ [] = ""
+    format width ((n, w):rest)
+      | width == 0 = w ++ format (width + n) rest
+      | width' <= columns = ' ' : (w ++ format width' rest)
+      | otherwise = '\n' : (w ++ format n rest)
+      where
+        width' = width + 1 + n
 
 -- | Describes how a line of text should be printed in an error message
 data LineStyle
@@ -275,7 +362,9 @@ data PrettyErrorState = PrettyErrorState
     -- | Any remaining lines in the current file (requires a loaded file)
   , peAfter :: [String]
     -- | The current line number of the cursor in the file
-  , peLine :: !Int }
+  , peLine :: !Int
+    -- | Keeps track of which 'ErrorCategory' kinds have been seen
+  , peCategoriesSeen :: !(Set ErrorCategory) }
 
 -- | Default state with no file loaded
 peDefault :: PrettyErrorState
@@ -283,7 +372,8 @@ peDefault = PrettyErrorState
   { peCurrentFile = Nothing
   , peBefore = []
   , peAfter = error "peAfter accessed uninitialized"
-  , peLine = 0 }
+  , peLine = 0
+  , peCategoriesSeen = Set.empty }
 
 -- | Makes sure the requested file has been loaded
 setFile :: FilePath -> StateT PrettyErrorState IO ()
@@ -291,7 +381,7 @@ setFile file = do
   s <- get
   when (peCurrentFile s /= Just file) do
     contents <- lift $ readFile file
-    put PrettyErrorState
+    modify \s -> s
       { peCurrentFile = Just file
       , peBefore = []
       , peAfter = lines contents
@@ -317,6 +407,17 @@ advanceToLine startLine = do
           case peAfter s of
             []     -> ("", [])
             (x:xs) -> (x, xs)
+
+-- | Checks if an 'ErrorCategory' has not yet been seen
+unseenCategory :: ErrorCategory -> StateT PrettyErrorState IO Bool
+unseenCategory cat = do
+  s <- get
+  let seen = peCategoriesSeen s
+  if not $ Set.member cat seen then do
+    put s { peCategoriesSeen = Set.insert cat seen }
+    return True
+  else
+    return False
 
 -- | Given a starting and ending position, finds the context lines and highlighted lines
 getLineRangeAndContext :: Position -> Position -> StateT PrettyErrorState IO ([String], [String])
@@ -392,65 +493,87 @@ createMidSelection lines =
     mapMulti = map $ (,) MultilineContinue
     last2 bc@[_, _] = bc
     last2 (_:rest) = last2 rest
+    last2 _ = error "last2 called on a list with too few elements"
 
 -- | Gets the color associated with an 'ErrorKind' for highlighting the code
 errorColor :: ErrorKind -> Color
 errorColor = \case
-  Info    -> Blue
-  Warning -> Yellow
-  Error   -> Red
-  Done    -> Green
+  Info      -> Blue
+  Warning   -> Yellow
+  Error     -> Red
+  Done      -> Green
+  Explain e -> errorColor e
+  _         -> error "errorColor called with special error"
+
+-- | Prints the footer part of an error message, auto-formatting it if it starts with @\' \'@
+printMessageFooter :: ErrorKind -> String -> IO ()
+printMessageFooter errorKind errorMessage = do
+  setBoldColor $ errorColor errorKind
+  putStr tag
+  resetColor
+  putStrLn (" " ++ intercalate ("\n " ++ replicate tagLength ' ') (lines $ format errorMessage))
+  where
+    tag = "[" ++ show errorKind ++ "]"
+    tagLength = length tag
+
+    format (' ':multiline) =
+      formatLineWidth (79 - tagLength) multiline
+    format other = other
 
 -- | Formats and prints all compile errors in the set
-prettyCompileErrors :: Set CompileError -> IO ()
-prettyCompileErrors errs =
-  evalStateT (go $ Set.toList errs) peDefault
+prettyCompileErrors :: Bool -> Set CompileError -> IO ()
+prettyCompileErrors explainEnabled errs =
+  evalStateT (mapM_ go $ Set.toList errs) peDefault
   where
-    go [] = return ()
-    go (e:es) = do
-      case errorFile e of
-        Just file ->
-          case errorSpan e of
-            Just Span { spanStart, spanEnd } -> do
-              lift $ putStrLn ("\n" ++ file ++ ":" ++ show spanStart ++ ":")
-              setFile file
-              let startLine = posLine spanStart
-              (context, lines) <- getLineRangeAndContext spanStart spanEnd
-              let
-                startColumn = posColumn spanStart
-                endColumn = posColumn spanEnd
-                endLine = posLine spanEnd
-                hlAtStart = startColumn <= firstColumnOr1 (head lines)
-                contextStyledLines = createContextLines hlAtStart context
-                contextStartLine = startLine - length context
-                styledLines =
-                  if length lines == 1 then
-                    [(Underline startColumn endColumn, head lines)]
-                  else
-                    let (start, middle, end) = takeEnds lines in
-                    [(MultilineStart startColumn, start)]
-                    ++ createMidSelection middle
-                    ++ [(MultilineEnd endColumn, end)]
-              lift $ prettyLines color contextStartLine endLine $
-                trimLines $ contextStyledLines ++ styledLines
-              printFooter
-            Nothing -> do
-              s <- get
-              when (peLine s /= -1 || peCurrentFile s /= Just file) $
-                lift $ putStrLn ("\n" ++ file ++ ": ")
-              printFooter
-              put peDefault
-        Nothing -> do
-          lift $ putStrLn ""
-          printFooter
-          put peDefault
-      go es
-      where
-        color = errorColor $ errorKind e
-        printFooter = lift do
-          setBoldColor color
-          let tag = "[" ++ show (errorKind e) ++ "]"
-          putStr tag
-          resetColor
-          putStrLn (" " ++ intercalate ("\n " ++ replicate (length tag) ' ') (lines $ errorMessage e))
+    go CompileError
+      { errorFile
+      , errorSpan
+      , errorKind
+      , errorCategory
+      , errorExplain
+      , errorMessage } = do
+        case errorCategory of
+          Nothing -> return ()
+          Just cat -> do
+            unseen <- unseenCategory cat
+            when (explainEnabled && unseen) $ lift do
+              putStrLn ""
+              printMessageFooter Info $ getExplanation cat
+        case errorFile of
+          Just file ->
+            case errorSpan of
+              Just Span { spanStart, spanEnd } -> do
+                lift $ putStrLn ("\n" ++ file ++ ":" ++ show spanStart ++ ":")
+                setFile file
+                let startLine = posLine spanStart
+                (context, lines) <- getLineRangeAndContext spanStart spanEnd
+                let
+                  startColumn = posColumn spanStart
+                  endColumn = posColumn spanEnd
+                  endLine = posLine spanEnd
+                  hlAtStart = startColumn <= firstColumnOr1 (head lines)
+                  contextStyledLines = createContextLines hlAtStart context
+                  contextStartLine = startLine - length context
+                  styledLines =
+                    if length lines == 1 then
+                      [(Underline startColumn endColumn, head lines)]
+                    else
+                      let (start, middle, end) = takeEnds lines in
+                      [(MultilineStart startColumn, start)]
+                      ++ createMidSelection middle
+                      ++ [(MultilineEnd endColumn, end)]
+                lift $ prettyLines (errorColor errorKind) contextStartLine endLine $
+                  trimLines $ contextStyledLines ++ styledLines
+              Nothing -> do
+                s <- get
+                when (peLine s /= -1 || peCurrentFile s /= Just file) $
+                  lift $ putStrLn ("\n" ++ file ++ ": ")
+          Nothing ->
+            lift $ putStrLn ""
+        lift $ printMessageFooter errorKind errorMessage
+        case errorExplain of
+          Just explain | explainEnabled -> lift do
+            putStrLn ""
+            printMessageFooter (Explain errorKind) explain
+          _ -> return ()
 

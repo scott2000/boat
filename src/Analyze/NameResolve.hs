@@ -3,6 +3,7 @@ module Analyze.NameResolve where
 
 import Utility
 
+import Data.Char
 import Data.List
 import Data.Foldable
 import Data.Map.Strict (Map)
@@ -11,6 +12,8 @@ import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IntMap
 import Data.Set (Set)
 import qualified Data.Set as Set
+
+import Text.EditDistance
 
 import Control.Monad.Reader
 import Control.Monad.State.Strict
@@ -27,22 +30,39 @@ data Explicitness
 -- | A map of names in scope to the specific item they refer to, or to a set of ambiguous paths
 type NameSet mark = Map Name (Either (Set Path) (Path, Item, Explicitness, mark))
 
+-- | A unique identifier for parts of a use declaration
+type ImportId = Int
+
+-- | A class for possible marks for an import
+class Eq mark => ImportMark mark where
+  -- | An 'ImportId' that is untracked
+  hiddenImport :: mark
+
+instance ImportMark () where
+  hiddenImport = ()
+
+instance ImportMark ImportId where
+  hiddenImport = -1
+
 -- | Records the names visible in the current scope
 data Names = Names
   { -- | Names that were directly imported as the final name in a dot-separated path
     finalNames :: NameSet ImportId
     -- | Other names that can only be used as modules and take lower precedence for resolution
-  , otherNames :: NameSet () }
+  , otherNames :: NameSet ()
+    -- | Local identifiers bound by patterns or as parameters for a data type
+  , localNames :: Set String}
   deriving Show
 
 -- | A scope with no names present
 defaultNames :: Names
 defaultNames = Names
   { finalNames = Map.empty
-  , otherNames = Map.empty }
+  , otherNames = Map.empty
+  , localNames = Set.empty }
 
 -- | Adds a name associated with an item to a 'NameSet'
-addName :: Explicitness -> mark -> Path -> (Name, Item) -> NameSet mark -> NameSet mark
+addName :: ImportMark mark => Explicitness -> mark -> Path -> (Name, Item) -> NameSet mark -> NameSet mark
 addName exp id path (name, item) s =
   if Map.member name s then
     Map.adjust collide name s
@@ -55,19 +75,31 @@ addName exp id path (name, item) s =
         Left paths
           | path `elem` paths -> Left paths
           | otherwise         -> Left $ Set.insert path paths
-        Right (oldPath, oldItem, oldExp, _) ->
+        Right (oldPath, oldItem, oldExp, oldId) ->
           if path == oldPath && item == oldItem then
-            -- The only time a new import should take precedence over an older one is if the new one is implicit and
-            -- the old one was explicit. This helps minimize the complexity of import statements.
-            case (exp, oldExp) of
-              (Implicit, Explicit) -> new
-              _ -> old
+            -- If one of the imports is hidden but not the other one, prefer the one that is hidden so that
+            -- non-hidden imports will emit the unused import warnings that are silenced by the hidden ones.
+            case (id == hiddenImport, oldId == hiddenImport) of
+              (True, False) -> new
+              (False, True) -> old
+              _ ->
+                -- The only time a new import should take precedence over an older one is if the new one is
+                -- implicit and the old one was explicit. This helps minimize the complexity of import statements.
+                case (exp, oldExp) of
+                  (Implicit, Explicit) -> new
+                  _ -> old
           else
             Left $ Set.insert path $ Set.singleton oldPath
 
 -- | Updates the names present in a scope
 withNames :: Names -> NR a -> NR a
 withNames names nr = lift $ runReaderT nr names
+
+-- | Adds a set of local variables in a scope
+withLocals :: [String] -> NR a -> NR a
+withLocals locals nr = do
+  names <- ask
+  withNames (names { localNames = foldr Set.insert (localNames names) locals }) nr
 
 -- | An item is anything that has a name
 data Item = Item
@@ -216,13 +248,6 @@ nameTableEntry name = Map.lookup name . getNameTable
 nameTableMember :: Name -> NameTable -> Bool
 nameTableMember name = Map.member name . getNameTable
 
--- | A unique identifier for parts of a use declaration
-type ImportId = Int
-
--- | An 'ImportId' that is untracked
-hiddenImport :: ImportId
-hiddenImport = -1
-
 -- | State information that is kept while resolving declarations
 data NameState = NameState
   { -- | Contains all resolved declarations
@@ -269,7 +294,7 @@ addUse path (file :/: useWithMeta) nr =
     Meta { unmeta = UseAny, metaSpan = Just span } -> do
       -- The span is required here because the automatic `use _` doesn't have a span
       -- and we only want to catch imports made by the programmer
-      addError CompileError
+      addError compileError
         { errorFile = Just file
         , errorSpan = Just span
         , errorKind = Warning
@@ -278,7 +303,7 @@ addUse path (file :/: useWithMeta) nr =
     Meta { unmeta = use, metaSpan } -> do
       case use of
         UseModule name (UseAll []) ->
-          addError CompileError
+          addError compileError
             { errorFile = Just file
             , errorSpan = metaSpan
             , errorKind = Warning
@@ -319,10 +344,9 @@ addUse path (file :/: useWithMeta) nr =
               in
                 withNames names' $ add (path .|. name) sub rest nr
             _ -> do
-              addError CompileError
+              addError compileError
                 { errorFile = Just file
                 , errorSpan = metaSpan
-                , errorKind = Error
                 , errorMessage = "`" ++ show path ++ "` does not contain a module named `" ++ show name ++ "`" }
               nr
         UseModule Meta { unmeta = name, metaSpan } (UseAll rest) ->
@@ -344,26 +368,24 @@ addUse path (file :/: useWithMeta) nr =
                     Item { itemSub = Just sub } ->
                       foldr (add subPath sub) nr rest
                     _ -> do
-                      addError CompileError
+                      addError compileError
                         { errorFile = Just file
                         , errorSpan = metaSpan
-                        , errorKind = Error
                         , errorMessage =
                           "cannot import items from `" ++ show subPath ++ "` because it is not a module" }
                       nr
             Nothing -> do
-              addError CompileError
+              addError compileError
                 { errorFile = Just file
                 , errorSpan = metaSpan
-                , errorKind = Error
                 , errorMessage = "`" ++ show path ++ "` does not contain any items named `" ++ show name ++ "`" }
               -- Add a dummy item as if it did exist to suppress further errors
               withNames names { finalNames = addName Explicit hiddenImport path (name, anyItem) $ finalNames names } nr
 
 -- | Create a message saying where a duplicate definition can be found
-duplicateMessage :: (Meta Path, InFile a) -> String -> String
-duplicateMessage (otherPath, otherFile :/: _) baseMessage =
-  case metaSpan otherPath of
+duplicateMessage :: (Maybe Span, InFile a) -> String -> String
+duplicateMessage (metaSpan, otherFile :/: _) baseMessage =
+  case metaSpan of
     Just otherSpan ->
       baseMessage ++ "(other at " ++ otherFile ++ ":" ++ show otherSpan ++ ")"
     Nothing ->
@@ -376,19 +398,18 @@ insertEffect path decl = do
   let
     decls = allDecls s
     effects = allEffects decls
-  case Map.lookupIndex path effects of
-    Just i ->
-      addError CompileError
+  case pathMapLookup' (unmeta path) effects of
+    Just oldEntry ->
+      addError compileError
         { errorFile = Just $ getFile decl
         , errorSpan = metaSpan path
-        , errorKind = Error
         , errorMessage =
-          duplicateMessage (Map.elemAt i effects)
+          duplicateMessage oldEntry
             ("duplicate effect declaration for path `" ++ show path ++ "`\n") }
     Nothing ->
       put s
         { allDecls = decls
-          { allEffects = Map.insert path decl effects } }
+          { allEffects = pathMapInsert path decl effects } }
 
 -- | Resolve a 'DataDecl'
 insertData :: Meta Path -> InFile DataDecl -> NR ()
@@ -397,19 +418,18 @@ insertData path decl = do
   let
     decls = allDecls s
     datas = allDatas decls
-  case Map.lookupIndex path datas of
-    Just i ->
-      addError CompileError
+  case pathMapLookup' (unmeta path) datas of
+    Just oldEntry ->
+      addError compileError
         { errorFile = Just $ getFile decl
         , errorSpan = metaSpan path
-        , errorKind = Error
         , errorMessage =
-          duplicateMessage (Map.elemAt i datas)
+          duplicateMessage oldEntry
             ("duplicate data type declaration for path `" ++ show path ++ "`\n") }
     Nothing ->
       put s
         { allDecls = decls
-          { allDatas = Map.insert path decl datas } }
+          { allDatas = pathMapInsert path decl datas } }
 
 -- | Resolve a @LetDecl@
 insertLet :: Meta Path -> InFile LetDecl -> NR ()
@@ -418,19 +438,18 @@ insertLet path decl = do
   let
     decls = allDecls s
     lets = allLets decls
-  case Map.lookupIndex path lets of
-    Just i ->
-      addError CompileError
+  case pathMapLookup' (unmeta path) lets of
+    Just oldEntry ->
+      addError compileError
         { errorFile = Just $ getFile decl
         , errorSpan = metaSpan path
-        , errorKind = Error
         , errorMessage =
-          duplicateMessage (Map.elemAt i lets)
+          duplicateMessage oldEntry
             ("duplicate let binding for path `" ++ show path ++ "`\n") }
     Nothing ->
       put s
         { allDecls = decls
-          { allLets = Map.insert path decl lets } }
+          { allLets = pathMapInsert path decl lets } }
 
 -- | Resolve an operator type declaration
 insertOpType :: Meta Path -> InFile OpTypeEnds -> NR ()
@@ -439,19 +458,18 @@ insertOpType path newOp = do
   let
     decls = allDecls s
     ops = allOpTypes decls
-  case Map.lookupIndex path ops of
-    Just i ->
-      addError CompileError
+  case pathMapLookup' (unmeta path) ops of
+    Just oldEntry ->
+      addError compileError
         { errorFile = Just $ getFile newOp
         , errorSpan = metaSpan path
-        , errorKind = Error
         , errorMessage =
-          duplicateMessage (Map.elemAt i ops)
+          duplicateMessage oldEntry
             ("duplicate operator type declaration for path `" ++ show path ++ "`\n") }
     Nothing ->
       put s
         { allDecls = decls
-          { allOpTypes = Map.insert path newOp ops } }
+          { allOpTypes = pathMapInsert path newOp ops } }
 
 -- | Resolve an 'OpDecl'
 insertOpDecl :: Meta Path -> InFile OpDecl -> NR ()
@@ -460,19 +478,18 @@ insertOpDecl path decl = do
   let
     decls = allDecls s
     ops = allOpDecls decls
-  case Map.lookupIndex path ops of
-    Just i ->
-      addError CompileError
+  case pathMapLookup' (unmeta path) ops of
+    Just oldEntry ->
+      addError compileError
         { errorFile = Just $ getFile decl
         , errorSpan = metaSpan path
-        , errorKind = Error
         , errorMessage =
-          duplicateMessage (Map.elemAt i ops)
+          duplicateMessage oldEntry
             ("duplicate operator declaration for path `" ++ show path ++ "`\n") }
     Nothing ->
       put s
         { allDecls = decls
-          { allOpDecls = Map.insert path decl ops } }
+          { allOpDecls = pathMapInsert path decl ops } }
 
 -- | Resolve all names in a set of modules and return a flattened map of declarations
 nameResolve :: [Module] -> CompileIO AllDecls
@@ -490,7 +507,7 @@ nameResolveAll path mods = do
   forM_ mods $ nameResolveEach path
   unusedIds <- gets unusedIds
   forM_ (IntMap.elems unusedIds) \(file :/: span) ->
-    addError CompileError
+    addError compileError
       { errorFile = Just file
       , errorSpan = Just span
       , errorKind = Warning
@@ -514,11 +531,16 @@ nameResolveEach path mod =
 
     nameResolveOpType (file :/: ops) =
       case ops of
-        OpLink path : [] ->
-          addError CompileError
+        [OpLink path] ->
+          addError compileError
             { errorFile = Just file
             , errorSpan = metaSpan path
             , errorKind = Warning
+            , errorExplain = Just $
+              " In an operator type delcaration, parentheses have a special meaning; they indicate that" ++
+              " you are only listing that operator type to define the relative precedence of the operators" ++
+              " around it, rather than declaring a new operator type by that name. Therefore, just having" ++
+              " this on its own is useless since you aren't declaring anything new."
             , errorMessage =
               "useless operator type declaration" ++
               case unpath $ unmeta path of
@@ -538,16 +560,21 @@ nameResolveEach path mod =
             next <- getNext rest
             insertOpType ((path .|.) <$> name) (file :/: (lower, next))
             afterDeclare lower rest
-          OpLink path : _ ->
-            addError CompileError
+          OpLink path : rest -> do
+            addError compileError
               { errorFile = Just file
               , errorSpan = metaSpan path
-              , errorKind = Error
+              , errorExplain = Just $
+                " An operator type link (which does not declare a new operator type) must be followed by" ++
+                " a new operator type to declare, not another link. If you want to specify a new lower" ++
+                " precedence item, consider splitting this into a separate operator type declaration instead."
               , errorMessage =
                 "expected operator type declaration after link" ++
                 case unpath $ unmeta path of
                   [name] -> "\n(did you mean `" ++ show name ++ "`, without parentheses?)"
                   _ -> "" }
+            resolvedPath <- resMetaPath path
+            afterLink (Just resolvedPath) rest
           [] -> return ()
 
         afterDeclare lower = \case
@@ -589,17 +616,22 @@ nameResolveEach path mod =
             Just <$> (forM effect $ nameResolvePath file isEffect "effect" $ metaSpan effect)
       case super of
         Just Meta { unmeta = Core (Identifier "Pure"), metaSpan } ->
-          addError CompileError
+          addError compileError
             { errorFile = Just file
             , errorSpan = metaSpan
-            , errorKind = Error
-            , errorMessage = "effect cannot be a subtype of `Pure`, try just using `effect " ++ show name ++ "`" }
+            , errorExplain = Just $
+              " Making an effect a subtype of `Pure` is not something that makes sense, since it" ++
+              " represents the lack of side effects. If an effect were a subtype of `Pure`, it would" ++
+              " be useless since it could always be left out when specifying an effect."
+            , errorMessage =
+              "effect cannot be a subtype of `Pure`, try just using `effect " ++ show name ++ "`" }
         _ -> return ()
       insertEffect ((path .|.) <$> name) $ file :/: EffectDecl
         { effectSuper = super }
 
-    nameResolveData (name, file :/: decl) = do
-      variants <- mapM (mapM nameResolveVariant) $ dataVariants decl
+    nameResolveData (name, file :/: decl@DataDecl { dataSig = DataSig { dataEffects, dataArgs } }) = do
+      let parameters = map (unmeta . fst) dataEffects ++ map (unmeta . fst) dataArgs
+      variants <- withLocals parameters $ mapM (mapM nameResolveVariant) $ dataVariants decl
       let dataName = (path .|.) <$> name
       insertData dataName $ file :/: decl
         { dataVariants = variants }
@@ -625,7 +657,7 @@ nameResolveEach path mod =
             , letConstraints = [] }
       where
         nameResolveVariant (name, types) =
-          (,) name <$> mapM (nameResolveAfter path file) types
+          (,) name <$> mapM (nameResolveRestrictedType path file) types
 
     nameResolveLet (name, file :/: decl) = do
       body <- nameResolveAfter path file $ letBody decl
@@ -634,6 +666,8 @@ nameResolveEach path mod =
 
 -- | Resolve a single 'Path'
 nameResolvePath :: FilePath -> (Item -> Bool) -> String -> Maybe Span -> Path -> NR Path
+nameResolvePath _ _ _ _ (Path []) =
+  compilerBug "nameResolvePath called on empty path"
 nameResolvePath file check kind span path@(Path parts@(head:rest)) = do
   nt <- gets nameTable
   case nameTableEntry head nt of
@@ -689,10 +723,9 @@ nameResolvePath file check kind span path@(Path parts@(head:rest)) = do
         { unusedIds = IntMap.delete id $ unusedIds s }
 
     pathErr msg = do
-      addError CompileError
+      addError compileError
         { errorFile = Just file
         , errorSpan = span
-        , errorKind = Error
         , errorMessage = msg }
       return EmptyPath
 
@@ -705,19 +738,120 @@ nameResolvePath file check kind span path@(Path parts@(head:rest)) = do
     wrongKind path kind = pathErr $
       "`" ++ show path ++ "` is not " ++ aOrAn kind
 
-    notFound = pathErr $
-      "cannot find `" ++ show path ++ "` in scope, did you forget to " ++
-        case head of
-          Underscore _ ->
-            "define it or explicitly `use` it?\n"
-            ++ "(private items starting with '_' must be explicitly imported from other modules)"
-          _ ->
-            "`use` it?"
+    notFound = do
+      nearbyItems <- take 5 <$> getClosest head
+      case head of
+        Underscore _ ->
+          case nearbyItems of
+            [name] -> pathErr $
+              " cannot find `" ++ show path ++ "` in scope, did you mean `" ++ show name ++ "`?"
+            _ -> do
+              addError compileError
+                { errorFile = Just file
+                , errorSpan = span
+                , errorExplain = Just $
+                  " Identifiers starting with an underscore are treated specially in Boat, since they" ++
+                  " are meant to be used for private items in a module which are not part of the public" ++
+                  " interface. Specifically, they are excluded by default when importing items from another" ++
+                  " module using `use`. If you want to access an item starting with an underscore that isn't" ++
+                  " in the current module, you must explicitly add it to the import list rather than using `_`."
+                , errorMessage =
+                  " cannot find `" ++ show path ++ "` in scope, did you forget to define it" ++
+                  " or explicitly `use` it?\n" ++
+                  " (private items starting with '_' must be explicitly imported from other modules)" }
+              return EmptyPath
+        _ -> pathErr $
+          " cannot find `" ++ show path ++ "` in scope, " ++
+          suggestionMessage "did you forget to `use` it?" nearbyItems
+
+-- | Finds items in scope for which the requested name might be a typo
+getClosest :: Name -> NR [Name]
+getClosest target
+  | length normalizedTarget < 3 =
+    -- If the identifier is short, the suggestions are unlikely to be very helpful
+    return []
+  | otherwise = do
+    Names { finalNames, otherNames, localNames } <- ask
+    let
+      names = Map.keysSet finalNames <> Map.keysSet otherNames <> Set.mapMonotonic Identifier localNames
+      closeNames = filter (isClose normalizedTarget) $ Set.toList names
+    -- Return the list of names sorted by non-normalized edit distance
+    return $ sortOn (levenshteinDistance defaultEditCosts (show target) . show) closeNames
+  where
+    normalizedTarget = normalizeName target
+
+-- | Checks if a name is within one edit of a requested string, after normalization
+isClose :: String -> Name -> Bool
+isClose target name =
+  restrictedDamerauLevenshteinDistance defaultEditCosts target (normalizeName name) <= 1
+
+-- | Normalizes a name to account for capitalization and underscores in identifiers
+normalizeName :: Name -> String
+normalizeName = \case
+  Identifier name -> removeUnderscoresAndCase name
+  other -> show other
+  where
+    removeUnderscoresAndCase = \case
+      [] -> []
+      ('_':rest) ->
+        removeUnderscoresAndCase rest
+      (next:rest) ->
+        toLower next : removeUnderscoresAndCase rest
+
+-- | Creates a suggestion message for similar items in scope
+suggestionMessage :: String -> [Name] -> String
+suggestionMessage defaultMessage = \case
+  [] ->
+    defaultMessage
+  [name] ->
+    "did you mean `" ++ show name ++ "`?"
+  names ->
+    defaultMessage ++ "\n(similar names in scope: " ++ intercalate ", " (map show names) ++ ")"
 
 -- | Resolve any kind of expression
 nameResolveAfter :: After a => Path -> FilePath -> Meta a -> NR (Meta a)
-nameResolveAfter basePath file = after aDefault
+nameResolveAfter basePath file =
+  after $ nameResolveAfterMap basePath file
+
+-- | Resolve a type given a list of valid type parameters
+nameResolveRestrictedType :: Path -> FilePath -> Meta Type -> NR (Meta Type)
+nameResolveRestrictedType basePath file =
+  after (nameResolveAfterMap basePath file)
+    { aType = updateType
+    , aEffect = updateEffect }
+  where
+    checkLocal span local = do
+      locals <- asks localNames
+      when (not $ local `Set.member` locals) do
+        nearbyItems <- take 5 <$> getClosest (Identifier local)
+        addError compileError
+          { errorFile = Just file
+          , errorSpan = span
+          , errorMessage =
+            " cannot find parameter named `" ++ local ++ "`, " ++
+            suggestionMessage "did you forget to declare it?" nearbyItems }
+
+    updateType typeWithMeta = do
+      case unmeta typeWithMeta of
+        TPoly local ->
+          checkLocal (metaSpan typeWithMeta) local
+        _ ->
+          return ()
+      return typeWithMeta
+
+    updateEffect effectWithMeta = do
+      case unmeta effectWithMeta of
+        EffectPoly local ->
+          checkLocal (metaSpan effectWithMeta) local
+        _ ->
+          return ()
+      return effectWithMeta
+
+-- | A mapping that resolves all paths in an expression
+nameResolveAfterMap :: Path -> FilePath -> AfterMap NR
+nameResolveAfterMap basePath file = aDefault
   { aUseExpr = handleUseExpr
+  , aWithBindings = withLocals
   , aPath = updatePath }
   where
     handleUseExpr m use expr =

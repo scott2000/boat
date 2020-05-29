@@ -37,6 +37,19 @@ module Utility.Program
   , moduleFromSubs
   , modIsEmpty
 
+    -- * Efficient Map for Resolved Declarations
+  , ReversedPath (..)
+  , reversePath
+  , PathMap (..)
+  , pathMapEmpty
+  , pathMapLookup
+  , pathMapLookup'
+  , pathMapGet
+  , pathMapInsert
+  , pathMapInsert'
+  , pathMapEntries
+  , pathMapConvert
+
     -- * Adding Declarations to the Module
   , modAddUse
   , modAddSub
@@ -98,6 +111,64 @@ showDecl (name, decl) = showWithName (show name) decl
 showDeclMap :: (ShowWithName a, Show s) => Map s a -> [String]
 showDeclMap = map showDecl . Map.toList
 
+-- | A path with its 'Name' parts reversed for more efficient comparisons
+newtype ReversedPath = ReversedPath [Name]
+  deriving (Ord, Eq)
+
+instance Show ReversedPath where
+  show (ReversedPath names) = show $ Path $ reverse names
+
+-- | Makes a 'ReversedPath' from a 'Path'
+reversePath :: Path -> ReversedPath
+reversePath (Path names) =
+  ReversedPath $ reverse names
+
+-- | A special 'Map' with its 'Path' keys reversed for efficiency
+newtype PathMap a = PathMap
+  { unPathMap :: Map ReversedPath (Maybe Span, InFile a) }
+  deriving (Functor, Foldable, Traversable)
+
+-- | An empty 'PathMap'
+pathMapEmpty :: PathMap a
+pathMapEmpty = PathMap Map.empty
+
+-- | Finds the declaration associated with the requested path in the 'PathMap'
+pathMapLookup :: Path -> PathMap a -> Maybe (InFile a)
+pathMapLookup path =
+  fmap snd . pathMapLookup' path
+
+-- | Like 'pathMapLookup', but also gives the 'Span' of the declaration's name
+pathMapLookup' :: Path -> PathMap a -> Maybe (Maybe Span, InFile a)
+pathMapLookup' path =
+  Map.lookup (reversePath path) . unPathMap
+
+-- | Like 'pathMapLookup', but calls 'error' if the path doesn't exist
+pathMapGet :: Path -> PathMap a -> InFile a
+pathMapGet path = snd . mapGet (reversePath path) . unPathMap
+
+-- | Inserts a new declaration into the 'PathMap'
+pathMapInsert :: Meta Path -> InFile a -> PathMap a -> PathMap a
+pathMapInsert Meta { unmeta = path, metaSpan } decl =
+  pathMapInsert' (reversePath path) (metaSpan, decl)
+
+-- | Like 'pathMapInsert', but uses the internal representation of the 'PathMap'
+pathMapInsert' :: ReversedPath -> (Maybe Span, InFile a) -> PathMap a -> PathMap a
+pathMapInsert' path decl =
+  PathMap . Map.insert path decl . unPathMap
+
+-- | Gets a list of all of the entries in the 'PathMap'
+pathMapEntries :: PathMap a -> [(Meta Path, InFile a)]
+pathMapEntries = map pathMapConvert . Map.toList . unPathMap
+
+-- | Converts the internal representation of the 'PathMap' into a more usable one
+pathMapConvert :: (ReversedPath, (Maybe Span, InFile a)) -> (Meta Path, InFile a)
+pathMapConvert (ReversedPath names, (span, decl)) =
+  ((meta $ Path $ reverse names) { metaSpan = span }, decl)
+
+-- | A version of @showDeclMap@ specialized to a 'PathMap'
+showPathMap :: ShowWithName a => PathMap a -> [String]
+showPathMap = map showDecl . pathMapEntries
+
 -- | Represents the upper and lower bound for the precedence of an operator type
 type OpTypeEnds = (Maybe (Meta Path), Maybe (Meta Path))
 
@@ -106,20 +177,20 @@ type AllDecls = AllDeclsWith ()
 
 -- | A collection of all declarations in a package by absolute path (with some type information)
 data AllDeclsWith ty = AllDecls
-  { allOpTypes :: !(Map (Meta Path) (InFile OpTypeEnds))
-  , allOpDecls :: !(Map (Meta Path) (InFile OpDecl))
-  , allEffects :: !(Map (Meta Path) (InFile EffectDecl))
-  , allDatas :: !(Map (Meta Path) (InFile DataDecl))
-  , allLets :: !(Map (Meta Path) (InFile (LetDeclWith ty))) }
+  { allOpTypes :: !(PathMap OpTypeEnds)
+  , allOpDecls :: !(PathMap OpDecl)
+  , allEffects :: !(PathMap EffectDecl)
+  , allDatas :: !(PathMap DataDecl)
+  , allLets :: !(PathMap (LetDeclWith ty)) }
 
 instance Show AllDecls where
   show AllDecls { allOpTypes, allOpDecls, allEffects, allDatas, allLets } =
     intercalate "\n" $ concat
-      [ map showOpType $ Map.toList allOpTypes
-      , showDeclMap allOpDecls
-      , showDeclMap allEffects
-      , showDeclMap allDatas
-      , showDeclMap allLets ]
+      [ map showOpType $ pathMapEntries allOpTypes
+      , showPathMap allOpDecls
+      , showPathMap allEffects
+      , showPathMap allDatas
+      , showPathMap allLets ]
     where
       showOpType (path, _ :/: (left, right)) =
         "operator type " ++ leftStr ++ show path ++ rightStr
@@ -136,11 +207,11 @@ instance Show AllDecls where
 -- | An empty collection of declarations
 emptyDecls :: AllDecls
 emptyDecls = AllDecls
-  { allOpTypes = Map.empty
-  , allOpDecls = Map.empty
-  , allEffects = Map.empty
-  , allDatas = Map.empty
-  , allLets = Map.empty }
+  { allOpTypes = pathMapEmpty
+  , allOpDecls = pathMapEmpty
+  , allEffects = pathMapEmpty
+  , allDatas = pathMapEmpty
+  , allLets = pathMapEmpty }
 
 -- | A direct representation of a parsed module that hasn't been flattened yet
 data Module = Module
@@ -286,10 +357,9 @@ modAddOpDecls names op path mod = do
     newOps = names <&> \name -> (name, opDecl)
   forM_ names \name ->
     when (Map.member name oldOps) $
-      addError CompileError
+      addError compileError
         { errorFile = Just path
         , errorSpan = metaSpan name
-        , errorKind = Error
         , errorMessage = "duplicate operator declaration for name `" ++ show name ++ "`" }
   return mod { modOpDecls = Map.union (Map.fromList newOps) oldOps }
 
@@ -318,16 +388,14 @@ modAddEffect name decl path mod = do
     oldEffects = modEffects mod
     newDecl = path :/: decl
   when (unmeta name == Identifier "Pure") $
-    addError CompileError
+    addError compileError
       { errorFile = Just path
       , errorSpan = metaSpan name
-      , errorKind = Error
       , errorMessage = "effect name cannot be `Pure` because this is a special item" }
   when (Map.member name oldEffects) $
-    addError CompileError
+    addError compileError
       { errorFile = Just path
       , errorSpan = metaSpan name
-      , errorKind = Error
       , errorMessage = "duplicate effect declaration for name `" ++ show name ++ "`" }
   return mod { modEffects = Map.insert name newDecl oldEffects }
 
@@ -368,10 +436,9 @@ modAddLet name decl path mod = do
     oldLets = modLets mod
     newDecl = path :/: decl
   when (Map.member name oldLets) $
-    addError CompileError
+    addError compileError
       { errorFile = Just path
       , errorSpan = metaSpan name
-      , errorKind = Error
       , errorMessage = "duplicate let binding for name `" ++ show name ++ "`" }
   return mod { modLets = Map.insert name newDecl oldLets }
 
@@ -400,6 +467,7 @@ instance Semigroup TypeVariance where
   x <> VOutput = x
   _ <> VInvariant = VInvariant
   VInput <> VInput = VOutput
+  _ <> _ = error "(<>) called with VAnon"
 
 -- | The symbol used to represent 'VOutput'
 pattern SymbolOutput :: Path
@@ -474,10 +542,9 @@ modAddData name decl path mod = do
     oldDatas = modDatas mod
     newDecl = path :/: decl
   when (Map.member name oldDatas) $
-    addError CompileError
+    addError compileError
       { errorFile = Just path
       , errorSpan = metaSpan name
-      , errorKind = Error
       , errorMessage = "duplicate data type declaration for name `" ++ show name ++ "`" }
   return mod { modDatas = Map.insert name newDecl oldDatas }
 
@@ -536,10 +603,10 @@ dataArgFromType file typeWithMeta =
   -- It doesn't matter what is returned on error since it won't be needed until the next phase anyway
   case reduceApplyNoInfix typeWithMeta of
     Left path -> do
-      addError CompileError
+      addError compileError
         { errorFile = Just file
         , errorSpan = metaSpan path
-        , errorKind = Error
+        , errorCategory = Just ECInferVariance
         , errorMessage =
           "type parameter variances must use prefix notation" }
       return $ DataArg VInvariant []
@@ -549,10 +616,10 @@ dataArgFromType file typeWithMeta =
         TNamed [] (DefaultMeta SymbolInput) -> return VInput
         TAnon _ -> return VInvariant
         _ -> do
-          addError CompileError
+          addError compileError
             { errorFile = Just file
             , errorSpan = baseSpan
-            , errorKind = Error
+            , errorCategory = Just ECInferVariance
             , errorMessage =
               "expected one of (+), (-), or _ for higher-kinded type parameter variance" }
           return VInvariant
@@ -569,20 +636,18 @@ namedDataArgFromType :: AddError m
 namedDataArgFromType file typeWithMeta =
   case reduceApplyNoInfix typeWithMeta of
     Left path -> do
-      addError CompileError
+      addError compileError
         { errorFile = Just file
         , errorSpan = metaSpan path
-        , errorKind = Error
         , errorMessage =
           "expected a type parameter, not an infix operator" }
       return Nothing
     Right (ReducedApp Meta { unmeta = baseTy, metaSpan = baseSpan } args) -> do
       let
         err msg = do
-          addError CompileError
+          addError compileError
             { errorFile = Just file
             , errorSpan = baseSpan
-            , errorKind = Error
             , errorMessage = msg }
           return Nothing
       nameAndVariance <- extractParameter err baseSpan "type" $
@@ -605,10 +670,9 @@ namedDataSigFromType :: AddError m
 namedDataSigFromType file typeWithMeta =
   case reduceApply typeWithMeta of
     Left (_, b) -> do
-      addError CompileError
+      addError compileError
         { errorFile = Just file
         , errorSpan = metaSpan b
-        , errorKind = Error
         , errorMessage =
           "expected only a single operator for data type delcaration, found multiple instead" }
       -- The data signature doesn't matter since the name is invalid anyway
@@ -617,10 +681,9 @@ namedDataSigFromType file typeWithMeta =
       (name, effs) <-
         let
           err span msg = do
-            addError CompileError
+            addError compileError
               { errorFile = Just file
               , errorSpan = span
-              , errorKind = Error
               , errorMessage = msg }
             return (Nothing, [])
         in
@@ -642,10 +705,9 @@ namedDataSigFromType file typeWithMeta =
       effs <- forM effs \effSet ->
         let
           err msg = do
-            addError CompileError
+            addError compileError
               { errorFile = Just file
               , errorSpan = metaSpan effSet
-              , errorKind = Error
               , errorMessage = msg }
             return Nothing
         in
@@ -669,10 +731,9 @@ variantFromType :: AddError m
 variantFromType file typeWithMeta =
   case reduceApply typeWithMeta of
     Left (a, b) -> do
-      addError CompileError
+      addError compileError
         { errorFile = Just file
         , errorSpan = metaSpan b
-        , errorKind = Error
         , errorMessage =
           if a == b then
             "cannot resolve asoociativity of `" ++ show b ++ "` without explicit parentheses"
@@ -683,10 +744,9 @@ variantFromType file typeWithMeta =
     Right (ReducedApp baseTy args) ->
       let
         err msg = do
-          addError CompileError
+          addError compileError
             { errorFile = Just file
             , errorSpan = metaSpan baseTy
-            , errorKind = Error
             , errorMessage = msg }
           return Nothing
       in
@@ -694,10 +754,9 @@ variantFromType file typeWithMeta =
           TNamed _ Meta { unmeta = Core (Operator "->") } ->
             err "data type variant name cannot use (->) in an infix position, this syntax is reserved for types"
           TNamed (eff : _) _ -> do
-            addError CompileError
+            addError compileError
               { errorFile = Just file
               , errorSpan = metaSpan eff
-              , errorKind = Error
               , errorMessage = "data type variants cannot take effect arguments" }
             return Nothing
           TNamed [] pathWithMeta ->

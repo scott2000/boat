@@ -64,6 +64,7 @@ module Utility.AST
 import Utility.Basics
 
 import Data.List
+import Data.Maybe
 
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -145,6 +146,8 @@ data AfterMap m = AfterMap
   { aExpr :: Meta Expr -> m (Meta Expr)
     -- | A special case used for transforming a use expression
   , aUseExpr :: AfterMap m -> Meta UseModule -> Meta Expr -> m Expr
+    -- | Allow the introduction of local variables in expressions
+  , aWithBindings :: [String] -> m (Meta Expr) -> m (Meta Expr)
   , aPattern :: Meta Pattern -> m (Meta Pattern)
   , aType :: Meta Type -> m (Meta Type)
   , aEffect :: Meta Effect -> m (Meta Effect)
@@ -156,6 +159,7 @@ aDefault :: Monad m => AfterMap m
 aDefault = AfterMap
   { aExpr = pure
   , aUseExpr = \m use expr -> EUse use <$> after m expr
+  , aWithBindings = const id
   , aPattern = pure
   , aType = pure
   , aEffect = pure
@@ -497,8 +501,11 @@ instance After Expr where
         EApp <$> after m a <*> after m b
       ESeq a b ->
         ESeq <$> after m a <*> after m b
-      ELet pat val expr ->
-        ELet <$> after m pat <*> after m val <*> after m expr
+      ELet pat val expr -> do
+        pat <- after m pat
+        val <- after m val
+        expr <- aWithBindings m (catMaybes $ bindingsForPat pat) $ after m expr
+        return $ ELet pat val expr
       EMatchIn exprs cases ->
         EMatchIn <$> mapM (after m) exprs <*> afterCases cases
       EUse use a ->
@@ -519,8 +526,10 @@ instance After Expr where
         return other
     where
       afterCases =
-        mapM \(pats, expr) ->
-          (,) <$> forM pats (after m) <*> after m expr
+        mapM \(pats, expr) -> do
+          pats <- forM pats $ after m
+          expr <- aWithBindings m (catMaybes $ concatMap bindingsForPat pats) $ after m expr
+          return (pats, expr)
 
 instance Eq ty => Eq (ExprWith ty) where
   EValue v0 == EValue v1 =

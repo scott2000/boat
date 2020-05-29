@@ -1,5 +1,3 @@
-{-# OPTIONS_GHC -Wincomplete-patterns #-}
-
 -- | Parses command-line arguments and then runs every pass in order
 module Main where
 
@@ -16,7 +14,6 @@ import Data.IORef
 import Control.Monad.State.Strict
 import Control.Exception
 import Options.Applicative as Opt
-import qualified Data.Map.Strict as Map
 
 -- | A phase of compilation (see "Parse" and "Analyze")
 data Phase
@@ -70,6 +67,9 @@ main = do
             <> long "name"
             <> metavar "PACKAGE_NAME"
             <> help "The name which will appear as the base of every path in this package")
+          <*> switch
+            (  long "explain-errors"
+            <> help "Enables extended explanations for certain compile errors")
 
 -- | Starts the compilation process by running each pass in order
 startCompile :: IORef Phase -> CompileIO ()
@@ -80,10 +80,8 @@ startCompile phase = do
   liftIO $ putStrLn ("\n" ++ intercalate "\n" (map show mods))
 
   when (null mods) $
-    addError CompileError
-      { errorFile = Nothing
-      , errorSpan = Nothing
-      , errorKind = Warning
+    addError compileError
+      { errorKind = Warning
       , errorMessage = "no code found in source files" }
 
   setPhase phase PhaseNameResolve
@@ -100,7 +98,7 @@ startCompile phase = do
   exitIfErrors
 
   liftIO $ putStrLn $ "\nInferred variances:\n"
-  liftIO $ forM_ (Map.toList $ allDatas allDecls) $
+  liftIO $ forM_ (pathMapEntries $ allDatas allDecls) $
     \(name, _ :/: DataDecl { dataSig = DataSig { dataEffects, dataArgs } }) -> putStrLn $
       show name ++ effectSuffixStr (map (show . snd) dataEffects) ++ unwords ("" : map (show . snd) dataArgs)
 
