@@ -74,7 +74,7 @@ parseAll path = do
             { errorFile = Just path
             , errorKind = Warning
             , errorMessage =
-              "folder contains .boat files but doesn't have a valid module name"
+              "directory contains .boat files but doesn't have a valid module name"
               ++ "\n(" ++ err ++ ")" }
         return defaultModule
   else if isBoatExtension path then

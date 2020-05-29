@@ -167,22 +167,6 @@ convertParseErrors bundle =
               NonEmpty.length ts
             _ -> 1
 
--- | Checks if a given string is a keyword
-isKeyword :: String -> Bool
-isKeyword w = w `elem`
-  [ "_"
-  , "use"
-  , "mod"
-  , "operator"
-  , "type"
-  , "effect"
-  , "data"
-  , "let"
-  , "with"
-  , "fun"
-  , "match"
-  , "unary" ]
-
 -- | Checks if a character is valid at the start of an identifier
 isIdentFirst :: Char -> Bool
 isIdentFirst x = (isAlpha x || x == '_') && isAscii x

@@ -39,6 +39,7 @@ module Utility.Basics
     -- * Formatting and Capitalization
   , plural
   , aOrAn
+  , isKeyword
   , isCap
   , capFirst
   , lowerFirst
@@ -132,6 +133,8 @@ parseIdentIn kind requireUpper name =
         Left (kind ++ " can only contain alphanumeric ascii characters and underscores")
       else if isDigit first then
         Left (kind ++ " cannot start with a number")
+      else if isKeyword name then
+        Left (kind ++ " cannot be a keyword")
       else if requireUpper then
         if first == '_' then
           let
@@ -142,7 +145,7 @@ parseIdentIn kind requireUpper name =
                 _ -> ""
           in
             Left (kind ++ " cannot start with an underscore" ++ suggestion)
-        else if requireUpper && not (isUpper first) then
+        else if not $ isUpper first then
           Left (kind ++ " must start with an uppercase letter, did you mean `" ++ capFirst name ++ "`?")
         else
           Right $ Identifier name
@@ -399,6 +402,26 @@ aOrAn str = article ++ str
       'o' -> True
       'u' -> True
       _ -> False
+
+-- | A set of strings that are considered keywords
+keywords :: Set String
+keywords = Set.fromList
+  [ "_"
+  , "use"
+  , "mod"
+  , "operator"
+  , "type"
+  , "effect"
+  , "data"
+  , "let"
+  , "with"
+  , "fun"
+  , "match"
+  , "unary" ]
+
+-- | Checks if a given string is a keyword
+isKeyword :: String -> Bool
+isKeyword w = w `Set.member` keywords
 
 -- | Checks if a character is considered uppercase (A-Z or _)
 isCap :: Char -> Bool
