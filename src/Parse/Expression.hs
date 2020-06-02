@@ -394,6 +394,8 @@ parseLet :: Parser Expr
 parseLet = do
   keyword "let"
   pat <- blockOf parserExpectEnd
+  file <- getFilePath
+  assertUniqueBindings file [pat]
   nbsc >> specialOp Assignment
   val <- blockOf parser
   lineBreak
@@ -426,6 +428,8 @@ matchCases = someBetweenLines matchCase
 matchCase :: Parser MatchCase
 matchCase = do
   pats <- someUntil (specialOp FunctionArrow) parserNoSpace
+  file <- getFilePath
+  assertUniqueBindings file pats
   expr <- withBindings (pats >>= bindingsForPat) $ blockOf parser
   return (pats, expr)
 

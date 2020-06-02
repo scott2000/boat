@@ -2,6 +2,7 @@
 module Utility.Basics
   ( -- * Paths and Names
     Name (..)
+  , getNameString
   , parsePackageName
   , parseModuleName
   , pattern Underscore
@@ -81,6 +82,13 @@ instance Show Name where
     Identifier ident -> ident
     Operator op -> "(" ++ op ++ ")"
     Unary u -> "(unary " ++ u ++ ")"
+
+-- | Gets the string part of a 'Name', ignoring the kind
+getNameString :: Name -> String
+getNameString = \case
+  Identifier ident -> ident
+  Operator op -> op
+  Unary u -> u
 
 -- | A path consisting of a series of names separated by dots
 newtype Path = Path
@@ -341,14 +349,18 @@ type AddError = MonadCompile
 addError :: AddError m => CompileError -> m ()
 addError err =
   liftCompile $ modify \s ->
-    let count = compileErrorCount s in
-    case errorKind err of
-      SpecialError SecondaryError
-        | hasPrimaryError count -> s
-        | otherwise ->
-          add err { errorKind = Error } count { errorCount = errorCount count + 1 } s
-      kind ->
-        add err (updateErrorCount kind count) s
+    if Set.member err $ compileErrors s then
+      -- Don't try to insert the error if there is already an exact duplicate of the error
+      s
+    else
+      let count = compileErrorCount s in
+      case errorKind err of
+        SpecialError SecondaryError
+          | hasPrimaryError count -> s
+          | otherwise ->
+            add err { errorKind = Error } count { errorCount = errorCount count + 1 } s
+        kind ->
+          add err (updateErrorCount kind count) s
   where
     add err count s = s
       { compileErrors = Set.insert err $ compileErrors s

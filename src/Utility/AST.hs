@@ -21,6 +21,7 @@ module Utility.AST
   , Pattern
   , PatternWith (..)
   , bindingsForPat
+  , assertUniqueBindings
   , Type (..)
   , EffectSet (..)
   , Effect (..)
@@ -65,11 +66,11 @@ import Utility.Basics
 
 import Data.List
 import Data.Maybe
+import Control.Monad.State.Strict
+import Control.Monad.Trans.Maybe
 
 import Data.Set (Set)
 import qualified Data.Set as Set
-
-import Control.Monad.Identity
 
 -- | Stores a value with optional span metadata
 type Meta = MetaWith ()
@@ -668,11 +669,48 @@ bindingsForPat pat =
     PUnit -> []
     PAny -> []
     PBind b -> [b]
-    PCons _ pats -> pats >>= bindingsForPat
-    PTypeAscribe pat _ -> bindingsForPat pat
-    PParen pat -> bindingsForPat pat
-    PUnaryOp _ pat -> bindingsForPat pat
-    PBinOp _ lhs rhs -> bindingsForPat lhs ++ bindingsForPat rhs
+    PCons _ pats ->
+      pats >>= bindingsForPat
+    PTypeAscribe pat _ ->
+      bindingsForPat pat
+    PParen pat ->
+      bindingsForPat pat
+    PUnaryOp _ pat ->
+      bindingsForPat pat
+    PBinOp _ lhs rhs ->
+      bindingsForPat lhs ++ bindingsForPat rhs
+
+-- | Assert that there are no duplicate bindings in a set of patterns
+assertUniqueBindings :: AddError m => FilePath -> [Meta Pattern] -> m ()
+assertUniqueBindings file pats =
+  evalStateT (void $ runMaybeT $ mapM_ check pats) Set.empty
+  where
+    check patternWithMeta =
+      case unmeta patternWithMeta of
+        PBind (Just name) -> do
+          s <- get
+          if Set.member name s then
+            MaybeT do
+              addError compileError
+                { errorFile = Just file
+                , errorSpan = metaSpan patternWithMeta
+                , errorMessage =
+                  "duplicate name binding not allowed in pattern" }
+              return Nothing
+          else
+            put $ Set.insert name s
+        PCons _ pats ->
+          mapM_ check pats
+        PTypeAscribe pat _ ->
+          check pat
+        PParen pat ->
+          check pat
+        PUnaryOp _ pat ->
+          check pat
+        PBinOp _ lhs rhs ->
+          check lhs >> check rhs
+        _ ->
+          return ()
 
 -- | Indents a block of code if it is multiline
 indent :: String -> String

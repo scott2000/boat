@@ -191,10 +191,44 @@ instance Monoid NameTable where
 coreNameTable :: NameTable
 coreNameTable = NameTable
   { getNameTable = Map.fromList
-    [ (Identifier "Core", modItem $ NameTable $ Map.fromList
-      [ (Operator "->", typeItem)
-      , (Unary "^", valueItem <> patternItem)
-      , (Identifier "Pure", effectItem) ]) ] }
+    [ ( Identifier "Core"
+      , modItem $ addModule coreModule $ NameTable $ Map.fromList
+        [ -- The (->) function arrow
+          (Operator "->", typeItem)
+          -- The (unary ^) dereferencing operator
+        , (Unary "^", valueItem <> patternItem)
+          -- The (:=) reference assignment operator
+        , (Operator ":=", valueItem)
+          -- The (<-) reference update operator
+        , (Operator "<-", valueItem) ] ) ] }
+
+-- | Definitions for certain items in the Core package which have trivial implementations
+coreModule :: Module
+coreModule = defaultModule
+  { -- operator type Assignment < Dereference
+    modOpTypes = [Generated :/:
+    [ OpDeclare $ meta assignment
+    , OpDeclare $ meta dereference ]]
+    -- operator (:=) (<-) : Assignment
+    -- operator (unary ^) : Dereference
+  , modOpDecls = Map.fromList
+    [ (meta $ Operator ":=", assignmentDecl)
+    , (meta $ Operator "<-", assignmentDecl)
+    , (meta $ Unary "^", dereferenceDecl) ]
+    -- effect Pure
+  , modEffects = Map.fromList
+    [ (meta $ Identifier "Pure", Generated :/: EffectDecl
+      { effectSuper = Nothing }) ] }
+  where
+    assignment = Identifier "Assignment"
+    dereference = Identifier "Dereference"
+
+    assignmentDecl = Generated :/: OpDecl
+      { opAssoc = ANon
+      , opType = meta $ Core assignment }
+    dereferenceDecl = Generated :/: OpDecl
+      { opAssoc = ANon
+      , opType = meta $ Core dereference }
 
 -- | Converts a set of named modules to a 'NameTable'
 toNameTable :: Map Name [Module] -> NameTable
@@ -497,6 +531,8 @@ nameResolve mods = do
 -- | Resolve a set of modules
 nameResolveAll :: Path -> [Module] -> NR ()
 nameResolveAll path mods = do
+  -- Add the core module's plain declarations
+  nameResolveEach (Path [Identifier "Core"]) coreModule
   forM_ mods $ nameResolveEach path
   unusedIds <- gets unusedIds
   forM_ (IntMap.elems unusedIds) \(file :/: span) ->
@@ -539,7 +575,7 @@ nameResolveEach path mod =
                 _ -> "" }
         OpLink path : rest -> do
           resolvedPath <- resMetaPath path
-          afterLink (Just resolvedPath) rest
+          afterLink resolvedPath rest
         other ->
           afterDeclare Nothing other
       where
@@ -549,8 +585,8 @@ nameResolveEach path mod =
         afterLink lower = \case
           OpDeclare name : rest -> do
             next <- getNext rest
-            insertOpType ((path .|.) <$> name) (file :/: (lower, next))
-            afterDeclare lower rest
+            insertOpType ((path .|.) <$> name) (file :/: (Just lower, next))
+            afterDeclare (Just lower) rest
           OpLink path : rest -> do
             addError compileError
               { errorFile = Just file
@@ -565,7 +601,7 @@ nameResolveEach path mod =
                   [name] -> "\n(did you mean `" ++ show name ++ "`, without parentheses?)"
                   _ -> "" }
             resolvedPath <- resMetaPath path
-            afterLink (Just resolvedPath) rest
+            afterLink resolvedPath rest
           [] -> return ()
 
         afterDeclare lower = \case
@@ -575,7 +611,7 @@ nameResolveEach path mod =
             afterDeclare lower rest
           OpLink path : rest -> do
             resolvedPath <- resMetaPath path
-            afterLink (Just resolvedPath) rest
+            afterLink resolvedPath rest
           [] -> return ()
 
         getNext = \case
@@ -764,17 +800,24 @@ getClosest target
   | otherwise = do
     Names { finalNames, otherNames, localNames } <- ask
     let
-      names = Map.keysSet finalNames <> Map.keysSet otherNames <> Set.mapMonotonic Identifier localNames
-      closeNames = filter (isClose normalizedTarget) $ Set.toList names
+      -- Get a set of all names that are in scope
+      names =
+        Map.keysSet finalNames
+        <> Map.keysSet otherNames
+        <> Set.mapMonotonic Identifier localNames
+      -- Allow more differences in longer names (ceil (length/5))
+      maxDiff = (4 + length (getNameString target)) `div` 5
+      -- Find all of the names within the range of acceptable differences
+      closeNames = filter (isClose normalizedTarget maxDiff) $ Set.toList names
     -- Return the list of names sorted by non-normalized edit distance
     return $ sortOn (levenshteinDistance defaultEditCosts (show target) . show) closeNames
   where
     normalizedTarget = normalizeName target
 
--- | Checks if a name is within one edit of a requested string, after normalization
-isClose :: String -> Name -> Bool
-isClose target name =
-  restrictedDamerauLevenshteinDistance defaultEditCosts target (normalizeName name) <= 1
+-- | Checks if a name is within some number of edits of a requested string (after normalization)
+isClose :: String -> Int -> Name -> Bool
+isClose target maxDiff name =
+  restrictedDamerauLevenshteinDistance defaultEditCosts target (normalizeName name) <= maxDiff
 
 -- | Normalizes a name to account for capitalization and underscores in identifiers
 normalizeName :: Name -> String
