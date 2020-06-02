@@ -73,8 +73,9 @@ addName exp id path (name, item) s =
         Left paths
           | path `elem` paths -> Left paths
           | otherwise         -> Left $ Set.insert path paths
-        Right (oldPath, oldItem, oldExp, oldId) ->
-          if path == oldPath && item == oldItem then
+        Right (oldPath, _, oldExp, oldId) ->
+          -- It isn't necessary to compare the items if they have the same absolute path
+          if path == oldPath then
             -- If one of the imports is hidden but not the other one, prefer the one that is hidden so that
             -- non-hidden imports will emit the unused import warnings that are silenced by the hidden ones.
             case (id == hiddenImport, oldId == hiddenImport) of
@@ -107,7 +108,6 @@ data Item = Item
   , isEffect :: Bool
   , isPattern :: Bool
   , isOperatorType :: Bool }
-  deriving Eq
 
 instance Semigroup Item where
   a <> b = Item
@@ -178,7 +178,6 @@ anyItem = Item
 -- | A mapping from names to items
 newtype NameTable = NameTable
   { getNameTable :: Map Name Item }
-  deriving Eq
 
 instance Semigroup NameTable where
   NameTable a <> NameTable b =
@@ -194,12 +193,8 @@ coreNameTable = NameTable
   { getNameTable = Map.fromList
     [ (Identifier "Core", modItem $ NameTable $ Map.fromList
       [ (Operator "->", typeItem)
+      , (Unary "^", valueItem <> patternItem)
       , (Identifier "Pure", effectItem) ]) ] }
-
--- | The 'UseModule' to be used to import common items from Core
-coreUse :: UseModule
-coreUse =
-  UseModule (meta $ Identifier "Core") $ UseAll [meta UseAny]
 
 -- | Converts a set of named modules to a 'NameTable'
 toNameTable :: Map Name [Module] -> NameTable
@@ -514,9 +509,7 @@ nameResolveAll path mods = do
 -- | Resolve a single 'Module'
 nameResolveEach :: Path -> Module -> NR ()
 nameResolveEach path mod =
-  addUse path (Generated :/: meta UseAny)
-    $ addUse path (Generated :/: meta coreUse)
-    $ foldl' (flip (addUse path)) go (modUses mod)
+  foldl' (flip (addUse path)) go (modUses mod)
   where
     go = do
       forM_ (Map.toList $ modSubs mod) \(name, mods) ->

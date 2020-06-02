@@ -32,7 +32,7 @@ parseFile path = do
       return ()
     _ ->
       fail "expected unindented top-level items for module"
-  parseModule defaultModule
+  moduleAddCoreImports . moduleAddLocalImports <$> parseModule defaultModule
   where
     parseModule m = do
       m <-
@@ -53,7 +53,7 @@ parseFile path = do
           name <- nbsc >> parseName
           nbsc >> specialOp Assignment
           sub <- blockOf $ parseModule defaultModule
-          return $ modAddSub name sub m
+          return $ modAddSub name (moduleAddLocalImports sub) m
 
         parseOperator = do
           keyword "operator"

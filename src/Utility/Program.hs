@@ -36,6 +36,8 @@ module Utility.Program
   , defaultModule
   , moduleFromSubs
   , modIsEmpty
+  , moduleAddLocalImports
+  , moduleAddCoreImports
 
     -- * Efficient Map for Resolved Declarations
   , ReversedPath (..)
@@ -126,7 +128,6 @@ reversePath (Path names) =
 -- | A special 'Map' with its 'Path' keys reversed for efficiency
 newtype PathMap a = PathMap
   { unPathMap :: Map ReversedPath (Maybe Span, InFile a) }
-  deriving (Functor, Foldable, Traversable)
 
 -- | An empty 'PathMap'
 pathMapEmpty :: PathMap a
@@ -269,6 +270,30 @@ modIsEmpty m =
   && Map.null (modDatas m)
   && Map.null (modLets m)
 
+-- | A 'UseModule' that includes something from Core
+pattern CoreInclude :: UseContents -> InFile (Meta UseModule)
+pattern CoreInclude contents =
+  DefaultFile :/: DefaultMeta (UseModule (DefaultMeta (Identifier "Core")) contents)
+
+-- | Add an import to bring every local item into scope
+moduleAddLocalImports :: Module -> Module
+moduleAddLocalImports m = m
+  { modUses = (Generated :/: meta UseAny) : modUses m }
+
+-- | Add a Core import if it wasn't explicitly imported
+moduleAddCoreImports :: Module -> Module
+moduleAddCoreImports m = m
+  { modUses = addCore $ modUses m }
+  where
+    addCore [] =
+      [CoreInclude $ UseAll [meta UseAny]]
+    addCore (CoreInclude (UseAll []): rest) =
+      rest
+    addCore list@(CoreInclude _ : _) =
+      list
+    addCore (use:rest) =
+      use : addCore rest
+
 -- | Adds a 'UseModule' to the module
 modAddUse :: Meta UseModule -> FilePath -> Module -> Module
 modAddUse use path mod = mod
@@ -387,11 +412,6 @@ modAddEffect name decl path mod = do
   let
     oldEffects = modEffects mod
     newDecl = path :/: decl
-  when (unmeta name == Identifier "Pure") $
-    addError compileError
-      { errorFile = Just path
-      , errorSpan = metaSpan name
-      , errorMessage = "effect name cannot be `Pure` because this is a special item" }
   when (Map.member name oldEffects) $
     addError compileError
       { errorFile = Just path
@@ -481,7 +501,6 @@ pattern SymbolInput = Local (Operator "-")
 data DataArg = DataArg
   { argVariance :: !TypeVariance
   , argParams :: [DataArg] }
-  deriving Eq
 
 instance Show DataArg where
   show arg =
@@ -717,7 +736,7 @@ namedDataSigFromType file typeWithMeta =
                 case unmeta eff of
                   EffectNamed path -> MLNamed path
                   EffectPoly local -> MLPoly local
-                  EffectAnon _ -> MLAnon
+                  _ -> MLAnon
             _ -> err "effect parameters must each be in their own set of pipes, you cannot use `+` in between"
       vars <- forM args $ namedDataArgFromType file
       -- Errors can be ignored since they will be checked at the end of the phase (before the signature can be used)

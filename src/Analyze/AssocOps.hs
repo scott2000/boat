@@ -318,11 +318,6 @@ data UnOpOrExpr a
   -- | An expression that will be given to an operator
   | UnExpr (Meta a)
 
-instance Show a => Show (UnOpOrExpr a) where
-  show = \case
-    UnOp path -> "`" ++ show path ++ "`"
-    UnExpr expr -> show expr
-
 -- | A class representing anything that contains infix expressions
 class (Show a, After a) => ContainsOp a where
   -- | Convert the expression to a list of unassociated expressions

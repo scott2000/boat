@@ -11,6 +11,7 @@ module Utility.Basics
   , pattern Local
   , pattern EmptyPath
   , pattern Generated
+  , pattern DefaultFile
 
     -- * Global Compiler State
   , MonadCompile (..)
@@ -121,6 +122,11 @@ pattern EmptyPath = Path []
 -- | Placeholder filename for compiler-generated code
 pattern Generated :: FilePath
 pattern Generated = "<compiler-generated>"
+
+-- | Same as 'Generated', but matches any file as a pattern
+pattern DefaultFile :: FilePath
+pattern DefaultFile <- _
+  where DefaultFile = Generated
 
 -- | Helper function for 'parsePackageName' and 'parseModuleName'
 parseIdentIn :: String -> Bool -> String -> Either String Name

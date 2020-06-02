@@ -132,7 +132,7 @@ data ExprKind
   | KType
   -- | An effect ('Effect')
   | KEffect
-  deriving (Ord, Eq)
+  deriving Eq
 
 instance Show ExprKind where
   show = \case
@@ -199,6 +199,8 @@ data Effect
   | EffectPoly String
   -- | An effect left blank to be inferred
   | EffectAnon AnonCount
+  -- | A local variable's effect
+  | EffectLocal AnonCount
   deriving (Ord, Eq)
 
 instance After Effect where
@@ -215,6 +217,7 @@ instance Show Effect where
     EffectNamed path -> show path
     EffectPoly name  -> name
     EffectAnon _     -> "_"
+    EffectLocal anon -> "<local" ++ show anon ++ ">"
 
 -- | Formats a string of |...| bracketed effects to add after a declaration
 effectSuffix :: [Meta EffectSet] -> String
@@ -228,7 +231,7 @@ effectSuffixStr = concatMap \effect ->
 -- | A constraint from a with-clause in a declaration
 data Constraint
   = Effect `IsSubEffectOf` EffectSet
-  deriving (Ord, Eq)
+  deriving Eq
 
 instance Show Constraint where
   show (effect `IsSubEffectOf` set) =
@@ -240,7 +243,7 @@ data UseModule
   = UseAny
   -- | Use a named item and certain sub-items
   | UseModule (Meta Name) UseContents
-  deriving (Ord, Eq)
+  deriving Eq
 
 instance Show UseModule where
   show = \case
@@ -254,7 +257,7 @@ data UseContents
   = UseDot (Meta UseModule)
   -- | Use all of a list of items (use @[]@ to end use path)
   | UseAll [Meta UseModule]
-  deriving (Ord, Eq)
+  deriving Eq
 
 instance Show UseContents where
   show = \case
