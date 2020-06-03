@@ -148,7 +148,7 @@ data AfterMap m = AfterMap
     -- | A special case used for transforming a use expression
   , aUseExpr :: AfterMap m -> Meta UseModule -> Meta Expr -> m Expr
     -- | Allow the introduction of local variables in expressions
-  , aWithBindings :: [String] -> m (Meta Expr) -> m (Meta Expr)
+  , aWithBindings :: forall a. [String] -> m a -> m a
   , aPattern :: Meta Pattern -> m (Meta Pattern)
   , aType :: Meta Type -> m (Meta Type)
   , aEffect :: Meta Effect -> m (Meta Effect)
@@ -281,6 +281,8 @@ data Type
   | TAnon AnonCount
   -- | An application of a type argument to a type
   | TApp (Meta Type) (Meta Type)
+  -- | A type with a universally quantified effect variable
+  | TForEff (Meta String) (Meta Type)
 
   -- Unassociated operators
   | TParen (Meta Type)
@@ -296,6 +298,8 @@ instance After Type where
         TNamed <$> mapM (after m) effs <*> afterPath m KType path
       TApp a b ->
         TApp <$> after m a <*> after m b
+      TForEff e ty ->
+        TForEff e <$> aWithBindings m [unmeta e] (after m ty)
       TParen a ->
         TParen <$> after m a
       TUnaryOp path a ->
@@ -317,6 +321,8 @@ instance Show Type where
       "(" ++ show a ++ " -> " ++ show b ++ ")"
     TApp a b ->
       "(" ++ show a ++ " " ++ show b ++ ")"
+    TForEff e ty ->
+      "(|" ++ unmeta e ++ "| " ++ show ty ++ ")"
     TParen ty -> "{" ++ show ty ++ "}"
     TUnaryOp Meta { unmeta = Path [Unary op] } ty ->
       "{" ++ op ++ show ty ++ "}"
@@ -762,6 +768,10 @@ class ExprLike a where
   opEffectApply :: Maybe (Meta a -> Meta EffectSet -> Either (Meta String) a)
   opEffectApply = Nothing
 
+  -- | If effect application is supported, universally quantify an effect
+  opForallEffect :: Maybe (Meta String -> Meta a -> a)
+  opForallEffect = Nothing
+
 instance ExprLike Type where
   opKind _ = "type"
   opUnit = TUnit
@@ -780,6 +790,7 @@ instance ExprLike Type where
         Right $ TNamed (es ++ [e]) path
       effectApply _ e =
         Left $ copySpan e "effect arguments can only occur immediately following a named type"
+  opForallEffect = Just TForEff
 
 instance ExprLike Expr where
   opKind _ = "expression"

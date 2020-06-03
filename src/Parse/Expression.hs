@@ -111,13 +111,13 @@ paren =
     emptyParen = opUnit <$ char ')'
     fullParen = opParen <$> blockOf parser <* spaces <* char ')'
 
--- | Parse a plain expression or an expression surrounded in parentheses, but don't allow prefix operators
-parserNoPrefix :: Parsable a => Parser (Meta a)
-parserNoPrefix = parseMeta parseOne <|> hidden paren
-
 -- | Parse a single expression, including ones with a prefix operator
 parserPartial :: Parsable a => Parser (Meta a)
-parserPartial = hidden parsePrefix <|> parserNoPrefix
+parserPartial =
+  hidden parsePrefix
+  <|> hidden parseEffectForall
+  <|> parseMeta parseOne
+  <|> hidden paren
   where
     parsePrefix :: forall a. Parsable a => Parser (Meta a)
     parsePrefix = parseMeta do
@@ -130,42 +130,50 @@ parserPartial = hidden parsePrefix <|> parserNoPrefix
             ++ "\n(make sure prefix operators have no space after them)"
         else
           return path
-      opUnary path <$> parserPrec compactPrec
+      opUnary path <$> parserPrec CompactPrec
 
--- | A number representing the precedence of an operation
-type Prec = Int
+    parseEffectForall =
+      case opForallEffect of
+        Nothing -> empty
+        Just forEff -> parseMeta do
+          reservedOp PipeSeparator
+          name <- nbsc >> parseMeta identifier
+          nbsc >> reservedOp PipeSeparator
+          when (isCap $ head $ unmeta name) do
+            file <- getFilePath
+            addError compileError
+              { errorFile = Just file
+              , errorSpan = metaSpan name
+              , errorMessage = "effect variable name must start with a lowercase letter" }
+          nbsc >> forEff name <$> parserPrec NormalPrec
 
--- | A special precedence for when an expression will be terminated by a special operator
-expectEndPrec :: Prec
-expectEndPrec = -1
-
--- | The default precedence for an expression
-minPrec :: Prec
-minPrec = 0
-
--- | The precedence for a regular operator surrounded by whitespace
-normalPrec :: Prec
-normalPrec = 1
-
--- | The precedence for function application
-applyPrec :: Prec
-applyPrec = 2
-
--- | The precedence for a compact operator not surrounded by whitespace
-compactPrec :: Prec
-compactPrec = 3
+-- | Represents the precedence of a type of operation
+data Prec
+  -- | A special precedence for when an expression will be terminated by a special operator
+  = ExpectEndPrec
+  -- | The default precedence for an expression
+  | MinPrec
+  -- | The precedence for a regular operator surrounded by whitespace
+  | SpecialPrec
+  -- | The precedence for a regular operator surrounded by whitespace
+  | NormalPrec
+  -- | The precedence for function application
+  | ApplyPrec
+  -- | The precedence for a compact operator not surrounded by whitespace
+  | CompactPrec
+  deriving (Ord, Eq)
 
 -- | Parse a single expression
 parser :: Parsable a => Parser (Meta a)
-parser = parserPrec minPrec
+parser = parserPrec MinPrec
 
 -- | Parse a single expression, but expect to be terminated by a special operator
 parserExpectEnd :: Parsable a => Parser (Meta a)
-parserExpectEnd = parserPrec expectEndPrec
+parserExpectEnd = parserPrec ExpectEndPrec
 
 -- | Parse a single expression, but require parentheses for spaces to be used
 parserNoSpace :: Parsable a => Parser (Meta a)
-parserNoSpace = parserPrec applyPrec
+parserNoSpace = parserPrec ApplyPrec
 
 -- | Parse a single expression at a certain precedence level (the most general way to parse something)
 parserPrec :: Parsable a => Prec -> Parser (Meta a)
@@ -183,7 +191,7 @@ parserBase prec current =
           Right NoSpace -> opOrApp False
           Right Whitespace -> opOrApp True
           Right LineBreak ->
-            if prec == minPrec then
+            if prec == MinPrec then
               return $
                 case opSeq of
                   Just f ->
@@ -232,17 +240,17 @@ parserBase prec current =
                 return $ Just $ fail $ show err
 
         opParseSpecial offset op =
-          if prec <= normalPrec then
+          if prec <= SpecialPrec then
             case parseSpecial op of
               Nothing ->
-                if prec == minPrec then
+                if prec == MinPrec then
                   return $ Just $ addFail (Just $ fst op)
                     ("special operator `" ++ show (snd op) ++ "` not allowed in " ++ opKind (Of :: Of a))
                 else
                   return Nothing
               Just p ->
                 parseSpaceAfterOperator offset \_ ->
-                  return $ Just $ p normalPrec current
+                  return $ Just $ p SpecialPrec current
           else
             return Nothing
 
@@ -252,9 +260,9 @@ parserBase prec current =
           let
             opPrec =
               if spaceAfter || isBacktick then
-                normalPrec
+                NormalPrec
               else
-                compactPrec
+                CompactPrec
           if prec <= opPrec then
             return $ Just do
               bin <- metaExtendPrec (opBinary $ infixPath parsedOp) opPrec current
@@ -266,9 +274,9 @@ parserBase prec current =
             return Nothing
 
         app = do
-          guard (prec < applyPrec)
+          guard (prec < ApplyPrec)
           return $ Just $
-            ((appEff <|> metaExtendFail opApply applyPrec current) >>= parserBase prec)
+            ((appEff <|> metaExtendFail opApply ApplyPrec current) >>= parserBase prec)
             <|> return current
 
         appEff =

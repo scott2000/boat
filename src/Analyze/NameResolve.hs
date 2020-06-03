@@ -793,26 +793,27 @@ nameResolvePath file check kind span path@(Path parts@(head:rest)) = do
 
 -- | Finds items in scope for which the requested name might be a typo
 getClosest :: Name -> NR [Name]
-getClosest target
-  | length normalizedTarget < 3 =
-    -- If the identifier is short, the suggestions are unlikely to be very helpful
-    return []
-  | otherwise = do
-    Names { finalNames, otherNames, localNames } <- ask
-    let
-      -- Get a set of all names that are in scope
-      names =
-        Map.keysSet finalNames
-        <> Map.keysSet otherNames
-        <> Set.mapMonotonic Identifier localNames
-      -- Allow more differences in longer names (ceil (length/5))
-      maxDiff = (4 + length (getNameString target)) `div` 5
-      -- Find all of the names within the range of acceptable differences
-      closeNames = filter (isClose normalizedTarget maxDiff) $ Set.toList names
-    -- Return the list of names sorted by non-normalized edit distance
-    return $ sortOn (levenshteinDistance defaultEditCosts (show target) . show) closeNames
-  where
+getClosest target = do
+  Names { finalNames, otherNames, localNames } <- ask
+  let
     normalizedTarget = normalizeName target
+    -- Get a set of all names that are in scope
+    names =
+      Map.keysSet finalNames
+      <> Map.keysSet otherNames
+      <> Set.mapMonotonic Identifier localNames
+    -- Allow more differences in longer names
+    maxDiff
+      | length normalizedTarget < 3 =
+        -- Since the target name is short, don't allow any normalized differences
+        0
+      | otherwise =
+        -- Since the target name isn't too short, allow (ceil (length/5)) differences
+        (4 + length (getNameString target)) `div` 5
+    -- Find all of the names within the range of acceptable differences
+    closeNames = filter (isClose normalizedTarget maxDiff) $ Set.toList names
+  -- Return the list of names sorted by non-normalized edit distance
+  return $ sortOn (levenshteinDistance defaultEditCosts (show target) . show) closeNames
 
 -- | Checks if a name is within some number of edits of a requested string (after normalization)
 isClose :: String -> Int -> Name -> Bool

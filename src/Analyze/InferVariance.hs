@@ -47,6 +47,8 @@ declDeps DataDecl { dataVariants } =
           tell $ Set.singleton $ unmeta name
         TApp a b ->
           typeDeps a >> typeDeps b
+        TForEff _ ty ->
+          typeDeps ty
         _ ->
           return ()
 
@@ -334,7 +336,7 @@ matchArgs resolveAnon expected actual =
 -- | Adds constraints for a data type's variant
 generateConstraints :: FilePath -> DataInfo -> Meta DataVariant -> Infer ()
 generateConstraints file dataInfo Meta { unmeta = (_, types) } =
-  forM_ types $ runMaybeT . inferTypeNoArg defaultConstraint
+  forM_ types $ runMaybeT . inferTypeNoArg [] defaultConstraint
   where
     lookupNamed :: ExprKind -> Maybe Span -> String -> MaybeT Infer DataArg
     lookupNamed expected span name =
@@ -363,13 +365,13 @@ generateConstraints file dataInfo Meta { unmeta = (_, types) } =
         resolveAnon exp anon =
           lift $ insertConstraint anon $ addStep exp defaultConstraint
 
-    inferTypeNoArg :: VarianceConstraint -> Meta Type -> MaybeT Infer ()
-    inferTypeNoArg c ty = do
-      args <- inferType c ty
+    inferTypeNoArg :: [String] -> VarianceConstraint -> Meta Type -> MaybeT Infer ()
+    inferTypeNoArg locals c ty = do
+      args <- inferType locals c ty
       matchArgs' (metaSpan ty) [] args
 
-    inferType :: VarianceConstraint -> Meta Type -> MaybeT Infer [DataArg]
-    inferType c ty =
+    inferType :: [String] -> VarianceConstraint -> Meta Type -> MaybeT Infer [DataArg]
+    inferType locals c ty =
       case unmeta ty of
         TNamed effs name -> do
           (dataEffects, dataArgs) <- lift $ lookupDecl $ unmeta name
@@ -386,9 +388,9 @@ generateConstraints file dataInfo Meta { unmeta = (_, types) } =
             , errorMessage = "type in data type variant cannot be left blank" }
           return Nothing
         TApp a b ->
-          inferType c a >>= \case
+          inferType locals c a >>= \case
             [] -> MaybeT do
-              runMaybeT $ inferType (addStep VInvariant c) b
+              runMaybeT $ inferType locals (addStep VInvariant c) b
               let (base, baseCount) = findBase a
               addError compileError
                 { errorFile = Just file
@@ -401,20 +403,25 @@ generateConstraints file dataInfo Meta { unmeta = (_, types) } =
                     "only accepts " ++ plural baseCount "argument" }
               return Nothing
             DataArg { argVariance, argParams } : rest -> lift do
-              runMaybeT (inferType (addStep argVariance c) b) >>= \case
+              runMaybeT (inferType locals (addStep argVariance c) b) >>= \case
                 Nothing -> return ()
                 Just actual ->
                   void $ runMaybeT $ matchArgs' (metaSpan b) argParams actual
               return rest
+        TForEff e ty -> do
+          inferTypeNoArg (unmeta e : locals) c ty
+          return []
         _ ->
           return []
       where
         matchEff effs argVariance =
           forM_ (setEffects $ unmeta effs) \eff ->
             case unmeta eff of
-              EffectPoly name -> do
-                arg <- lookupNamed KEffect (metaSpan eff) name
-                lift $ insertConstraint (getAnon arg) effC
+              EffectPoly name
+                | name `elem` locals -> return ()
+                | otherwise -> do
+                  arg <- lookupNamed KEffect (metaSpan eff) name
+                  lift $ insertConstraint (getAnon arg) effC
               EffectAnon _ ->
                 addError compileError
                   { errorFile = Just file
