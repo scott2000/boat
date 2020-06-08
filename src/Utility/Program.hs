@@ -72,6 +72,7 @@ import Data.Char
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 
+import Data.Set (Set)
 import qualified Data.Set as Set
 
 import Control.Monad.State.Strict
@@ -134,18 +135,19 @@ pathMapEmpty :: PathMap a
 pathMapEmpty = PathMap Map.empty
 
 -- | Finds the declaration associated with the requested path in the 'PathMap'
-pathMapLookup :: Path -> PathMap a -> Maybe (InFile a)
+pathMapLookup :: Path -> PathMap a -> Maybe a
 pathMapLookup path =
-  fmap snd . pathMapLookup' path
+  fmap (unfile . snd) . pathMapLookup' path
 
--- | Like 'pathMapLookup', but also gives the 'Span' of the declaration's name
+-- | Like 'pathMapLookup', but also gives the location of the declaration's name
 pathMapLookup' :: Path -> PathMap a -> Maybe (Maybe Span, InFile a)
 pathMapLookup' path =
   Map.lookup (reversePath path) . unPathMap
 
 -- | Like 'pathMapLookup', but calls 'error' if the path doesn't exist
-pathMapGet :: Path -> PathMap a -> InFile a
-pathMapGet path = snd . mapGet (reversePath path) . unPathMap
+pathMapGet :: Path -> PathMap a -> a
+pathMapGet path =
+  unfile . snd . mapGet (reversePath path) . unPathMap
 
 -- | Inserts a new declaration into the 'PathMap'
 pathMapInsert :: Meta Path -> InFile a -> PathMap a -> PathMap a
@@ -390,15 +392,15 @@ modAddOpDecls names op path mod = do
 
 -- | A declaration of a new effect with an optional super-effect
 data EffectDecl = EffectDecl
-  { effectSuper :: Maybe (Meta Path) }
+  { effectSuper :: [Meta Path] }
 
 instance ShowWithName EffectDecl where
   showWithName name EffectDecl { effectSuper } =
     "effect " ++ name ++
       case effectSuper of
-        Nothing -> ""
-        Just effect ->
-          " : " ++ show effect
+        [] -> ""
+        _ ->
+          " : " ++ intercalate ", " (map show effectSuper)
 
 -- | Adds an 'EffectDecl' to the module
 modAddEffect
@@ -425,7 +427,9 @@ type LetDecl = LetDeclWith ()
 -- | A declaration for a top-level binding of an expression (with some type information)
 data LetDeclWith ty = LetDecl
   { letBody :: MetaR ExprWith ty
-  , letConstraints :: [Constraint] }
+  , letConstraints :: [Meta Constraint]
+  , letInferredType :: ty
+  , letInstanceArgs :: [String] }
 
 instance ShowWithName LetDecl where
   showWithName name decl =

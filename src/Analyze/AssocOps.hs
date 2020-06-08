@@ -55,7 +55,7 @@ addPath path file = do
 -- | Looks up a path and returns the index of the vertex
 lookupPath :: Path -> Assoc Vertex
 lookupPath path =
-  unfile . pathMapGet path <$> gets assocPaths
+  pathMapGet path <$> gets assocPaths
 
 -- | Adds a vertex to the graph with a set of lower precedence vertices
 addVertex :: IntSet -> Assoc ()
@@ -193,7 +193,7 @@ updateExprs
       comparePaths a b =
         checkVertexOrdering assocGraph (v a) (v b)
         where
-          v path = unfile $ pathMapGet path assocPaths
+          v path = pathMapGet path assocPaths
 
       allow :: FilePath -> Maybe (Meta Path) -> Meta Path -> MaybeT CompileIO Bool
       allow file current next =
@@ -213,7 +213,7 @@ updateExprs
               (_, Nothing) -> MaybeT do
                 missing next
                 return Nothing
-              (Just (_ :/: a), Just (_ :/: b)) ->
+              (Just a, Just b) ->
                 let
                   aOp = unmeta $ opType a
                   bOp = unmeta $ opType b

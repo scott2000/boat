@@ -40,6 +40,7 @@ module Utility.Basics
 
     -- * Formatting and Capitalization
   , plural
+  , ordinal
   , aOrAn
   , isKeyword
   , isCap
@@ -62,6 +63,7 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 
 import Control.Monad.State.Strict
+import Control.Monad.Writer.Strict
 import Control.Monad.Reader
 import Control.Monad.Trans.Maybe
 
@@ -199,6 +201,9 @@ instance MonadCompile m => MonadCompile (ReaderT s m) where
   liftCompile = lift . liftCompile
 
 instance MonadCompile m => MonadCompile (MaybeT m) where
+  liftCompile = lift . liftCompile
+
+instance (MonadCompile m, Monoid w) => MonadCompile (WriterT w m) where
   liftCompile = lift . liftCompile
 
 instance (MonadCompile m, Stream s) => MonadCompile (ParsecT e s m) where
@@ -403,6 +408,19 @@ plural :: Int -> String -> String
 plural 0 w = "no " ++ w ++ "s"
 plural 1 w = "1 " ++ w
 plural n w = show n ++ " " ++ w ++ "s"
+
+-- | Converts a zero-based index to an ordinal number (1st, 2nd, 3rd, 4th, etc.)
+ordinal :: Int -> String
+ordinal index =
+  show num ++ suffix num
+  where
+    num = index + 1
+    suffix 1 = "st"
+    suffix 2 = "nd"
+    suffix 3 = "rd"
+    suffix n
+      | n > 20    = suffix (n `rem` 10)
+      | otherwise = "th"
 
 -- | Prepends an indefinite article to a string depending on whether it starts with a vowel
 aOrAn :: String -> String

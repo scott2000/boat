@@ -151,16 +151,20 @@ removeNames DataSig { dataEffects, dataArgs } =
   (map snd dataEffects, map snd dataArgs)
 
 -- | Looks up a data type declaration's parameters
-lookupDecl :: Path -> Infer ([TypeVariance], [DataArg])
-lookupDecl (Core (Operator "->")) =
+lookupDecl :: AddFatal m => (Path -> m (Maybe DataDecl)) -> Path -> m ([TypeVariance], [DataArg])
+lookupDecl _ (Core (Operator "->")) =
   return ([VOutput], [DataArg VInput [], DataArg VOutput []])
-lookupDecl path = do
-  InferState { iResolvedDecls, iUnresolvedDecls } <- get
-  case pathMapLookup path iUnresolvedDecls <|> pathMapLookup path iResolvedDecls of
-    Just (_ :/: decl) ->
+lookupDecl lookup path = do
+  lookup path >>= \case
+    Just decl ->
       return $ removeNames $ dataSig decl
     Nothing ->
       compilerBug $ "lookupDecl couldn't find `" ++ show path ++ "`"
+
+lookupDecl' :: Path -> Infer ([TypeVariance], [DataArg])
+lookupDecl' = lookupDecl \path -> do
+  InferState { iResolvedDecls, iUnresolvedDecls } <- get
+  return $ pathMapLookup path iResolvedDecls <|> pathMapLookup path iUnresolvedDecls
 
 -- | Inserts a new constraint to an inference variable
 insertConstraint :: AnonCount -> VarianceConstraint -> Infer ()
@@ -265,8 +269,8 @@ instance Show MatchArgsError where
     RequiresArgs n -> "type requires " ++ plural n "more argument"
     MustAcceptArgs n -> "type must accept " ++ plural n "more argument"
     GeneralMismatch expected actual ->
-      "type argument of kind:              " ++ showKind actual ++ "\n" ++
-      "cannot be passed to type expecting: " ++ showKind expected
+      "cannot pass type argument of kind `" ++ showKind actual ++ "`\n" ++
+      "  to a type constructor expecting `" ++ showKind expected ++ "`"
     where
       showKind kindList = show DataArg
         { argVariance = VInvariant
@@ -290,7 +294,7 @@ addMatchError file span err =
     , errorMessage = show err }
 
 -- | Matches the expected arguments with the actual arguments for a type
-matchArgs :: Monad m
+matchArgs :: AddFatal m
           => (TypeVariance -> AnonCount -> m ()) -- ^ Specifies what to do for uninferred variance
           -> [DataArg]                           -- ^ The arguments that the type is expected to accept
           -> [DataArg]                           -- ^ The arguments that the type actually accepts
@@ -323,7 +327,7 @@ matchArgs resolveAnon expected actual =
       return $ DataArg var args
 
     unifyVar (VAnon _) _ =
-      error "matchArgs called with uninferred expected type"
+      compilerBug "matchArgs called with uninferred expected type"
     unifyVar VInvariant other =
       return other
     unifyVar exp (VAnon anon) = do
@@ -374,7 +378,7 @@ generateConstraints file dataInfo Meta { unmeta = (_, types) } =
     inferType locals c ty =
       case unmeta ty of
         TNamed effs name -> do
-          (dataEffects, dataArgs) <- lift $ lookupDecl $ unmeta name
+          (dataEffects, dataArgs) <- lift $ lookupDecl' $ unmeta name
           zipWithM_ matchEff effs dataEffects
           return dataArgs
         TPoly name -> do

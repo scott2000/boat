@@ -78,8 +78,12 @@ parseFile path = do
         parseEffect = do
           keyword "effect"
           name <- nbsc >> parseMeta parseName
-          effectSuper <- optional (try nbsc >> specialOp TypeAscription >> blockOf (parseMeta parsePath))
+          effectSuper <- parseEffectSuper <|> pure []
           modAddEffect name EffectDecl { effectSuper } path m
+          where
+            parseEffectSuper = do
+              try (nbsc >> specialOp TypeAscription)
+              blockOf $ parseSomeCommaList $ parseMeta parsePath
 
         parseLet = do
           keyword "let"
@@ -96,7 +100,9 @@ parseFile path = do
                   body
             letDecl = LetDecl
               { letBody = bodyWithAscription
-              , letConstraints = constraints }
+              , letConstraints = constraints
+              , letInferredType = ()
+              , letInstanceArgs = [] }
           modAddLet name letDecl path m
 
         parseData = do
@@ -120,16 +126,16 @@ parseFile path = do
                 modAddData name dataDecl path m
 
 -- | Parse a set of constraints for a with-clause
-parseConstraints :: Parser [Constraint]
+parseConstraints :: Parser [Meta Constraint]
 parseConstraints = do
   keyword "with"
-  blockOf $ parseSomeCommaList parseConstraint
+  blockOf $ parseSomeCommaList (parseMeta parseConstraint)
 
 -- | Parse a single 'Constraint'
 parseConstraint :: Parser Constraint
 parseConstraint =
   pure IsSubEffectOf
-  <*> parseEffect
+  <*> parseMeta parseEffect
   <*  nbsc
   <*  specialOp TypeAscription
   <*  nbsc

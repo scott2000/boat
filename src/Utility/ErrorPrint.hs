@@ -516,8 +516,9 @@ printMessageFooter errorKind errorMessage = do
     tag = "[" ++ show errorKind ++ "]"
     tagLength = length tag
 
-    format (' ':multiline) =
-      formatLineWidth (79 - tagLength) multiline
+    format (' ':x:multiline) | x /= ' ' =
+      -- Only do multiline formatting if there is a single space character
+      formatLineWidth (79 - tagLength) (x:multiline)
     format other = other
 
 -- | Formats and prints all compile errors in the set

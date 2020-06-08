@@ -27,6 +27,7 @@ executable boat
                        Analyze.NameResolve,
                        Analyze.AssocOps
                        Analyze.InferVariance,
+                       Analyze.InferTypes
                        Analyze
   default-extensions:  FlexibleContexts,
                        FlexibleInstances,

@@ -218,7 +218,7 @@ coreModule = defaultModule
     -- effect Pure
   , modEffects = Map.fromList
     [ (meta $ Identifier "Pure", Generated :/: EffectDecl
-      { effectSuper = Nothing }) ] }
+      { effectSuper = [] }) ] }
   where
     assignment = Identifier "Assignment"
     dereference = Identifier "Dereference"
@@ -636,13 +636,10 @@ nameResolveEach path mod =
 
     nameResolveEffect (name, file :/: EffectDecl { effectSuper }) = do
       super <-
-        case effectSuper of
-          Nothing ->
-            return Nothing
-          Just effect ->
-            Just <$> (forM effect $ nameResolvePath file isEffect "effect" $ metaSpan effect)
-      case super of
-        Just Meta { unmeta = Core (Identifier "Pure"), metaSpan } ->
+        forM effectSuper \effect ->
+          (forM effect $ nameResolvePath file isEffect "effect" $ metaSpan effect)
+      case find (\eff -> unmeta eff == Core (Identifier "Pure")) super of
+        Just Meta { metaSpan } ->
           addError compileError
             { errorFile = Just file
             , errorSpan = metaSpan
@@ -681,7 +678,9 @@ nameResolveEach path mod =
                     ( replicate count $ meta $ PBind Nothing
                     , copySpan var $ EDataCons variantPath $
                       reverse [0 .. count-1] <&> \n -> meta $ EIndex n Nothing )]
-            , letConstraints = [] }
+            , letConstraints = []
+            , letInferredType = ()
+            , letInstanceArgs = [] }
       where
         nameResolveVariant (name, types) =
           (,) name <$> mapM (nameResolveRestrictedType path file) types

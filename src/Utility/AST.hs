@@ -24,6 +24,7 @@ module Utility.AST
   , assertUniqueBindings
   , Type (..)
   , EffectSet (..)
+  , emptyEffectSet
   , Effect (..)
   , pattern EffectPure
   , Constraint (..)
@@ -192,6 +193,9 @@ instance Show EffectSet where
     | Set.null setEffects = "Pure"
     | otherwise = intercalate " + " $ map show $ Set.toList setEffects
 
+emptyEffectSet :: EffectSet
+emptyEffectSet = EffectSet Set.empty
+
 -- | An effect that can occur in impure code
 data Effect
   -- | A named effect
@@ -231,8 +235,8 @@ effectSuffixStr = concatMap \effect ->
 
 -- | A constraint from a with-clause in a declaration
 data Constraint
-  = Effect `IsSubEffectOf` EffectSet
-  deriving Eq
+  = Meta Effect `IsSubEffectOf` EffectSet
+  deriving (Ord, Eq)
 
 instance Show Constraint where
   show (effect `IsSubEffectOf` set) =
