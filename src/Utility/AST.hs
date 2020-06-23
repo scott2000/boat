@@ -25,8 +25,10 @@ module Utility.AST
   , Type (..)
   , EffectSet (..)
   , emptyEffectSet
+  , singletonEffectSet
   , Effect (..)
   , pattern EffectPure
+  , pattern EffectVoid
   , Constraint (..)
   , UseModule (..)
   , UseContents (..)
@@ -196,6 +198,9 @@ instance Show EffectSet where
 emptyEffectSet :: EffectSet
 emptyEffectSet = EffectSet Set.empty
 
+singletonEffectSet :: Meta Effect -> EffectSet
+singletonEffectSet = EffectSet . Set.singleton
+
 -- | An effect that can occur in impure code
 data Effect
   -- | A named effect
@@ -206,6 +211,8 @@ data Effect
   | EffectAnon AnonCount
   -- | A local variable's effect
   | EffectLocal AnonCount
+  -- | A set of effects that are only present in both sets
+  | EffectIntersection EffectSet EffectSet
   deriving (Ord, Eq)
 
 instance After Effect where
@@ -223,6 +230,8 @@ instance Show Effect where
     EffectPoly name  -> name
     EffectAnon _     -> "_"
     EffectLocal anon -> "<local" ++ show anon ++ ">"
+    EffectIntersection lhs rhs ->
+      "(" ++ show lhs ++ ") & (" ++ show rhs ++ ")"
 
 -- | Formats a string of |...| bracketed effects to add after a declaration
 effectSuffix :: [Meta EffectSet] -> String
@@ -428,6 +437,10 @@ pattern TFunc a b = TAnyFunc [] a b
 -- | An effect representing pure code
 pattern EffectPure :: Effect
 pattern EffectPure = EffectNamed (Core (Identifier "Pure"))
+
+-- | An effect representing an uncallable function
+pattern EffectVoid :: Effect
+pattern EffectVoid = EffectNamed (Core (Identifier "Void"))
 
 -- | A concrete value produced by evaluating an expression
 type Value = ValueWith ()

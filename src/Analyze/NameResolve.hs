@@ -216,8 +216,11 @@ coreModule = defaultModule
     , (meta $ Operator "<-", assignmentDecl)
     , (meta $ Unary "^", dereferenceDecl) ]
     -- effect Pure
+    -- effect Void
   , modEffects = Map.fromList
     [ (meta $ Identifier "Pure", Generated :/: EffectDecl
+      { effectSuper = [] })
+    , (meta $ Identifier "Void", Generated :/: EffectDecl
       { effectSuper = [] }) ] }
   where
     assignment = Identifier "Assignment"
@@ -638,18 +641,27 @@ nameResolveEach path mod =
       super <-
         forM effectSuper \effect ->
           (forM effect $ nameResolvePath file isEffect "effect" $ metaSpan effect)
-      case find (\eff -> unmeta eff == Core (Identifier "Pure")) super of
-        Just Meta { metaSpan } ->
-          addError compileError
-            { errorFile = Just file
-            , errorSpan = metaSpan
-            , errorExplain = Just $
-              " Making an effect a subtype of `Pure` is not something that makes sense, since it" ++
-              " represents the lack of side effects. If an effect were a subtype of `Pure`, it would" ++
-              " be useless since it could always be left out when specifying an effect."
-            , errorMessage =
-              "effect cannot be a subtype of `Pure`, try just using `effect " ++ show name ++ "`" }
-        _ -> return ()
+      forM_ super \eff ->
+        case unmeta eff of
+          Core (Identifier "Pure") ->
+            addError compileError
+              { errorFile = Just file
+              , errorSpan = metaSpan eff
+              , errorExplain = Just $
+                " Making an effect a subtype of `Pure` is not something that makes sense, since it" ++
+                " represents the lack of side effects. If an effect were a subtype of `Pure`, it would" ++
+                " be useless since it could always be left out when specifying an effect."
+              , errorMessage =
+                "effect cannot be a subtype of `Pure`, try just using `effect " ++ show name ++ "`" }
+          Core (Identifier "Void") ->
+            addError compileError
+              { errorFile = Just file
+              , errorSpan = metaSpan eff
+              , errorKind = Warning
+              , errorMessage =
+                "all effects are implicitly subtypes of `Void`, so listing it is unnecessary" }
+          _ ->
+            return ()
       insertEffect ((path .|.) <$> name) $ file :/: EffectDecl
         { effectSuper = super }
 

@@ -20,8 +20,8 @@ data InferInfo = InferInfo
 data InferState = InferState
   { iResolvedDecls :: !(PathMap (LetDeclWith Type))
   , iUnresolvedDecls :: !(PathMap Type)
-  , iTypeBounds :: !(Map AnonCount (Bound Type))
-  , iEffectBounds :: !(Map AnonCount (Bound EffectSet))
+  , iTypeBounds :: !(Map AnonCount TypeBound)
+  , iEffectBounds :: !(Map AnonCount EffectBound)
   , iConstraints :: !(Map Constraint ConstraintSource) }
 
 type Infer = ReaderT InferInfo (StateT InferState CompileIO)
@@ -36,64 +36,65 @@ data ConstraintSource = ConstraintSource
 addBound :: Unify a
          => UnifyContext
          -> AnonCount
-         -> (UnifyContext -> a -> Bound a -> MaybeT Infer (Bound a))
+         -> (UnifyContext -> a -> b -> MaybeT Infer b)
+         -> b
          -> a
-         -> Map AnonCount (Bound a)
-         -> MaybeT Infer (Map AnonCount (Bound a))
-addBound context anon insert item m = do
-  bound <- insert context item $ Map.findWithDefault emptyBound anon m
+         -> Map AnonCount b
+         -> MaybeT Infer (Map AnonCount b)
+addBound context anon insert empty item m = do
+  bound <- insert context item $ Map.findWithDefault empty anon m
   return $ Map.insert anon bound m
-
--- addTypeBound :: UnifyContext
---              -> AnonCount
---              -> (UnifyContext -> Type -> Bound Type -> MaybeT Infer (Bound Type))
---              -> Type
---              -> MaybeT Infer ()
--- addTypeBound context anon insert ty = do
---   s <- get
---   let m = iTypeBounds s
---   m <- addBound context anon insert ty m
---   put s { iTypeBounds = m }
 
 addEffectBound :: UnifyContext
                -> AnonCount
-               -> (UnifyContext -> EffectSet -> Bound EffectSet -> MaybeT Infer (Bound EffectSet))
+               -> (UnifyContext -> EffectSet -> EffectBound -> MaybeT Infer EffectBound)
                -> EffectSet
                -> MaybeT Infer ()
 addEffectBound context anon insert effs = do
   s <- get
   let m = iEffectBounds s
-  m <- addBound context anon insert effs m
+  m <- addBound context anon insert eEmptyBound effs m
   put s { iEffectBounds = m }
 
-data Bound a = Bound
-  { lowerBound :: Maybe a
-  , upperBound :: Maybe a }
+data EffectBound = EffectBound
+  { eLowerBound :: EffectSet
+  , eUpperBound :: Maybe EffectSet }
 
-emptyBound :: Bound a
-emptyBound = Bound
-  { lowerBound = Nothing
-  , upperBound = Nothing }
+eEmptyBound :: EffectBound
+eEmptyBound = EffectBound
+  { eLowerBound = emptyEffectSet
+  , eUpperBound = Nothing }
 
-insertLowerBound :: Unify a => UnifyContext -> a -> Bound a -> MaybeT Infer (Bound a)
-insertLowerBound context item b =
-  case lowerBound b of
-    Nothing -> return b
-      { lowerBound = Just item }
-    Just oldItem -> do
-      newItem <- unify context UnifyPlain VOutput oldItem item
-      return b
-        { lowerBound = Just newItem }
+eInsertLowerBound :: UnifyContext -> EffectSet -> EffectBound -> MaybeT Infer EffectBound
+eInsertLowerBound context effs b
+  | Set.null $ setEffects effs = return b
+  | Set.null $ setEffects $ eLowerBound b =
+    return b { eLowerBound = effs }
+  | otherwise = do
+    eLowerBound <- unify context UnifyPlain VOutput (eLowerBound b) effs
+    return b { eLowerBound }
 
-insertUpperBound :: Unify a => UnifyContext -> a -> Bound a -> MaybeT Infer (Bound a)
-insertUpperBound context item b =
-  case upperBound b of
-    Nothing -> return b
-      { upperBound = Just item }
-    Just oldItem -> do
-      newItem <- unify context UnifyPlain VInput oldItem item
-      return b
-        { upperBound = Just newItem }
+eInsertUpperBound :: UnifyContext -> EffectSet -> EffectBound -> MaybeT Infer EffectBound
+eInsertUpperBound context effs b
+  | meta EffectVoid `Set.member` setEffects effs = return b
+  | otherwise =
+    case eUpperBound b of
+      Nothing ->
+        return b { eUpperBound = Just effs }
+      Just upper -> do
+        upper <- unify context UnifyPlain VInput upper effs
+        return b { eUpperBound = Just upper }
+
+data TypeBound
+  = SubstituteType Type
+  | TypeBound
+    { tLowerBounds :: Set AnonCount
+    , tUpperBounds :: Set AnonCount }
+
+tEmptyBound :: TypeBound
+tEmptyBound = TypeBound
+  { tLowerBounds = Set.empty
+  , tUpperBounds = Set.empty }
 
 data UnifyContext = UnifyContext
   { contextLocation :: Maybe ContextLocation
@@ -127,72 +128,95 @@ instance Show ContextLocation where
     CMatchInput index ->
       ordinal index ++ " input for match expression"
 
-addUnifyError :: AddError m => UnifyContext -> m ()
-addUnifyError UnifyContext { contextLocation, contextSpan = file :/: span, contextActual, contextExpected } =
-  addError compileError
-    { errorFile = Just file
-    , errorSpan = span
-    , errorMessage =
-      "            cannot unify type: " ++ show contextActual ++ "\n" ++
-      "with previously inferred type: " ++ show contextExpected ++
-      case contextLocation of
-        Nothing -> ""
-        Just loc ->
-          "\n(in " ++ show loc ++ ")" }
-
-addExpectError :: AddError m => UnifyContext -> m ()
-addExpectError UnifyContext { contextLocation, contextSpan = file :/: span, contextActual, contextExpected } =
-  addError compileError
-    { errorFile = Just file
-    , errorSpan = span
-    , errorMessage =
-      "cannot use type `" ++ show contextActual ++ "`\n" ++
-      "     where type `" ++ show contextExpected ++ "` is expected" ++
-      case contextLocation of
-        Nothing -> ""
-        Just loc ->
-          "\n(in " ++ show loc ++ ")" }
+addUnifyError :: UnifyContext -> UnifyKind -> MaybeT Infer a
+addUnifyError UnifyContext { contextLocation, contextSpan = file :/: span, contextActual, contextExpected } kind =
+  MaybeT do
+    case kind of
+      UnifyPlain ->
+        addError compileError
+          { errorFile = Just file
+          , errorSpan = span
+          , errorMessage =
+            "            cannot unify type: " ++ show contextActual ++ "\n" ++
+            "with previously inferred type: " ++ show contextExpected ++
+            case contextLocation of
+              Nothing -> ""
+              Just loc ->
+                "\n(in " ++ show loc ++ ")" }
+      UnifyExpect ->
+        addError compileError
+          { errorFile = Just file
+          , errorSpan = span
+          , errorMessage =
+            "cannot use type `" ++ show contextActual ++ "`\n" ++
+            "     where type `" ++ show contextExpected ++ "` is expected" ++
+            case contextLocation of
+              Nothing -> ""
+              Just loc ->
+                "\n(in " ++ show loc ++ ")" }
+    return Nothing
 
 lookupDecl' :: Path -> Infer ([TypeVariance], [DataArg])
 lookupDecl' = lookupDecl \path -> do
   decls <- asks (allDatas . iAllDecls)
   return $ pathMapLookup path decls
 
-expandEffect :: Meta Effect -> Infer (Set (Meta Effect))
-expandEffect effectWithMeta =
+getSubEffects :: Map ReversedPath (Set Effect) -> Meta Effect -> Set (Meta Effect)
+getSubEffects expansions effectWithMeta =
   case unmeta effectWithMeta of
-    EffectNamed path ->
-      lookupEffect effectWithMeta $ reversePath path
-    EffectPoly name ->
-      lookupEffect effectWithMeta $ ReversedPath [Identifier name]
+    EffectNamed path -> do
+      case Map.lookup (reversePath path) expansions of
+        Nothing ->
+          Set.empty
+        Just effs ->
+          Set.mapMonotonic (copySpan effectWithMeta) effs
     _ ->
-      return $ Set.singleton effectWithMeta
-  where
-    lookupEffect effect path = do
-      expansions <- asks iEffectExpansions
-      return $
-        case Map.lookup path expansions of
-          Nothing ->
-            Set.singleton effect
-          Just effs ->
-            Set.mapMonotonic (copySpan effect) effs
+      Set.empty
+
+getSubEffectSet :: Set (Meta Effect) -> Infer (Set (Meta Effect))
+getSubEffectSet s = do
+  expansions <- asks iEffectExpansions
+  return $ Set.unions $ map (getSubEffects expansions) $ Set.toList s
 
 expandEffectSet :: Set (Meta Effect) -> Infer (Set (Meta Effect))
 expandEffectSet s =
-  Set.unions <$> mapM expandEffect (Set.toList s)
+  Set.union s <$> getSubEffectSet s
 
-unifyEffs :: UnifyContext -> UnifyKind -> [TypeVariance] -> [EffectSet] -> [EffectSet] -> MaybeT Infer [EffectSet]
-unifyEffs _ _ _ [] [] =
-  return []
-unifyEffs context kind (v:vs) allE allA =
-  (:) <$> unify context kind v e a <*> unifyEffs context kind vs es as
+simplifyEffectSet :: Set (Meta Effect) -> Infer (Set (Meta Effect))
+simplifyEffectSet s =
+  Set.difference s <$> getSubEffectSet s
+
+unifyEffs :: UnifyContext
+          -> UnifyKind
+          -> TypeVariance
+          -> [TypeVariance]
+          -> [Meta EffectSet]
+          -> [Meta EffectSet]
+          -> MaybeT Infer [Meta EffectSet]
+unifyEffs context kind variance = go
   where
-    splitEffs []     = (emptyEffectSet, [])
+    splitEffs []     = (meta emptyEffectSet, [])
     splitEffs (e:es) = (e, es)
-    (e, es) = splitEffs allE
-    (a, as) = splitEffs allA
-unifyEffs _ _ _ _ _ =
-  compilerBug "unifyEffs called with too many effects"
+
+    go _ [] [] =
+      return []
+    go (v:vs) allE allA =
+      (:) <$> unify context kind (variance <> v) e a <*> go vs es as
+      where
+        (e, es) = splitEffs allE
+        (a, as) = splitEffs allA
+    go _ _ _ =
+      compilerBug "unifyEffs called with too many effects"
+
+containsAnon :: Set (Meta Effect) -> Bool
+containsAnon = any hasAnon . Set.toList
+  where
+    hasAnon eff =
+      case unmeta eff of
+        EffectAnon _ -> True
+        EffectIntersection (EffectSet lhs) (EffectSet rhs) ->
+          containsAnon lhs || containsAnon rhs
+        _ -> False
 
 addConstraint :: UnifyContext -> Constraint -> Infer ()
 addConstraint UnifyContext { contextLocation, contextSpan } constraint =
@@ -204,43 +228,68 @@ addConstraint UnifyContext { contextLocation, contextSpan } constraint =
       | constraint `Map.member` m = m
       | otherwise = Map.insert constraint cs m
 
+addExpectConstraint :: UnifyContext -> Set (Meta Effect) -> Meta Effect -> MaybeT Infer ()
+addExpectConstraint context expected actual
+  | actual `Set.member` expected = return ()
+  | otherwise = do
+    expansions <- asks iEffectExpansions
+    let actualSubs = getSubEffects expansions actual
+    if expected `Set.isSubsetOf` actualSubs then
+      addUnifyError context UnifyExpect
+    else
+      lift $ addConstraint context (actual `IsSubEffectOf` EffectSet expected)
+
+{-
+
+a + b : c
+  => a : c
+     b : c
+
+a : b + c
+  => .
+
+a & b : c
+  => .
+
+-- IMPORTANT
+a : b & c
+  => a : b
+  => a : c
+
+-}
+
 constrainEffect :: UnifyContext -> Bool -> Set (Meta Effect) -> Meta Effect -> MaybeT Infer ()
 constrainEffect context requiresConstraint expected actual = do
   case unmeta actual of
     EffectAnon anon ->
-      addEffectBound context anon insertUpperBound $ EffectSet expected
+      addEffectBound context anon eInsertUpperBound $ EffectSet expected
     _ ->
       when requiresConstraint $
-        lift $ addConstraint context (actual `IsSubEffectOf` EffectSet expected)
+        addExpectConstraint context expected actual
 
 constrainEffects :: UnifyContext -> Set (Meta Effect) -> Set (Meta Effect) -> MaybeT Infer ()
 constrainEffects context expected actual = do
+  eExp <- lift $ expandEffectSet expected
+  sAct <- lift $ simplifyEffectSet actual
+  let nonTrivialMissingAct = Set.difference sAct eExp
   requiresConstraint <-
-    if Set.size expected == 1 then
-      case unmeta $ Set.findMin expected of
+    if Set.size eExp == 1 then
+      case unmeta $ Set.findMin eExp of
+        -- TODO support intersection
         EffectAnon anon -> do
-          forM_ actual $
-            addEffectBound context anon insertLowerBound . EffectSet . Set.singleton
+          forM_ sAct $
+            addEffectBound context anon eInsertLowerBound . EffectSet . Set.singleton
           return False
         _ ->
           return True
     else
       return True
-  forM_ actual $ constrainEffect context requiresConstraint expected
+  forM_ nonTrivialMissingAct $ constrainEffect context requiresConstraint eExp
 
 constrainEqual :: UnifyContext -> Set (Meta Effect) -> Set (Meta Effect) -> MaybeT Infer ()
-constrainEqual context expected actual
-  | Set.null expected, Set.null actual = return ()
-  | anyAnon expected || anyAnon actual = do
-    constrainEffects context expected actual
-    constrainEffects context actual expected
-  | otherwise = MaybeT do
-    addUnifyError context
-    return Nothing
-  where
-    anyAnon = any \case
-      Meta { unmeta = EffectAnon _ } -> True
-      _ -> False
+constrainEqual context expected actual = do
+  constrainEffects context expected actual
+  constrainEffects context actual expected
 
 data UnifyKind
   = UnifyPlain
@@ -249,32 +298,73 @@ data UnifyKind
 class Unify a where
   unify :: UnifyContext -> UnifyKind -> TypeVariance -> a -> a -> MaybeT Infer a
 
+instance Unify a => Unify (Meta a) where
+  unify context kind variance expected actual =
+    meta <$> unify context kind variance (unmeta expected) (unmeta actual)
+
 instance Unify EffectSet where
   unify context kind variance (EffectSet expected) (EffectSet actual) =
     case (kind, variance) of
       (UnifyPlain, VOutput) ->
-        -- Just return a simple union of the effects
+        -- Find the simple union of the effect sets
         return $ EffectSet $ Set.union expected actual
+      (UnifyPlain, VInput)
+        | containsAnon expected || containsAnon actual ->
+          -- Since there is an unresolved variable, delay the intersection calculation
+          return $ singletonEffectSet $ meta $ EffectIntersection (EffectSet actual) (EffectSet expected)
+        | otherwise -> do
+          -- Find the intersection of the expansions of the effect sets
+          eExp <- lift $ expandEffectSet expected
+          eAct <- lift $ expandEffectSet actual
+          return $ EffectSet $ Set.intersection eExp eAct
       _ -> do
-        -- Everything else requires effect expansion, so do it now
-        exp <- lift $ expandEffectSet expected
-        act <- lift $ expandEffectSet actual
-        case (kind, variance) of
-          (UnifyPlain, VInput) ->
-            -- Just return the intersection of the expanded effects
-            return $ EffectSet $ Set.intersection exp act
-          _ -> do
-            -- The simple unification kinds are done, so effect differences are required
-            let
-              exp' = Set.difference exp act
-              act' = Set.difference act exp
-            case variance of
-              VOutput ->
-                constrainEffects context exp' act'
-              VInput ->
-                constrainEffects context act' exp'
-              _ ->
-                -- Whenever invariant is passed, require them to be equal
-                constrainEqual context exp' act'
-            return $ EffectSet exp
+        -- Match the expected effects to the actual effects using the variance
+        case variance of
+          VOutput ->
+            constrainEffects context expected actual
+          VInput ->
+            constrainEffects context actual expected
+          _ ->
+            constrainEqual context expected actual
+        return $ EffectSet expected
+
+instance Unify Type where
+  unify context kind variance expected actual =
+    case (expected, actual) of
+      (TUnit, TUnit) ->
+        return TUnit
+
+      (TNamed eEffs ePath, TNamed aEffs aPath)
+        | aPath == ePath ->
+          addUnifyError context kind
+        | otherwise -> do
+          (dataEffs, _) <- lift $ lookupDecl' $ unmeta ePath
+          effs <- unifyEffs context kind variance dataEffs eEffs aEffs
+          return $ TNamed effs ePath
+
+      (TPoly eName, TPoly aName)
+        | aName == eName ->
+          addUnifyError context kind
+        | otherwise -> do
+          return $ TPoly eName
+
+      (TAnon e, TAnon a)
+        | e == a ->
+          return $ TAnon e
+        | otherwise ->
+          undefined -- TODO
+
+      (TApp eLhs eRhs, TApp aLhs aRhs) -> do
+        lhs <- unify context kind variance eLhs aLhs
+        rhs <- unify context kind variance eRhs aRhs
+        return $ TApp lhs rhs
+
+      (TAnon _, _) ->
+        -- If the expected value is a variable and the actual value isn't, flip it and change the variance
+        unify context kind (VInput <> variance) actual expected
+
+      -- TODO Other TAnon's
+
+      _ ->
+        addUnifyError context kind
 
