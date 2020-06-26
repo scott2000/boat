@@ -93,7 +93,7 @@ infixOp = label "operator" (backtickOp <|> normalOp)
         (span, SpecialOp op) ->
           Left (span, op)
         (span, PlainOp op) ->
-          Right $ InfixOp False $ metaWithSpan span $ Local $ Operator op
+          Right $ InfixOp False $ metaWithSpan' span $ Local $ Operator op
 
 -- | A class for an expression that can be parsed that uses operator precedence
 class (Show a, ExprLike a) => Parsable a where
@@ -201,11 +201,8 @@ parserBase prec current =
                     fail "line breaks are only allowed in expressions"
             else
               empty
-          Left err
-            | spaceErrorRecoverable err ->
-              spaceErrorFail offset err
-            | otherwise ->
-              return $ fail $ show err
+          Left err ->
+            spaceErrorFail offset err
 
     opOrApp spaceBefore =
       op <|> app >>= \case
@@ -233,11 +230,8 @@ parserBase prec current =
               return $ Just do
                 setOffset offsetAfterOp
                 fail "line break never allowed after operator"
-            Left err
-              | spaceErrorRecoverable err ->
-                spaceErrorFail offset err
-              | otherwise ->
-                return $ Just $ fail $ show err
+            Left err ->
+              spaceErrorFail offset err
 
         opParseSpecial offset op =
           if prec <= SpecialPrec then
@@ -318,8 +312,8 @@ instance Parsable Type where
   parseSpecial (span, FunctionArrow) =
     Just $ metaExtendPrec \lhs rhs ->
       let
-        arrow = metaWithSpan span $ Core $ Operator "->"
-        withNoEff = metaWithSpan span $ TNamed [] arrow
+        arrow = metaWithSpan' span $ Core $ Operator "->"
+        withNoEff = metaWithSpan' span $ TNamed [] arrow
         firstApp = metaWithEnds lhs arrow $ TApp withNoEff lhs
       in
         TApp firstApp rhs
@@ -332,8 +326,8 @@ instance Parsable Type where
       parserPrec prec <&> \rhs ->
         let
           arrowSpan = span <> endSpan
-          arrow = metaWithSpan arrowSpan $ Core $ Operator "->"
-          withEff = metaWithSpan arrowSpan $ TNamed [effects] arrow
+          arrow = metaWithSpan' arrowSpan $ Core $ Operator "->"
+          withEff = metaWithSpan' arrowSpan $ TNamed [effects] arrow
           firstApp = metaWithEnds lhs withEff $ TApp withEff lhs
         in
           metaWithEnds firstApp rhs $ TApp firstApp rhs

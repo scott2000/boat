@@ -31,6 +31,7 @@ executable boat
                        Analyze
   default-extensions:  FlexibleContexts,
                        FlexibleInstances,
+                       FunctionalDependencies,
                        NamedFieldPuns,
                        RecordWildCards,
                        RecursiveDo,

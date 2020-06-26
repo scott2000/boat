@@ -33,9 +33,9 @@ addStep other cs =
   cs { vBase = other <> vBase cs }
 
 -- | Finds the data types used by each data type so they can be sorted
-declDeps :: DataDecl -> [Path]
-declDeps DataDecl { dataVariants } =
-  Set.toList $ execWriter $ mapM_ variantDeps dataVariants
+declDeps :: InFile DataDecl -> [Path]
+declDeps =
+  Set.toList . execWriter . mapM_ variantDeps . dataVariants . unfile
   where
     variantDeps = mapM_ typeDeps . snd . unmeta
 
@@ -150,7 +150,7 @@ removeNames :: DataSig -> ([TypeVariance], [DataArg])
 removeNames DataSig { dataEffects, dataArgs } =
   (map snd dataEffects, map snd dataArgs)
 
--- | Looks up a data type declaration's parameters
+-- | Looks up a data type declaration's parameters using a provided lookup function
 lookupDecl :: AddFatal m => (Path -> m (Maybe DataDecl)) -> Path -> m ([TypeVariance], [DataArg])
 lookupDecl _ (Core (Operator "->")) =
   return ([VOutput], [DataArg VInput [], DataArg VOutput []])
@@ -161,6 +161,7 @@ lookupDecl lookup path = do
     Nothing ->
       compilerBug $ "lookupDecl couldn't find `" ++ show path ++ "`"
 
+-- | Looks up a data type declaration's parameters
 lookupDecl' :: Path -> Infer ([TypeVariance], [DataArg])
 lookupDecl' = lookupDecl \path -> do
   InferState { iResolvedDecls, iUnresolvedDecls } <- get
@@ -179,7 +180,7 @@ inferVariance decls = do
   return decls { allDatas = iResolvedDecls i }
   where
     runInfer =
-      mapM_ inferDeclSCC $ topSortPathMap declDeps $ allDatas decls
+      mapM_ inferDeclSCC $ topSort declDeps $ allDatas decls
 
 -- | Infers variance information for a single 'SCC' of the graph of data types
 inferDeclSCC :: SCC (ReversedPath, (Maybe Span, InFile DataDecl)) -> Infer ()
@@ -198,7 +199,7 @@ inferDeclSCC scc = do
     mapM_ (inferConstraintSCC anonMap . AcyclicSCC) $ Map.toList unresolvedVars
   else
     -- There may be cyclic constraints so a second sort is needed
-    mapM_ (inferConstraintSCC anonMap) $ topSortMap variableDeps unresolvedVars
+    mapM_ (inferConstraintSCC anonMap) $ topSort variableDeps unresolvedVars
   resolvedVars <- gets iResolvedVars
   modify \i -> i
     { iResolvedDecls = foldr (addResolved resolvedVars) (iResolvedDecls i) unresolvedList }
@@ -340,55 +341,78 @@ matchArgs resolveAnon expected actual =
 -- | Adds constraints for a data type's variant
 generateConstraints :: FilePath -> DataInfo -> Meta DataVariant -> Infer ()
 generateConstraints file dataInfo Meta { unmeta = (_, types) } =
-  forM_ types $ runMaybeT . inferTypeNoArg [] defaultConstraint
+  forM_ types $ inferTypeMatchArgs [] defaultConstraint []
   where
     lookupNamed :: ExprKind -> Maybe Span -> String -> MaybeT Infer DataArg
     lookupNamed expected span name =
       case mapGet name dataInfo of
-        Just (eff, arg)
-          | eff == expected -> return arg
+        Just (actualKind, arg)
+          | actualKind == expected -> return arg
           | otherwise -> MaybeT do
             addError compileError
               { errorFile = Just file
               , errorSpan = span
               , errorMessage =
-                show eff ++ " parameter `" ++ name ++ "` cannot be used as " ++ aOrAn (show expected) }
+                show actualKind ++ " parameter `" ++ name ++ "` cannot be used as " ++ aOrAn (show expected) }
             return Nothing
         Nothing ->
           -- Indicates that there were multiple parameters with this name so nothing can be done
           MaybeT $ return Nothing
 
-    matchArgs' :: Maybe Span -> [DataArg] -> [DataArg] -> MaybeT Infer ()
+    matchArgs' :: Maybe Span -> [DataArg] -> [DataArg] -> Infer ()
     matchArgs' actualSpan expected actual =
       matchArgs resolveAnon expected actual >>= \case
         Nothing -> return ()
-        Just err -> MaybeT do
+        Just err ->
           addMatchError file actualSpan err
-          return Nothing
       where
         resolveAnon exp anon =
-          lift $ insertConstraint anon $ addStep exp defaultConstraint
+          insertConstraint anon $ addStep exp defaultConstraint
 
-    inferTypeNoArg :: [String] -> VarianceConstraint -> Meta Type -> MaybeT Infer ()
-    inferTypeNoArg locals c ty = do
-      args <- inferType locals c ty
-      matchArgs' (metaSpan ty) [] args
+    inferTypeMatchArgs :: [String] -> VarianceConstraint -> [DataArg] -> Meta Type -> Infer ()
+    inferTypeMatchArgs locals c args typeWithMeta = do
+      runMaybeT (inferType locals c typeWithMeta) >>= \case
+        Nothing ->
+          return ()
+        Just actual ->
+          matchArgs' (metaSpan typeWithMeta) args actual
 
     inferType :: [String] -> VarianceConstraint -> Meta Type -> MaybeT Infer [DataArg]
-    inferType locals c ty =
-      case unmeta ty of
+    inferType locals c typeWithMeta =
+      -- NOTE: A large portion of this code is similar to the type checking code in InferTypes
+      case unmeta typeWithMeta of
         TNamed effs name -> do
           (dataEffects, dataArgs) <- lift $ lookupDecl' $ unmeta name
+          let effCount = length dataEffects
+          case drop effCount effs of
+            [] -> return ()
+            (eff:_) ->
+              addError compileError
+                { errorFile = Just file
+                , errorSpan = metaSpan eff
+                , errorMessage =
+                  "`" ++ show name ++ "` " ++
+                    if effCount == 0 then
+                      "does not accept any effect arguments"
+                    else
+                      "only accepts " ++ plural effCount "effect argument" }
           zipWithM_ matchEff effs dataEffects
           return dataArgs
-        TPoly name -> do
-          arg <- lookupNamed KType (metaSpan ty) name
-          lift $ insertConstraint (getAnon arg) c
-          return $ argParams arg
+        TPoly name
+          | name `elem` locals -> MaybeT do
+            addError compileError
+              { errorFile = Just file
+              , errorSpan = metaSpan typeWithMeta
+              , errorMessage = "quantified effect `" ++ name ++ "` cannot be used as a type" }
+            return Nothing
+          | otherwise -> do
+            arg <- lookupNamed KType (metaSpan typeWithMeta) name
+            lift $ insertConstraint (getAnon arg) c
+            return $ argParams arg
         TAnon _ -> MaybeT do
           addError compileError
             { errorFile = Just file
-            , errorSpan = metaSpan ty
+            , errorSpan = metaSpan typeWithMeta
             , errorMessage = "type in data type variant cannot be left blank" }
           return Nothing
         TApp a b ->
@@ -400,20 +424,17 @@ generateConstraints file dataInfo Meta { unmeta = (_, types) } =
                 { errorFile = Just file
                 , errorSpan = metaSpan b
                 , errorMessage =
-                "parameter `" ++ show base ++ "` " ++
-                  if baseCount == 0 then
-                    "does not accept any arguments"
-                  else
-                    "only accepts " ++ plural baseCount "argument" }
+                  "`" ++ show base ++ "` " ++
+                    if baseCount == 0 then
+                      "does not accept any arguments"
+                    else
+                      "only accepts " ++ plural baseCount "argument" }
               return Nothing
             DataArg { argVariance, argParams } : rest -> lift do
-              runMaybeT (inferType locals (addStep argVariance c) b) >>= \case
-                Nothing -> return ()
-                Just actual ->
-                  void $ runMaybeT $ matchArgs' (metaSpan b) argParams actual
+              inferTypeMatchArgs locals (addStep argVariance c) argParams b
               return rest
-        TForEff e ty -> do
-          inferTypeNoArg (unmeta e : locals) c ty
+        TForEff e typeWithMeta -> do
+          lift $ inferTypeMatchArgs (unmeta e : locals) c [] typeWithMeta
           return []
         _ ->
           return []

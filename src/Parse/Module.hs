@@ -78,7 +78,7 @@ parseFile path = do
         parseEffect = do
           keyword "effect"
           name <- nbsc >> parseMeta parseName
-          effectSuper <- parseEffectSuper <|> pure []
+          effectSuper <- option [] parseEffectSuper
           modAddEffect name EffectDecl { effectSuper } path m
           where
             parseEffectSuper = do
@@ -89,7 +89,7 @@ parseFile path = do
           keyword "let"
           name <- nbsc *> parseMeta parseName <* nbsc
           maybeAscription <- optional (specialOp TypeAscription *> blockOf parserExpectEnd <* nbsc)
-          constraints <- (parseConstraints <* nbsc) <|> pure []
+          constraints <- option [] (parseConstraints <* nbsc)
           body <- specialOp Assignment >> blockOf parser
           let
             bodyWithAscription =
@@ -129,15 +129,18 @@ parseFile path = do
 parseConstraints :: Parser [Meta Constraint]
 parseConstraints = do
   keyword "with"
-  blockOf $ parseSomeCommaList (parseMeta parseConstraint)
+  catMaybes <$> (blockOf $ parseSomeCommaList parseConstraint)
 
--- | Parse a single 'Constraint'
-parseConstraint :: Parser Constraint
-parseConstraint =
-  pure IsSubEffectOf
-  <*> parseMeta parseEffect
-  <*  nbsc
-  <*  specialOp TypeAscription
-  <*  nbsc
-  <*> blockOf parseEffectSet
+-- | Tries to parse a single 'Constraint'
+parseConstraint :: Parser (Maybe (Meta Constraint))
+parseConstraint = do
+  (span, (baseTy, maybeAscription)) <- getSpan do
+    baseTy <- parserExpectEnd
+    maybeAscription <- optional do
+      try (nbsc >> specialOp TypeAscription)
+      nbsc >> blockOf parseEffectSet
+    return (baseTy, maybeAscription)
+  file <- getFilePath
+  constraint <- disambiguateConstraint file baseTy maybeAscription
+  return $ metaWithSpan' span <$> constraint
 

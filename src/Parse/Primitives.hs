@@ -31,7 +31,6 @@ module Parse.Primitives
   , SpaceError (..)
   , spaceErrorBacktrack
   , spaceErrorSingleLine
-  , spaceErrorRecoverable
   , spaceErrorFail
 
     -- * Identifiers
@@ -77,7 +76,6 @@ import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as L
 
 import Data.List
-import Data.Char hiding (isSpace)
 import Control.Monad.Reader
 import qualified Data.List.NonEmpty as NonEmpty
 import qualified Data.Set as Set
@@ -167,18 +165,6 @@ convertParseErrors bundle =
               NonEmpty.length ts
             _ -> 1
 
--- | Checks if a character is valid at the start of an identifier
-isIdentFirst :: Char -> Bool
-isIdentFirst x = (isAlpha x || x == '_') && isAscii x
-
--- | Checks if a character is valid after the first character of an identifier
-isIdentRest :: Char -> Bool
-isIdentRest  x = (isAlpha x || isDigit x || x == '_') && isAscii x
-
--- | Checks if a character is valid in an infix or unary operator
-isOperatorChar :: Char -> Bool
-isOperatorChar w = w `elem` ("+-*/%^!=<>:?|&~$." :: String)
-
 -- | Gets the current position in the file being parsed
 getPos :: Parser Position
 getPos = do
@@ -205,7 +191,7 @@ getSpan p = andSpan <$> getPos <*> p <*> getPos
 -- | Runs a parser and wraps it with additional 'Span' metadata
 parseMeta :: Parser a -> Parser (Meta a)
 parseMeta p =
-  uncurry metaWithSpan <$> getSpan p
+  uncurry metaWithSpan' <$> getSpan p
 
 -- | Starts a new indented block containing the given parser
 blockOf :: Parser a -> Parser a
@@ -293,7 +279,6 @@ data SpaceError
   | UnexpectedEndOfLine
   | UnexpectedLineBreak
   | UnexpectedContinuation
-  | ContinuationIndent Int
 
 instance Show SpaceError where
   show = \case
@@ -305,8 +290,6 @@ instance Show SpaceError where
       "line break not allowed unless directly inside indented block"
     UnexpectedContinuation ->
       "line continuation not allowed unless directly inside indented block"
-    ContinuationIndent n ->
-      "line continuation should be indented exactly 2 spaces more than its enclosing block (found " ++ show n ++ ")"
 
 -- | Checks whether a 'SpaceError' should be emitted before the parsed whitespace
 spaceErrorBacktrack :: SpaceError -> Bool
@@ -322,12 +305,6 @@ spaceErrorSingleLine = \case
   UnexpectedLineBreak -> True
   UnexpectedContinuation -> True
   _ -> False
-
--- | Checks whether a 'SpaceError' may be valid for some enclosing block
-spaceErrorRecoverable :: SpaceError -> Bool
-spaceErrorRecoverable = \case
-  ContinuationIndent _ -> False
-  _ -> True
 
 -- | Given an offset, fails with a given 'SpaceError'
 spaceErrorFail :: Int -> SpaceError -> Parser a
@@ -358,20 +335,16 @@ trySpaces =
         adjustedLevel
           | isEOF = 0
           | otherwise = level
-      if multiline then do
+      if multiline then return
         case adjustedLevel - minIndent of
           0 ->
-            return $ Right LineBreak
-          2 ->
-            return $ Right Whitespace
-          n ->
-            return $ Left $
-              if n < 0 then
-                UnexpectedEndOfIndentedBlock
-              else
-                ContinuationIndent n
+            Right LineBreak
+          n | n > 0 ->
+            Right Whitespace
+          _ ->
+            Left UnexpectedEndOfIndentedBlock
       else
-        return $ Left $
+        return $ Left
           case adjustedLevel `compare` minIndent of
             LT -> UnexpectedEndOfLine
             EQ -> UnexpectedLineBreak
@@ -605,16 +578,43 @@ addFail maybeSpan msg = do
 
 -- | Parses a list of items separated by a character
 parseSomeSeparatedList :: Char -> Parser a -> Parser [a]
-parseSomeSeparatedList sep p =
-  (:) <$> p <*> manyCommas
+parseSomeSeparatedList sep p = someSeps
   where
-    manyCommas = option [] do
-      try (spaces >> char sep) >> spaces
-      option [] ((:) <$> p <*> manyCommas)
+    someSeps =
+      (:) <$> p <*> manySeps
 
--- | Parses a list of items separated by a comma
+    manySeps = option [] do
+      try (spaces >> char sep)
+      spaces >> someSeps
+
+-- | Parses a list of items separated by a comma (and an optional trailing comma)
 parseSomeCommaList :: Parser a -> Parser [a]
-parseSomeCommaList = parseSomeSeparatedList ','
+parseSomeCommaList p = someComma False
+  where
+    someComma previousMissing =
+      (:) <$> p <*> manyComma previousMissing
+
+    manyComma previousMissing = option [] do
+      startPos <- getPos
+      missingComma <- try do
+        spaces
+        (char ',' >> return False) <|> lookAhead (token canStartItem Set.empty)
+      when (missingComma && not previousMissing) $ do
+        file <- getFilePath
+        addError compileError
+          { errorFile = Just file
+          , errorSpan = Just $ pointSpan startPos
+          , errorMessage = "expected comma between items in list" }
+      option [] $ do
+        try spaces
+        someComma (missingComma || previousMissing)
+
+    canStartItem = \case
+      ')' -> Nothing
+      ']' -> Nothing
+      '}' -> Nothing
+      '=' -> Nothing
+      _   -> Just True
 
 -- | Parses a list of items separated by line breaks
 someBetweenLines :: Parser a -> Parser [a]

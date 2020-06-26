@@ -43,6 +43,9 @@ module Utility.Basics
   , ordinal
   , aOrAn
   , isKeyword
+  , isIdentFirst
+  , isIdentRest
+  , isOperatorChar
   , isCap
   , capFirst
   , lowerFirst
@@ -458,6 +461,18 @@ keywords = Set.fromList
 -- | Checks if a given string is a keyword
 isKeyword :: String -> Bool
 isKeyword w = w `Set.member` keywords
+
+-- | Checks if a character is valid at the start of an identifier
+isIdentFirst :: Char -> Bool
+isIdentFirst x = (isAlpha x || x == '_') && isAscii x
+
+-- | Checks if a character is valid after the first character of an identifier
+isIdentRest :: Char -> Bool
+isIdentRest  x = (isAlpha x || isDigit x || x == '_') && isAscii x
+
+-- | Checks if a character is valid in an infix or unary operator
+isOperatorChar :: Char -> Bool
+isOperatorChar w = w `elem` ("+-*/%^!=<>:?|&~$." :: String)
 
 -- | Checks if a character is considered uppercase (A-Z or _)
 isCap :: Char -> Bool

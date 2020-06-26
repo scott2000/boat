@@ -3,9 +3,14 @@ module Utility.AST
   ( -- * Metadata
     Meta
   , MetaR
-  , MetaWith (..)
+  , MetaWith
+  , MetaS
+  , MetaSpan
+  , SomeMeta (..)
+  , MetaInfo (..)
   , meta
   , metaWithSpan
+  , metaWithSpan'
   , copySpan
   , metaWithEnds
   , pattern DefaultMeta
@@ -22,14 +27,17 @@ module Utility.AST
   , PatternWith (..)
   , bindingsForPat
   , assertUniqueBindings
-  , Type (..)
-  , EffectSet (..)
+  , Type
+  , TypeNoSpan
+  , TypeSpan (..)
+  , EffectSet
+  , EffectSetNoSpan
+  , EffectSetSpan (..)
   , emptyEffectSet
   , singletonEffectSet
   , Effect (..)
   , pattern EffectPure
   , pattern EffectVoid
-  , Constraint (..)
   , UseModule (..)
   , UseContents (..)
 
@@ -75,56 +83,82 @@ import Control.Monad.Trans.Maybe
 import Data.Set (Set)
 import qualified Data.Set as Set
 
+-- | Stores a value with optional span metadata and some type information
+type MetaWith = SomeMeta (Maybe Span)
+
 -- | Stores a value with optional span metadata
 type Meta = MetaWith ()
 
 -- | Helper for recursive versions of 'MetaWith'
 type MetaR expr ty = MetaWith ty (expr ty)
 
--- | Stores a value with optional span metadata and some type information
-data MetaWith ty a = Meta
+-- | Stores a value with some span information
+type MetaSpan span = SomeMeta span ()
+
+-- | Helper for recursive versions of 'MetaSpan'
+type MetaS expr span = MetaSpan span (expr span)
+
+-- | Stores a value with some span and type information
+data SomeMeta span ty a = Meta
   { -- | The inner value being stored
     unmeta :: a
-    -- | The location of the value in its source file
-  , metaSpan :: !(Maybe Span)
+    -- | The location of the value in its source file (if applicable)
+  , metaSpan :: !span
     -- | The type of a value (if inferred and applicable)
   , metaTy :: !ty }
   deriving (Functor, Foldable, Traversable)
 
-instance (Ord ty, Ord a) => Ord (MetaWith ty a) where
+instance (Ord ty, Ord a) => Ord (SomeMeta span ty a) where
   m0 `compare` m1 = unmeta m0 `compare` unmeta m1 <> metaTy m0 `compare` metaTy m1
 
-instance (Eq ty, Eq a) => Eq (MetaWith ty a) where
+instance (Eq ty, Eq a) => Eq (SomeMeta span ty a) where
   m0 == m1 = unmeta m0 == unmeta m1 && metaTy m0 == metaTy m1
 
-instance Show a => Show (MetaWith ty a) where
+instance Show a => Show (SomeMeta span ty a) where
   showsPrec i = showsPrec i . unmeta
 
+-- | An item that has a default value for 'SomeMeta'
+class MetaInfo a where
+  -- | The default value to use for this field
+  defaultMetaInfo :: a
+
+instance MetaInfo () where
+  defaultMetaInfo = ()
+
+instance MetaInfo (Maybe a) where
+  defaultMetaInfo = Nothing
+
 -- | Stores a value with no additional metadata
-meta :: a -> Meta a
+meta :: (MetaInfo span, MetaInfo ty) => a -> SomeMeta span ty a
 meta x = Meta
   { unmeta = x
-  , metaSpan = Nothing
-  , metaTy = () }
+  , metaSpan = defaultMetaInfo
+  , metaTy = defaultMetaInfo }
 
 -- | Stores a value with a 'Span' taken from another
-copySpan :: Meta a -> b -> Meta b
-copySpan Meta { metaSpan } x =
-  (meta x) { metaSpan }
+copySpan :: MetaInfo ty => SomeMeta span ty a -> b -> SomeMeta span ty b
+copySpan Meta { metaSpan } x = Meta
+  { unmeta = x
+  , metaSpan
+  , metaTy = defaultMetaInfo }
 
--- | Stores a value with a certain 'Span'
-metaWithSpan :: Span -> a -> Meta a
-metaWithSpan span x = (meta x)
-  { metaSpan = Just span }
+-- | Stores a value with optional span information
+metaWithSpan :: MetaInfo ty => span -> a -> SomeMeta span ty a
+metaWithSpan span x = Meta
+  { unmeta = x
+  , metaSpan = span
+  , metaTy = defaultMetaInfo }
+
+-- | A specialized version of 'metaWithSpan' that always takes a 'Span'
+metaWithSpan' :: Span -> a -> Meta a
+metaWithSpan' = metaWithSpan . Just
 
 -- | Stores a value with a 'Span' between the two given ends
 metaWithEnds :: Meta a -> Meta b -> c -> Meta c
-metaWithEnds
-    Meta { metaSpan = Just span0 }
-    Meta { metaSpan = Just span1 }
-    x
-  = (meta x) { metaSpan = Just (span0 <> span1) }
-metaWithEnds _ _ x = meta x
+metaWithEnds Meta { metaSpan = Just span0 } Meta { metaSpan = Just span1 } =
+  metaWithSpan $ Just (span0 <> span1)
+metaWithEnds _ _ =
+  meta
 
 -- | Represents the different kinds of AST expression
 data ExprKind
@@ -180,25 +214,33 @@ afterPath m k path = do
   p <- aPath m k path
   return path { unmeta = p }
 
--- | A wrapper around a set of 'Effect's
-newtype EffectSet = EffectSet
-  { setEffects :: Set (Meta Effect) }
+-- | A wrapper around a set of 'Effect's (with no span information)
+type EffectSetNoSpan = EffectSetSpan ()
+
+-- | A wrapper around a set of 'Effect's (with optional span information)
+type EffectSet = EffectSetSpan (Maybe Span)
+
+-- | A wrapper around a set of 'Effect's (with some span information)
+newtype EffectSetSpan span = EffectSet
+  { setEffects :: Set (MetaSpan span Effect) }
   deriving (Ord, Eq)
 
 instance After EffectSet where
   after m =
     mapM \EffectSet { setEffects } ->
-      EffectSet <$> Set.fromList <$> mapM (after m) (Set.toList setEffects)
+      EffectSet <$> Set.fromList <$> mapM (after m) (Set.toAscList setEffects)
 
-instance Show EffectSet where
+instance Show (EffectSetSpan span) where
   show EffectSet { setEffects }
     | Set.null setEffects = "Pure"
-    | otherwise = intercalate " + " $ map show $ Set.toList setEffects
+    | otherwise = intercalate " + " $ map show $ Set.toAscList setEffects
 
-emptyEffectSet :: EffectSet
+-- | An empty @EffectSet@
+emptyEffectSet :: EffectSetSpan span
 emptyEffectSet = EffectSet Set.empty
 
-singletonEffectSet :: Meta Effect -> EffectSet
+-- | An @EffectSet@ with a single element
+singletonEffectSet :: MetaSpan span Effect -> EffectSetSpan span
 singletonEffectSet = EffectSet . Set.singleton
 
 -- | An effect that can occur in impure code
@@ -211,8 +253,6 @@ data Effect
   | EffectAnon AnonCount
   -- | A local variable's effect
   | EffectLocal AnonCount
-  -- | A set of effects that are only present in both sets
-  | EffectIntersection EffectSet EffectSet
   deriving (Ord, Eq)
 
 instance After Effect where
@@ -230,26 +270,15 @@ instance Show Effect where
     EffectPoly name  -> name
     EffectAnon _     -> "_"
     EffectLocal anon -> "<local" ++ show anon ++ ">"
-    EffectIntersection lhs rhs ->
-      "(" ++ show lhs ++ ") & (" ++ show rhs ++ ")"
 
 -- | Formats a string of |...| bracketed effects to add after a declaration
-effectSuffix :: [Meta EffectSet] -> String
+effectSuffix :: [MetaS EffectSetSpan span] -> String
 effectSuffix = effectSuffixStr . map show
 
 -- | Same as 'effectSuffix', but accepts strings instead
 effectSuffixStr :: [String] -> String
 effectSuffixStr = concatMap \effect ->
   " |" ++ effect ++ "|"
-
--- | A constraint from a with-clause in a declaration
-data Constraint
-  = Meta Effect `IsSubEffectOf` EffectSet
-  deriving (Ord, Eq)
-
-instance Show Constraint where
-  show (effect `IsSubEffectOf` set) =
-    show effect ++ " : " ++ show set
 
 -- | A path specifying a single item or module to use
 data UseModule
@@ -282,25 +311,31 @@ instance Show UseContents where
     UseAll rest ->
       " (" ++ intercalate ", " (map show rest) ++ ")"
 
--- | The type of an expression
-data Type
+-- | The type of an expression (with no span information)
+type TypeNoSpan = TypeSpan ()
+
+-- | The type of an expression (with optional span information)
+type Type = TypeSpan (Maybe Span)
+
+-- | The type of an expression (with some span information)
+data TypeSpan span
   -- | The @()@ type
   = TUnit
   -- | A named type and any effect arguments
-  | TNamed [Meta EffectSet] (Meta Path)
+  | TNamed [MetaS EffectSetSpan span] (MetaSpan span Path)
   -- | A lowercase type variable
   | TPoly String
   -- | A type left blank to be inferred
   | TAnon AnonCount
   -- | An application of a type argument to a type
-  | TApp (Meta Type) (Meta Type)
+  | TApp (MetaS TypeSpan span) (MetaS TypeSpan span)
   -- | A type with a universally quantified effect variable
-  | TForEff (Meta String) (Meta Type)
+  | TForEff (MetaSpan span String) (MetaS TypeSpan span)
 
   -- Unassociated operators
-  | TParen (Meta Type)
-  | TUnaryOp (Meta Path) (Meta Type)
-  | TBinOp (Meta Path) (Meta Type) (Meta Type)
+  | TParen (MetaS TypeSpan span)
+  | TUnaryOp (MetaSpan span Path) (MetaS TypeSpan span)
+  | TBinOp (MetaSpan span Path) (MetaS TypeSpan span) (MetaS TypeSpan span)
   deriving Eq
 
 instance After Type where
@@ -317,12 +352,15 @@ instance After Type where
         TParen <$> after m a
       TUnaryOp path a ->
         TUnaryOp <$> afterPath m KType path <*> after m a
-      TBinOp path a b ->
-        TBinOp <$> afterPath m KType path <*> after m a <*> after m b
+      TBinOp path a b -> do
+        a <- after m a
+        path <- afterPath m KType path
+        b <- after m b
+        return $ TBinOp path a b
       other ->
         return other
 
-instance Show Type where
+instance MetaInfo span => Show (TypeSpan span) where
   show = \case
     TUnit -> "()"
     TNamed effs path -> show path ++ effectSuffix effs
@@ -388,7 +426,7 @@ reduceApplyNoInfix typeWithMeta =
       Right $ ReducedApp typeWithMeta []
 
 -- | Find the base of a series of applications and the number of applications removed
-findBase :: Meta Type -> (Meta Type, Int)
+findBase :: MetaS TypeSpan span -> (MetaS TypeSpan span, Int)
 findBase = go 0
   where
     go n ty =
@@ -399,39 +437,47 @@ findBase = go 0
           (ty, n)
 
 -- | Create a function type from a series of argument types and a return type
-expandFunction :: [Meta Type] -> Meta Type -> Meta Type
+expandFunction :: MetaInfo span => [MetaS TypeSpan span] -> MetaS TypeSpan span -> MetaS TypeSpan span
 expandFunction [] ty = ty
 expandFunction (ty:types) ret =
   meta $ TFunc ty $ expandFunction types ret
 
 -- | Matches any value and ignores metadata completely
-pattern DefaultMeta :: a -> Meta a
+pattern DefaultMeta :: MetaInfo span => a -> MetaSpan span a
 pattern DefaultMeta x <- Meta { unmeta = x }
   where DefaultMeta = meta
 
 -- | A function arrow with a list of effect parameters
-pattern TAnyFuncArrow :: [Meta EffectSet] -> Type
+pattern TAnyFuncArrow :: MetaInfo span => [MetaS EffectSetSpan span] -> TypeSpan span
 pattern TAnyFuncArrow effs = TNamed effs (DefaultMeta (Core (Operator "->")))
 
 -- | A function arrow with a single effect parameter
-pattern TEffFuncArrow :: Meta EffectSet -> Type
+pattern TEffFuncArrow :: MetaInfo span => MetaS EffectSetSpan span -> TypeSpan span
 pattern TEffFuncArrow eff = TAnyFuncArrow [eff]
 
 -- | A function arrow with no effect parameters
-pattern TFuncArrow :: Type
+pattern TFuncArrow :: MetaInfo span => TypeSpan span
 pattern TFuncArrow = TAnyFuncArrow []
 
 -- | A function type with a list of effect parameters
-pattern TAnyFunc :: [Meta EffectSet] -> Meta Type -> Meta Type -> Type
+pattern TAnyFunc :: MetaInfo span
+                 => [MetaS EffectSetSpan span]
+                 -> MetaS TypeSpan span
+                 -> MetaS TypeSpan span
+                 -> TypeSpan span
 pattern TAnyFunc effs a b =
   TApp (DefaultMeta (TApp (DefaultMeta (TAnyFuncArrow effs)) a)) b
 
 -- | A function type with a single effect parameter
-pattern TEffFunc :: Meta EffectSet -> Meta Type -> Meta Type -> Type
+pattern TEffFunc :: MetaInfo span
+                 => MetaS EffectSetSpan span
+                 -> MetaS TypeSpan span
+                 -> MetaS TypeSpan span
+                 -> TypeSpan span
 pattern TEffFunc eff a b = TAnyFunc [eff] a b
 
 -- | A function type with no effect parameters
-pattern TFunc :: Meta Type -> Meta Type -> Type
+pattern TFunc :: MetaInfo span => MetaS TypeSpan span -> MetaS TypeSpan span -> TypeSpan span
 pattern TFunc a b = TAnyFunc [] a b
 
 -- | An effect representing pure code
@@ -547,8 +593,11 @@ instance After Expr where
         EParen <$> after m a
       EUnaryOp path a ->
         EUnaryOp <$> afterPath m KValue path <*> after m a
-      EBinOp path a b ->
-        EBinOp <$> afterPath m KValue path <*> after m a <*> after m b
+      EBinOp path a b -> do
+        a <- after m a
+        path <- afterPath m KValue path
+        b <- after m b
+        return $ EBinOp path a b
       other ->
         return other
     where
@@ -648,8 +697,11 @@ instance After Pattern where
         PParen <$> after m a
       PUnaryOp path a ->
         PUnaryOp <$> afterPath m KPattern path <*> after m a
-      PBinOp path a b ->
-        PBinOp <$> afterPath m KPattern path <*> after m a <*> after m b
+      PBinOp path a b -> do
+        a <- after m a
+        path <- afterPath m KPattern path
+        b <- after m b
+        return $ PBinOp path a b
       other ->
         return other
 

@@ -6,8 +6,13 @@ module Utility.Program
   , Associativity (..)
   , OpDecl (..)
   , EffectDecl (..)
+  , Constraint
+  , ConstraintNoSpan
+  , ConstraintSpan (..)
+  , disambiguateConstraint
   , LetDecl
-  , LetDeclWith (..)
+  , LetDeclInferred
+  , SomeLetDecl (..)
 
     -- * Data Types
   , DataDecl (..)
@@ -28,7 +33,8 @@ module Utility.Program
 
     -- * Fully Resolved Representation
   , AllDecls
-  , AllDeclsWith (..)
+  , AllDeclsInferred
+  , SomeAllDecls (..)
   , emptyDecls
 
     -- * Nested Module Representation
@@ -74,6 +80,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
 import Control.Monad.State.Strict
+import Control.Monad.Trans.Maybe
 
 -- | Associates a file path with a declaration
 data InFile a = (:/:)
@@ -110,7 +117,7 @@ showDecl (name, decl) = showWithName (show name) decl
 
 -- | Shows every item in a map where the key is the name
 showDeclMap :: (ShowWithName a, Show s) => Map s a -> [String]
-showDeclMap = map showDecl . Map.toList
+showDeclMap = map showDecl . Map.toAscList
 
 -- | A path with its 'Name' parts reversed for more efficient comparisons
 newtype ReversedPath = ReversedPath [Name]
@@ -159,12 +166,12 @@ pathMapInsert' path decl =
 
 -- | Gets a list of all of the entries in the 'PathMap'
 pathMapEntries :: PathMap a -> [(Meta Path, InFile a)]
-pathMapEntries = map pathMapConvert . Map.toList . unPathMap
+pathMapEntries = map pathMapConvert . Map.toAscList . unPathMap
 
 -- | Converts the internal representation of the 'PathMap' into a more usable one
 pathMapConvert :: (ReversedPath, (Maybe Span, InFile a)) -> (Meta Path, InFile a)
 pathMapConvert (ReversedPath names, (span, decl)) =
-  ((meta $ Path $ reverse names) { metaSpan = span }, decl)
+  (metaWithSpan span $ Path $ reverse names, decl)
 
 -- | A version of @showDeclMap@ specialized to a 'PathMap'
 showPathMap :: ShowWithName a => PathMap a -> [String]
@@ -173,16 +180,19 @@ showPathMap = map showDecl . pathMapEntries
 -- | Represents the upper and lower bound for the precedence of an operator type
 type OpTypeEnds = (Maybe (Meta Path), Maybe (Meta Path))
 
--- | A collection of all declarations in a package by absolute path
-type AllDecls = AllDeclsWith ()
+-- | A collection of all declarations in a package by absolute path (with optional span information)
+type AllDecls = SomeAllDecls (Maybe Span) ()
 
--- | A collection of all declarations in a package by absolute path (with some type information)
-data AllDeclsWith ty = AllDecls
+-- | A collection of all declarations in a package by absolute path (with type information)
+type AllDeclsInferred = SomeAllDecls () TypeNoSpan
+
+-- | A collection of all declarations in a package by absolute path (with some span and type information)
+data SomeAllDecls span ty = AllDecls
   { allOpTypes :: !(PathMap OpTypeEnds)
   , allOpDecls :: !(PathMap OpDecl)
   , allEffects :: !(PathMap EffectDecl)
   , allDatas :: !(PathMap DataDecl)
-  , allLets :: !(PathMap (LetDeclWith ty)) }
+  , allLets :: !(PathMap (SomeLetDecl span ty)) }
 
 instance Show AllDecls where
   show AllDecls { allOpTypes, allOpDecls, allEffects, allDatas, allLets } =
@@ -228,7 +238,7 @@ instance Show Module where
   show Module { modUses, modSubs, modOpTypes, modOpDecls, modEffects, modDatas, modLets } =
     intercalate "\n" $ concat
       [ map showUse $ reverse modUses
-      , map showMod $ Map.toList modSubs
+      , map showMod $ Map.toAscList modSubs
       , map showOpType $ reverse modOpTypes
       , showDeclMap modOpDecls
       , showDeclMap modEffects
@@ -419,13 +429,35 @@ modAddEffect name decl path mod = do
       , errorMessage = "duplicate effect declaration for name `" ++ show name ++ "`" }
   return mod { modEffects = Map.insert name newDecl oldEffects }
 
--- | A declaration for a top-level binding of an expression
-type LetDecl = LetDeclWith ()
+-- | A constraint from a with-clause in a declaration (with no span information)
+type ConstraintNoSpan = ConstraintSpan ()
 
--- | A declaration for a top-level binding of an expression (with some type information)
-data LetDeclWith ty = LetDecl
+-- | A constraint from a with-clause in a declaration (with optional span information)
+type Constraint = ConstraintSpan (Maybe Span)
+
+-- | A constraint from a with-clause in a declaration (with some span information)
+data ConstraintSpan span
+  = Meta Effect `IsSubEffectOf` EffectSetSpan span
+  | Meta String `HasArguments` [DataArg]
+  deriving (Ord, Eq)
+
+instance Show (ConstraintSpan span) where
+  show = \case
+    effect `IsSubEffectOf` set ->
+      show effect ++ " : " ++ show set
+    name `HasArguments` args ->
+      showWithName (unmeta name) $ DataArg VInvariant args
+
+-- | A declaration for a top-level binding of an expression (with optional span information)
+type LetDecl = SomeLetDecl (Maybe Span) ()
+
+-- | A declaration for a top-level binding of an expression (with type information)
+type LetDeclInferred = SomeLetDecl () TypeNoSpan
+
+-- | A declaration for a top-level binding of an expression (with some span and type information)
+data SomeLetDecl span ty = LetDecl
   { letBody :: MetaR ExprWith ty
-  , letConstraints :: [Meta Constraint]
+  , letConstraints :: [MetaS ConstraintSpan span]
   , letInferredType :: ty
   , letInstanceArgs :: [String] }
 
@@ -474,7 +506,7 @@ data TypeVariance
   | VInput
   -- | Invariance, represented as @_@ for high-order parameters
   | VInvariant
-  deriving Eq
+  deriving (Ord, Eq)
 
 instance Show TypeVariance where
   show = \case
@@ -503,6 +535,7 @@ pattern SymbolInput = Local (Operator "-")
 data DataArg = DataArg
   { argVariance :: !TypeVariance
   , argParams :: [DataArg] }
+  deriving (Ord, Eq)
 
 instance Show DataArg where
   show arg =
@@ -569,6 +602,81 @@ modAddData name decl path mod = do
       , errorMessage = "duplicate data type declaration for name `" ++ show name ++ "`" }
   return mod { modDatas = Map.insert name newDecl oldDatas }
 
+-- | Parses a constraint from a type that would be ambiguous on its own
+disambiguateConstraint :: AddError m => FilePath -> Meta Type -> Maybe EffectSet -> m (Maybe Constraint)
+disambiguateConstraint file typeWithMeta maybeAscription =
+  case maybeAscription of
+    Nothing ->
+      -- There was no ascription, so this is a type constraint
+      case reduceApplyNoInfix typeWithMeta of
+        Left _ ->
+          -- Anything using an infix operator must be a trait constraint
+          traitsUnimplemented
+        Right (ReducedApp Meta { unmeta = baseTy, metaSpan = baseSpan } args) ->
+          case baseTy of
+            TNamed _ _ ->
+              -- Named types are for trait constraints
+              traitsUnimplemented
+            TPoly name
+              | null args -> do
+                addError compileError
+                  { errorFile = Just file
+                  , errorSpan = metaSpan typeWithMeta
+                  , errorMessage = "expected arguments after kind constraint" }
+                return Nothing
+              | otherwise -> do
+                -- This is a kind constraint like (m (+))
+                argKinds <- forM args $ dataArgFromType file
+                return $ Just $ metaWithSpan baseSpan name `HasArguments` argKinds
+            TAnon _ -> do
+              addError compileError
+                { errorFile = Just file
+                , errorSpan = baseSpan
+                , errorMessage = "constraint name cannot be left blank" }
+              return Nothing
+            _ -> do
+              addError compileError
+                { errorFile = Just file
+                , errorSpan = baseSpan
+                , errorMessage = "expected a name for a constraint" }
+              return Nothing
+    Just bound -> runMaybeT do
+      -- There was an ascription, so this is an effect constraint
+      eff <-
+        case unmeta typeWithMeta of
+          TNamed [] name ->
+            return $ EffectNamed $ unmeta name
+          TPoly name ->
+            return $ EffectPoly name
+          TAnon anon -> do
+            addError compileError
+              { errorFile = Just file
+              , errorSpan = metaSpan typeWithMeta
+              , errorMessage = "expected a specific effect before `:` in constraint" }
+            return $ EffectAnon anon
+          _ -> MaybeT do
+            addError compileError
+              { errorFile = Just file
+              , errorSpan = metaSpan typeWithMeta
+              , errorMessage = "expected a single effect before `:` in constraint" }
+            return Nothing
+      forM_ (setEffects bound) \eff ->
+        case unmeta eff of
+          EffectAnon _ ->
+            addError compileError
+              { errorFile = Just file
+              , errorSpan = metaSpan eff
+              , errorMessage = "effect in constraint cannot be left blank" }
+          _ -> return ()
+      return $ copySpan typeWithMeta eff `IsSubEffectOf` bound
+  where
+    traitsUnimplemented = do
+      addError compileError
+        { errorFile = Just file
+        , errorSpan = metaSpan typeWithMeta
+        , errorMessage = "trait constraints have not been implemented yet" }
+      return Nothing
+
 -- | A common subset of the possibilities for a type or effect
 data MaybeLowercase
   = MLNamed Path
@@ -611,7 +719,7 @@ extractParameter err span kind = \case
     err ("expected name for " ++ kind ++ " parameter, found `" ++ other ++ "` instead")
   where
     justParam name var =
-      return $ Just ((meta name) { metaSpan = span }, var)
+      return $ Just (metaWithSpan span name, var)
     unnamed var =
       justParam "_" var
 

@@ -268,7 +268,7 @@ addModule mod nt = nt
 
 -- | Converts a 'NameTable' to a list of named items
 nameTableToList :: NameTable -> [(Name, Item)]
-nameTableToList = Map.toList . getNameTable
+nameTableToList = Map.toAscList . getNameTable
 
 -- | Tries to get an item from a 'NameTable'
 nameTableEntry :: Name -> NameTable -> Maybe Item
@@ -551,13 +551,13 @@ nameResolveEach path mod =
   foldl' (flip (addUse path)) go (modUses mod)
   where
     go = do
-      forM_ (Map.toList $ modSubs mod) \(name, mods) ->
+      forM_ (Map.toAscList $ modSubs mod) \(name, mods) ->
         forM_ mods $ nameResolveEach (path .|. name)
       mapM_ nameResolveOpType $ modOpTypes mod
-      mapM_ nameResolveOpDecl $ Map.toList $ modOpDecls mod
-      mapM_ nameResolveEffect $ Map.toList $ modEffects mod
-      mapM_ nameResolveData $ Map.toList $ modDatas mod
-      mapM_ nameResolveLet $ Map.toList $ modLets mod
+      mapM_ nameResolveOpDecl $ Map.toAscList $ modOpDecls mod
+      mapM_ nameResolveEffect $ Map.toAscList $ modEffects mod
+      mapM_ nameResolveData $ Map.toAscList $ modDatas mod
+      mapM_ nameResolveLet $ Map.toAscList $ modLets mod
 
     nameResolveOpType (file :/: ops) =
       case ops of
@@ -769,7 +769,7 @@ nameResolvePath file check kind span path@(Path parts@(head:rest)) = do
 
     oneOfMany paths = pathErr $
       "`" ++ show path ++ "` could refer to any one of the following:\n"
-      ++ intercalate "\n" (map showExt $ Set.toList paths)
+      ++ intercalate "\n" (map showExt $ Set.toAscList paths)
       where
         showExt (Path start) = show $ Path (start ++ parts)
 
@@ -822,7 +822,7 @@ getClosest target = do
         -- Since the target name isn't too short, allow (ceil (length/5)) differences
         (4 + length (getNameString target)) `div` 5
     -- Find all of the names within the range of acceptable differences
-    closeNames = filter (isClose normalizedTarget maxDiff) $ Set.toList names
+    closeNames = filter (isClose normalizedTarget maxDiff) $ Set.toAscList names
   -- Return the list of names sorted by non-normalized edit distance
   return $ sortOn (levenshteinDistance defaultEditCosts (show target) . show) closeNames
 

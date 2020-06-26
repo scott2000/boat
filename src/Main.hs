@@ -27,6 +27,8 @@ data Phase
   | PhaseAssocOps
   -- | The variance inference phase defined in "Analyze.InferVariance" ('inferVariance')
   | PhaseInferVariance
+  -- | The type inference phase defined in "Analyze.InferTypes" ('inferTypes')
+  | PhaseInferTypes
 
 -- | The entry point of the compiler, parses arguments and then calls 'startCompile'
 main :: IO ()
@@ -43,6 +45,7 @@ main = do
           PhaseNameResolve -> "name resolution"
           PhaseAssocOps -> "operator association"
           PhaseInferVariance -> "variance inference"
+          PhaseInferTypes -> "type inference"
         compilerBugRawIO $ "unexpected crash during " ++ phaseMsg ++ ":" ++ indent (show e) ]
   where
     parseArgs currentDirectory =
@@ -95,12 +98,16 @@ startCompile phase = do
 
   setPhase phase PhaseInferVariance
   allDecls <- inferVariance allDecls
-  exitIfErrors
+  -- Errors here shouldn't stop compilation until after the kinds of type ascriptions are checked
 
   liftIO $ putStrLn $ "\nInferred variances:\n"
   liftIO $ forM_ (pathMapEntries $ allDatas allDecls) $
     \(name, _ :/: DataDecl { dataSig = DataSig { dataEffects, dataArgs } }) -> putStrLn $
       show name ++ effectSuffixStr (map (show . snd) dataEffects) ++ unwords ("" : map (show . snd) dataArgs)
+
+  setPhase phase PhaseInferTypes
+  _allDecls <- inferTypes allDecls
+  exitIfErrors
 
   finishAndCheckErrors
   where

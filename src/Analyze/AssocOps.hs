@@ -90,13 +90,13 @@ checkVertexOrdering graph a b =
 -- | Sorts the operator types into the order they should be added to the graph
 getSortedAcyclic :: AllDecls -> CompileIO [(Meta Path, InFile OpTypeEnds)]
 getSortedAcyclic AllDecls { allOpTypes } =
-  checkForCycles $ topSortPathMap concatEnds allOpTypes
+  checkForCycles $ topSort concatEnds allOpTypes
   where
     concatEnds = \case
-      (Nothing, Nothing) -> []
-      (Nothing, Just b)  -> [unmeta b]
-      (Just a,  Nothing) -> [unmeta a]
-      (Just a,  Just b)  -> [unmeta a, unmeta b]
+      _ :/: (Nothing, Nothing) -> []
+      _ :/: (Nothing, Just b)  -> [unmeta b]
+      _ :/: (Just a,  Nothing) -> [unmeta a]
+      _ :/: (Just a,  Just b)  -> [unmeta a, unmeta b]
 
     checkForCycles = \case
       [] ->

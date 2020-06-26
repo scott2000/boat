@@ -12,6 +12,7 @@ module Utility.ErrorPrint
   , compilerBugRawIO
 
     -- * Error Printing
+  , footerPrefix
   , exitIfErrors
   , finishAndCheckErrors
   ) where
@@ -22,7 +23,7 @@ import System.IO (readFile)
 import System.Exit (exitFailure)
 
 import Data.Maybe (fromMaybe)
-import Data.List (intercalate)
+import Data.List (intercalate, stripPrefix)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Control.Monad.State.Strict
@@ -48,7 +49,7 @@ exitIfErrors = do
   when (errorCount count /= 0) do
     addError compileError
       { errorMessage =
-        "stopping due to " ++ show count ++
+        footerPrefix ++ "stopping due to " ++ show count ++
         if not compileExplainErrors && hasExplainError count then
           "\n(try --explain-errors for more info)"
         else
@@ -63,7 +64,8 @@ finishAndCheckErrors = do
   count <- liftCompile $ gets compileErrorCount
   addError compileError
     { errorKind = Done
-    , errorMessage = "compiled successfully with " ++ show count }
+    , errorMessage =
+      footerPrefix ++ "compiled successfully with " ++ show count }
   printErrors
 
 -- | Header printed before an error message for a compiler bug
@@ -85,6 +87,10 @@ compilerBugRawIO err = do
   prettyCompileErrors False $ Set.singleton compileError
     { errorMessage = compilerBugBaseMessage ++ err }
   exitFailure
+
+-- | A prefix that indicates a message should be printed last in its file
+footerPrefix :: String
+footerPrefix = "~!~"
 
 -- | Prints all errors that have been generated
 printErrors :: MonadCompile m => m ()
@@ -429,19 +435,48 @@ getLineRangeAndContext spanStart spanEnd = do
       case take lineCount $ peAfter s of
         [] -> ["<end of file>"]
         lines -> lines
+
     targetColumn =
       firstColumnOr1 $ head lines
-    context _ [] = []
-    context acc (line:rest) =
+
+    isSingleWordLine line =
+      case splitWords line of
+        (_:_:_) -> False
+        _ -> True
+
+    isWordChar ch =
+      isIdentRest ch || isOperatorChar ch
+
+    splitWords line =
+      case dropWhile (not . isWordChar) line of
+        [] -> []
+        trimmed ->
+          let (word, rest) = span isWordChar trimmed in
+          word : splitWords rest
+
+    -- Look for the previous line with a lower indentation and include up to it for context. If the line only contains
+    -- one word, then try the line immediately before it. If that line also contains only one word (or is blank), don't
+    -- give anny context. Otherwise, add it onto the context as well.
+    getContext _ [] = []
+    getContext acc (line:rest) =
       case firstColumn line of
         Just column | column < targetColumn ->
-          line : acc
+          case rest of
+            (line':_) | isSingleWordLine line ->
+              case firstColumn line' of
+                Just column' | not (isSingleWordLine line'), column' < column ->
+                  line' : line : acc
+                _ ->
+                  []
+            _ ->
+              line : acc
         _ ->
-          context (line:acc) rest
+          getContext (line:acc) rest
+
     contextLines
       | targetColumn == 1 = []
       | otherwise =
-        context [] $ peBefore s
+        getContext [] $ peBefore s
   return (contextLines, lines)
   where
     startLine = posLine spanStart
@@ -511,20 +546,26 @@ printMessageFooter errorKind errorMessage = do
   setBoldColor $ errorColor errorKind
   putStr tag
   resetColor
-  putStrLn (" " ++ intercalate ("\n " ++ replicate tagLength ' ') (lines $ format errorMessage))
+  putStrLn (" " ++ intercalate ("\n " ++ replicate tagLength ' ') (lines formattedMessage))
   where
     tag = "[" ++ show errorKind ++ "]"
     tagLength = length tag
-
-    format (' ':x:multiline) | x /= ' ' =
-      -- Only do multiline formatting if there is a single space character
-      formatLineWidth (79 - tagLength) (x:multiline)
-    format other = other
+    
+    formattedMessage =
+      case
+        case stripPrefix footerPrefix errorMessage of
+          Nothing -> errorMessage
+          Just rest -> rest
+      of
+        (' ':x:multiline) | x /= ' ' ->
+          -- Only do multiline formatting if there is a single space character
+          formatLineWidth (79 - tagLength) (x:multiline)
+        other -> other
 
 -- | Formats and prints all compile errors in the set
 prettyCompileErrors :: Bool -> Set CompileError -> IO ()
 prettyCompileErrors explainEnabled errs =
-  evalStateT (mapM_ go $ Set.toList errs) peDefault
+  evalStateT (mapM_ go $ Set.toAscList errs) peDefault
   where
     go CompileError
       { errorFile
