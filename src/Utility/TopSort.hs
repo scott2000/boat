@@ -2,8 +2,9 @@
 module Utility.TopSort
   ( -- * Reverse Topological Sort
     TopSortable (..)
-  , topSort
   , topSortExt
+  , topSortM
+  , topSort
 
     -- * Strongly Connected Components
   , SCC (..)
@@ -12,60 +13,59 @@ module Utility.TopSort
   ) where
 
 import Utility.Basics
-import Utility.Program
 
-import Data.Graph (SCC (..), stronglyConnComp, flattenSCC)
-import Data.Set (Set)
-import qualified Data.Set as Set
+import Data.Hashable
+
+import Data.Graph (Vertex, SCC (..), stronglyConnComp, flattenSCC)
+import Data.HashMap.Strict (HashMap)
+import qualified Data.HashMap.Strict as HashMap
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Set (Set)
+import qualified Data.Set as Set
+
+import Control.Monad
+import Data.Functor.Identity
 
 -- | A collection of items that can be topologically sorted
-class Ord key => TopSortable map entry int key value | map -> entry int key value where
-  -- | Get a list of entries from the collection
-  entries :: map -> [(entry, int, value)]
-  -- | Find the index of a key in the collection
-  findIndex :: map -> key -> Int
-  -- | Find the index of an internally-used key in the collection
-  findInternalIndex :: map -> int -> Int
+class TopSortable key entry map | map -> entry key where
+  -- | Like 'mapM', but with specific information for sorting
+  mapEntries :: Monad m => ((key -> Vertex) -> entry -> Vertex -> m a) -> map -> m [a]
 
-instance Ord a => TopSortable (Set a) a a a a where
-  entries = map (\x -> (x, x, x)) . Set.toAscList
-  findIndex = flip Set.findIndex
-  findInternalIndex = findIndex
+instance Ord a => TopSortable a a (Set a) where
+  mapEntries f s =
+    zipWithM (f (`Set.findIndex` s)) (Set.toAscList s) [0..]
 
-instance Ord k => TopSortable (Map k v) (k, v) k k v where
-  entries = map (\e@(k, v) -> (e, k, v)) . Map.toAscList
-  findIndex = flip Map.findIndex
-  findInternalIndex = findIndex
+instance Ord k => TopSortable k (k, v) (Map k v) where
+  mapEntries f m =
+    zipWithM (f (`Map.findIndex` m)) (Map.toAscList m) [0..]
 
-instance TopSortable (PathMap a) (ReversedPath, (Maybe Span, InFile a)) ReversedPath Path (InFile a) where
-  entries (PathMap m) =
-    map createEntry $ Map.toAscList m
+instance (Eq k, Hashable k) => TopSortable k (k, v) (HashMap k v) where
+  mapEntries f m =
+    zipWithM (f (keyMap HashMap.!)) entryList [0..]
     where
-      createEntry e@(revPath, (_, decl)) = (e, revPath, decl)
-  findIndex (PathMap m) k =
-    Map.findIndex (reversePath k) m
-  findInternalIndex (PathMap m) k =
-    Map.findIndex k m
+      entryList = HashMap.toList m
+      keyMap =
+        HashMap.fromList $ zipWith (\(k, _) n -> (k, n)) entryList [0..]
 
 -- | Sorts a 'TopSortable' collection given a function to determine dependencies
-topSort :: TopSortable t e i k v => (v -> [k]) -> t -> [SCC e]
-topSort f m =
-  stronglyConnComp $ map toGraph $ entries m
-  where
-    toGraph (e, i, v) =
-      (e, findInternalIndex m i, map (findIndex m) $ f v)
+topSortExt :: (TopSortable k e map, Monad m) => (e -> m ([k], a)) -> map -> m [SCC a]
+topSortExt f =
+  fmap stronglyConnComp . mapEntries \getIndex entry index -> do
+    f entry <&> \(deps, result) ->
+      (result, index, map getIndex deps)
 
--- | Like 'topSort' but inside a 'Monad' and collecting additional information
-topSortExt :: (TopSortable t e i k v, Monad m) => (v -> m ([k], a)) -> t -> m ([SCC e], Map i a)
-topSortExt f m = do
-  (depList, ascInfo) <- unzip <$> (mapM toGraphAndInfo $ entries m)
-  return (stronglyConnComp depList, Map.fromDistinctAscList ascInfo)
-  where
-    toGraphAndInfo (e, i, v) = do
-      (deps, info) <- f v
-      return ((e, findInternalIndex m i, map (findIndex m) deps), (i, info))
+-- | Like 'topSortExt', but always returns the entry directly
+topSortM :: (TopSortable k e map, Monad m) => (e -> m [k]) -> map -> m [SCC e]
+topSortM f =
+  topSortExt \entry ->
+    f entry <&> \deps ->
+      (deps, entry)
+
+-- | Like 'topSortM', but always uses the 'Identity' monad
+topSort :: TopSortable k e map => (e -> [k]) -> map -> [SCC e]
+topSort f =
+  runIdentity . topSortM (pure . f)
 
 -- | Checks is a 'SCC' is an 'AcyclicSCC'
 isSCCAcyclic :: SCC a -> Bool

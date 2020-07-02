@@ -15,6 +15,8 @@ import Control.Monad.State.Strict
 import Control.Exception
 import Options.Applicative as Opt
 
+import qualified Data.HashMap.Strict as HashMap
+
 -- | A phase of compilation (see "Parse" and "Analyze")
 data Phase
   -- | Any initialization in "Main" that occurs before parsing begins
@@ -64,7 +66,7 @@ main = do
             <> action "file"
             <> help "The path to a single .boat source file or a directory containing source files")
           <*> Opt.option (eitherReader parsePackageName)
-            (  value "Main"
+            (  value (Identifier "Main")
             <> showDefault
             <> short 'n'
             <> long "name"
@@ -101,8 +103,8 @@ startCompile phase = do
   -- Errors here shouldn't stop compilation until after the kinds of type ascriptions are checked
 
   liftIO $ putStrLn $ "\nInferred variances:\n"
-  liftIO $ forM_ (pathMapEntries $ allDatas allDecls) $
-    \(name, _ :/: DataDecl { dataSig = DataSig { dataEffects, dataArgs } }) -> putStrLn $
+  liftIO $ forM_ (HashMap.toList $ allDatas allDecls) $
+    \(name, DataDecl { dataSig = DataSig { dataEffects, dataArgs } } :&: _) -> putStrLn $
       show name ++ effectSuffixStr (map (show . snd) dataEffects) ++ unwords ("" : map (show . snd) dataArgs)
 
   setPhase phase PhaseInferTypes

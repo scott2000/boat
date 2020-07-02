@@ -6,10 +6,13 @@ import Utility
 import Analyze.InferVariance (lookupDecl, addMatchError, matchArgs)
 
 import Data.Maybe
+import Data.HashMap.Strict (HashMap)
+import qualified Data.HashMap.Strict as HashMap
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.HashSet (HashSet)
+import qualified Data.HashSet as HashSet
 import Data.Set (Set)
-import qualified Data.Set as Set
 
 import Control.Monad.State.Strict
 import Control.Monad.Reader
@@ -19,23 +22,22 @@ type Infer = ReaderT InferInfo (StateT InferState CompileIO)
 
 data InferInfo = InferInfo
   { iAllDecls :: !AllDecls
-  , iDeclExplicitPoly :: !(Map ReversedPath (Set String))
-  , iEffectExpansions :: !(Map ReversedPath (Set Effect)) }
+  , iEffectExpansions :: !(HashMap Path (Set Effect)) }
 
 data InferState = InferState
-  { iResolvedDecls :: !(PathMap LetDeclInferred)
-  , iUnresolvedDecls :: !(PathMap Type)
-  , iConstraints :: !(Map ConstraintNoSpan ConstraintSource) }
+  { iResolvedDecls :: !(PathMap InferredLetDecl)
+  , iUnresolvedDecls :: !(PathMap (Type ()))
+  , iConstraints :: !(Map (Constraint ()) ConstraintSource) }
 
 defaultInferState :: InferState
 defaultInferState = InferState
-  { iResolvedDecls = pathMapEmpty
-  , iUnresolvedDecls = pathMapEmpty
+  { iResolvedDecls = HashMap.empty
+  , iUnresolvedDecls = HashMap.empty
   , iConstraints = Map.empty }
 
 data ConstraintSource = ConstraintSource
   { csLocation :: Maybe ContextLocation
-  , csSpan :: InFile (Maybe Span) }
+  , csSpan :: InFile Span }
 
 data ContextLocation
   = CFunctionArgument (Maybe Path) Int
@@ -67,12 +69,12 @@ instance Show ContextLocation where
 lookupDecl' :: Path -> Infer ([TypeVariance], [DataArg])
 lookupDecl' = lookupDecl \path -> do
   decls <- asks (allDatas . iAllDecls)
-  return $ pathMapLookup path decls
+  return $ HashMap.lookup path decls
 
 -- | Looks up a data type declaration's parameters given an @AllDecls@ map
 lookupDecl'' :: AddFatal m => AllDecls -> Path -> m ([TypeVariance], [DataArg])
 lookupDecl'' decls = lookupDecl \path -> do
-  return $ pathMapLookup path $ allDatas decls
+  return $ HashMap.lookup path $ allDatas decls
 
 matchDataArg :: DataArg -> DataArg -> Maybe DataArg
 matchDataArg (DataArg var0 args0) (DataArg var1 args1)
@@ -80,24 +82,26 @@ matchDataArg (DataArg var0 args0) (DataArg var1 args1)
   | otherwise =
     DataArg (var0 <> var1) <$> zipWithM matchDataArg args0 args1
 
-type CheckState = StateT (Set Path, Map (Meta String) (ExprKind, Maybe DataArg)) CompileIO
+type CheckState = StateT (HashSet Path, Map (Meta Span String) (ExprKind, Maybe DataArg)) CompileIO
 
-checkAndDeps :: AllDecls -> InFile LetDecl -> CompileIO ([Path], Set (Meta String))
-checkAndDeps decls (file :/: decl) = do
-  (deps, vars) <- execStateT (check $ letBody decl) (Set.empty, Map.empty)
-  return (Set.toList deps, Map.keysSet vars)
+checkAndDeps :: AllDecls
+             -> (Path, Meta (InFile Span) LetDecl)
+             -> CompileIO ([Path], (Path, Meta (InFile Span) LetDecl, Set (Meta Span String)))
+checkAndDeps decls (path, decl@(LetDecl { letBody, letConstraints } :&: file :/: _)) = do
+  (deps, vars) <- execStateT (check letBody) (HashSet.empty, Map.empty)
+  return (HashSet.toList deps, (path, decl, Map.keysSet vars))
   where
     addPath :: Path -> CheckState ()
     addPath path = modify \(d, v) ->
-      (Set.insert path d, v)
+      (HashSet.insert path d, v)
 
-    checkType :: Meta Type -> CheckState ()
+    checkType :: MetaR Span Type -> CheckState ()
     checkType =
       expectKindMatchArgs [] VOutput []
 
     polyArgs :: Map String [DataArg]
     polyArgs =
-      Map.fromList $ mapMaybe getArgKind $ letConstraints decl
+      Map.fromList $ mapMaybe getArgKind letConstraints
       where
         getArgKind constraint =
           case unmeta constraint of
@@ -106,13 +110,13 @@ checkAndDeps decls (file :/: decl) = do
             _ ->
               Nothing
 
-    getVar :: Meta String -> MaybeT CheckState [DataArg]
+    getVar :: Meta Span String -> MaybeT CheckState [DataArg]
     getVar name =
       case Map.lookup (unmeta name) polyArgs of
         Nothing -> MaybeT do
           addError compileError
-            { errorFile = Just file
-            , errorSpan = metaSpan name
+            { errorFile = file
+            , errorSpan = getSpan name
             , errorCategory = Just ECInferVariance
             , errorExplain = Just $
               " Any type variables that are used in place of a type constructor (like `m` in `m Nat`)" ++
@@ -125,7 +129,7 @@ checkAndDeps decls (file :/: decl) = do
         Just args ->
           return args
 
-    addVar :: Meta String -> ExprKind -> DataArg -> CheckState ()
+    addVar :: Meta Span String -> ExprKind -> DataArg -> CheckState ()
     addVar name kind dataArg = do
       (deps, vars) <- get
       case Map.lookup name vars of
@@ -133,8 +137,8 @@ checkAndDeps decls (file :/: decl) = do
           put (deps, Map.insert name (kind, Just dataArg) vars)
         Just (oldKind, _) | kind /= oldKind ->
           addError compileError
-            { errorFile = Just file
-            , errorSpan = metaSpan name
+            { errorFile = file
+            , errorSpan = getSpan name
             , errorMessage =
               show oldKind ++ " parameter `" ++ unmeta name ++ "` cannot also be used as " ++ aOrAn (show kind) }
         Just (_, Nothing) -> return ()
@@ -144,13 +148,13 @@ checkAndDeps decls (file :/: decl) = do
               put (deps, Map.insert name (kind, Just newDataArg) vars)
             Nothing ->
               addError compileError
-                { errorFile = Just file
-                , errorSpan = metaSpan name
+                { errorFile = file
+                , errorSpan = getSpan name
                 , errorMessage =
                   "parameter first used as kind `" ++ show oldDataArg ++ "`\n" ++
                   "      cannot also be used as `" ++ show dataArg ++ "`" }
 
-    matchArgs' :: Maybe Span -> [DataArg] -> [DataArg] -> CheckState ()
+    matchArgs' :: Span -> [DataArg] -> [DataArg] -> CheckState ()
     matchArgs' actualSpan expected actual =
       matchArgs missingVariance expected actual >>= \case
         Nothing -> return ()
@@ -160,15 +164,15 @@ checkAndDeps decls (file :/: decl) = do
         missingVariance _ _ =
           compilerBug "matchArgs' called with uninferred variance during type inference"
 
-    expectKindMatchArgs :: [String] -> TypeVariance -> [DataArg] -> Meta Type -> CheckState ()
+    expectKindMatchArgs :: [String] -> TypeVariance -> [DataArg] -> MetaR Span Type -> CheckState ()
     expectKindMatchArgs locals var args typeWithMeta = do
       runMaybeT (expectKind locals var (Just args) typeWithMeta) >>= \case
         Nothing ->
           return ()
         Just actual ->
-          matchArgs' (metaSpan typeWithMeta) args actual
+          matchArgs' (getSpan typeWithMeta) args actual
 
-    expectKind :: [String] -> TypeVariance -> Maybe [DataArg] -> Meta Type -> MaybeT CheckState [DataArg]
+    expectKind :: [String] -> TypeVariance -> Maybe [DataArg] -> MetaR Span Type -> MaybeT CheckState [DataArg]
     expectKind locals var args typeWithMeta =
       -- NOTE: A large portion of this code is similar to the type checking code in InferVariance
       case unmeta typeWithMeta of
@@ -179,8 +183,8 @@ checkAndDeps decls (file :/: decl) = do
             [] -> return ()
             (eff:_) ->
               addError compileError
-                { errorFile = Just file
-                , errorSpan = metaSpan eff
+                { errorFile = file
+                , errorSpan = getSpan eff
                 , errorMessage =
                   "`" ++ show name ++ "` " ++
                     if effCount == 0 then
@@ -192,8 +196,8 @@ checkAndDeps decls (file :/: decl) = do
         TPoly name
           | name `elem` locals -> MaybeT do
             addError compileError
-              { errorFile = Just file
-              , errorSpan = metaSpan typeWithMeta
+              { errorFile = file
+              , errorSpan = getSpan typeWithMeta
               , errorMessage = "quantified effect `" ++ name ++ "` cannot be used as a type" }
             return Nothing
           | otherwise ->
@@ -207,8 +211,8 @@ checkAndDeps decls (file :/: decl) = do
           case args of
             Nothing -> MaybeT do
               addError compileError
-                { errorFile = Just file
-                , errorSpan = metaSpan typeWithMeta
+                { errorFile = file
+                , errorSpan = getSpan typeWithMeta
                 , errorMessage = "type constructor name cannot be left blank" }
               return Nothing
             Just expected ->
@@ -218,8 +222,8 @@ checkAndDeps decls (file :/: decl) = do
             [] -> MaybeT do
               let (base, baseCount) = findBase a
               addError compileError
-                { errorFile = Just file
-                , errorSpan = metaSpan b
+                { errorFile = file
+                , errorSpan = getSpan b
                 , errorMessage =
                   "`" ++ show base ++ "` " ++
                     if baseCount == 0 then
@@ -292,14 +296,32 @@ checkAndDeps decls (file :/: decl) = do
         _ ->
           return ()
 
-inferTypes :: AllDecls -> CompileIO AllDeclsInferred
+hasBlank :: MetaR Span Type -> Bool
+hasBlank typeWithMeta =
+  case unmeta typeWithMeta of
+    TNamed effs _ ->
+      any (any isBlank . setEffects . unmeta) effs
+    TAnon _ ->
+      True
+    TApp a b ->
+      hasBlank a || hasBlank b
+    TForEff _ ty ->
+      hasBlank ty
+    _ ->
+      False
+  where
+    isBlank eff =
+      case unmeta eff of
+        EffectAnon _ -> True
+        _ -> False
+
+inferTypes :: AllDecls -> CompileIO InferredDecls
 inferTypes decls = do
-  (_sortedLets, _iDeclExplicitPoly) <- topSortExt (checkAndDeps decls) (allLets decls)
+  _sortedLets <- topSortExt (checkAndDeps decls) $ allLets decls
   exitIfErrors
   -- let
   --   inferInfo = InferInfo
   --     { iAllDecls = decls
-  --     , iDeclExplicitPoly
   --     , iEffectExpansions = expansions }
   -- i <- execStateT (runReaderT (mapM_ inferDeclSCC sortedLets) inferInfo) defaultInferState
   -- return decls { allLets = iResolvedDecls i }

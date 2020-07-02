@@ -4,10 +4,10 @@ module Analyze.InferVariance where
 import Utility
 
 import Data.List
-import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
-import Data.Set (Set)
-import qualified Data.Set as Set
+import Data.HashMap.Strict (HashMap)
+import qualified Data.HashMap.Strict as HashMap
+import Data.HashSet (HashSet)
+import qualified Data.HashSet as HashSet
 
 import Control.Applicative
 import Control.Monad.State.Strict
@@ -33,9 +33,9 @@ addStep other cs =
   cs { vBase = other <> vBase cs }
 
 -- | Finds the data types used by each data type so they can be sorted
-declDeps :: InFile DataDecl -> [Path]
+declDeps :: (Path, Meta (InFile Span) DataDecl) -> [Path]
 declDeps =
-  Set.toList . execWriter . mapM_ variantDeps . dataVariants . unfile
+  HashSet.toList . execWriter . mapM_ variantDeps . dataVariants . unmeta . snd
   where
     variantDeps = mapM_ typeDeps . snd . unmeta
 
@@ -44,7 +44,7 @@ declDeps =
         TAnyFuncArrow _ ->
           return ()
         TNamed _ name ->
-          tell $ Set.singleton $ unmeta name
+          tell $ HashSet.singleton $ unmeta name
         TApp a b ->
           typeDeps a >> typeDeps b
         TForEff _ ty ->
@@ -56,14 +56,14 @@ declDeps =
 data InferVariable
   = InvariantVariable
   | InferVariable
-    { outputVariables :: Set [AnonCount]
-    , inputVariables :: Set [AnonCount] }
+    { outputVariables :: HashSet [AnonCount]
+    , inputVariables :: HashSet [AnonCount] }
 
 -- | An inference variable with no constraints
 emptyInferVariable :: InferVariable
 emptyInferVariable = InferVariable
-  { outputVariables = Set.empty
-  , inputVariables = Set.empty }
+  { outputVariables = HashSet.empty
+  , inputVariables = HashSet.empty }
 
 -- | Adds a constraint to an inference variable
 addConstraint :: VarianceConstraint -> InferVariable -> InferVariable
@@ -71,43 +71,43 @@ addConstraint _ InvariantVariable = InvariantVariable
 addConstraint VarianceConstraint { vBase, vDeps } i =
   case vBase of
     VOutput
-      | null vDeps && Set.member [] (inputVariables i) ->
+      | null vDeps && HashSet.member [] (inputVariables i) ->
         InvariantVariable
       | otherwise ->
-        i { outputVariables = Set.insert vDeps $ outputVariables i }
+        i { outputVariables = HashSet.insert vDeps $ outputVariables i }
     VInput
-      | null vDeps && Set.member [] (outputVariables i) ->
+      | null vDeps && HashSet.member [] (outputVariables i) ->
         InvariantVariable
       | otherwise ->
-        i { inputVariables = Set.insert vDeps $ inputVariables i }
+        i { inputVariables = HashSet.insert vDeps $ inputVariables i }
     VInvariant ->
       InvariantVariable
     _ ->
       error "addConstraint called with VAnon"
 
 -- | Find the inference variables that constraint a given variable
-variableDeps :: InferVariable -> [AnonCount]
-variableDeps InvariantVariable = []
-variableDeps InferVariable { outputVariables, inputVariables } =
-  Set.toList $ add outputVariables $ add inputVariables $ Set.empty
+variableDeps :: (AnonCount, InferVariable) -> [AnonCount]
+variableDeps (_, InvariantVariable) = []
+variableDeps (_, InferVariable { outputVariables, inputVariables }) =
+  HashSet.toList $ add outputVariables $ add inputVariables $ HashSet.empty
   where
-    add vars s = foldr (Set.union . Set.fromList) s vars
+    add vars s = foldr (HashSet.union . HashSet.fromList) s vars
 
 -- | Makes a new 'InferVariable', but simplifies conflicting constraints to be invariant
-simplifyInferVariable :: Set [AnonCount] -> Set [AnonCount] -> InferVariable
+simplifyInferVariable :: HashSet [AnonCount] -> HashSet [AnonCount] -> InferVariable
 simplifyInferVariable outputVariables inputVariables
-  | [] `Set.member` outputVariables && [] `Set.member` inputVariables = InvariantVariable
+  | [] `HashSet.member` outputVariables && [] `HashSet.member` inputVariables = InvariantVariable
   | otherwise = InferVariable { outputVariables, inputVariables }
 
 -- | Substitutes a set of inferred variables into a set of constraints
-substituteVars :: Map AnonCount TypeVariance -> InferVariable -> InferVariable
+substituteVars :: HashMap AnonCount TypeVariance -> InferVariable -> InferVariable
 substituteVars _ InvariantVariable = InvariantVariable
 substituteVars m InferVariable { outputVariables, inputVariables } =
   foldr updateConstraint emptyInferVariable $
     getConstraints VOutput outputVariables ++ getConstraints VInput inputVariables
   where
     getConstraints var s =
-      Set.toList s <&> \list -> VarianceConstraint
+      HashSet.toList s <&> \list -> VarianceConstraint
         { vBase = var
         , vDeps = list }
 
@@ -117,7 +117,7 @@ substituteVars m InferVariable { outputVariables, inputVariables } =
         sub anon c =
           let
             step =
-              case Map.lookup anon m of
+              case HashMap.lookup anon m of
                 Nothing -> VAnon anon
                 Just var -> var
           in
@@ -133,17 +133,17 @@ data InferState = InferState
     -- | A map of declarations that are currently being resolved and aren't fully known
   , iUnresolvedDecls :: !(PathMap DataDecl)
     -- | A map of resolved inference variables that may be substituted
-  , iResolvedVars :: !(Map AnonCount TypeVariance)
+  , iResolvedVars :: !(HashMap AnonCount TypeVariance)
     -- | A map of unresolved inference variables that have yet to be substituted
-  , iUnresolvedVars :: !(Map AnonCount InferVariable) }
+  , iUnresolvedVars :: !(HashMap AnonCount InferVariable) }
 
 -- | The default state with nothing inferred yet
 defaultInferState :: InferState
 defaultInferState = InferState
-  { iResolvedDecls = pathMapEmpty
-  , iUnresolvedDecls = pathMapEmpty
-  , iResolvedVars = Map.empty
-  , iUnresolvedVars = Map.empty }
+  { iResolvedDecls = HashMap.empty
+  , iUnresolvedDecls = HashMap.empty
+  , iResolvedVars = HashMap.empty
+  , iUnresolvedVars = HashMap.empty }
 
 -- | Removes the unneeded parameter names from a 'DataSig'
 removeNames :: DataSig -> ([TypeVariance], [DataArg])
@@ -151,13 +151,13 @@ removeNames DataSig { dataEffects, dataArgs } =
   (map snd dataEffects, map snd dataArgs)
 
 -- | Looks up a data type declaration's parameters using a provided lookup function
-lookupDecl :: AddFatal m => (Path -> m (Maybe DataDecl)) -> Path -> m ([TypeVariance], [DataArg])
+lookupDecl :: AddFatal m => (Path -> m (Maybe (Meta (InFile Span) DataDecl))) -> Path -> m ([TypeVariance], [DataArg])
 lookupDecl _ (Core (Operator "->")) =
   return ([VOutput], [DataArg VInput [], DataArg VOutput []])
 lookupDecl lookup path = do
   lookup path >>= \case
     Just decl ->
-      return $ removeNames $ dataSig decl
+      return $ removeNames $ dataSig $ unmeta decl
     Nothing ->
       compilerBug $ "lookupDecl couldn't find `" ++ show path ++ "`"
 
@@ -165,13 +165,13 @@ lookupDecl lookup path = do
 lookupDecl' :: Path -> Infer ([TypeVariance], [DataArg])
 lookupDecl' = lookupDecl \path -> do
   InferState { iResolvedDecls, iUnresolvedDecls } <- get
-  return $ pathMapLookup path iResolvedDecls <|> pathMapLookup path iUnresolvedDecls
+  return $ HashMap.lookup path iResolvedDecls <|> HashMap.lookup path iUnresolvedDecls
 
 -- | Inserts a new constraint to an inference variable
 insertConstraint :: AnonCount -> VarianceConstraint -> Infer ()
 insertConstraint anon c =
   modify \i -> i
-    { iUnresolvedVars = Map.adjust (addConstraint c) anon $ iUnresolvedVars i }
+    { iUnresolvedVars = HashMap.adjust (addConstraint c) anon $ iUnresolvedVars i }
 
 -- | Infers variance information for the parameters of every data type declaration
 inferVariance :: AllDecls -> CompileIO AllDecls
@@ -183,20 +183,20 @@ inferVariance decls = do
       mapM_ inferDeclSCC $ topSort declDeps $ allDatas decls
 
 -- | Infers variance information for a single 'SCC' of the graph of data types
-inferDeclSCC :: SCC (ReversedPath, (Maybe Span, InFile DataDecl)) -> Infer ()
+inferDeclSCC :: SCC (Path, Meta (InFile Span) DataDecl) -> Infer ()
 inferDeclSCC scc = do
-  let anonMap = foldr addAnons Map.empty unresolvedList
+  let anonMap = foldr addAnons HashMap.empty unresolvedList
   modify \i -> i
     { iUnresolvedDecls = unresolvedMap
-    , iResolvedVars = Map.empty
-    , iUnresolvedVars = Map.map (const emptyInferVariable) anonMap }
-  forM_ unresolvedList \(_, (_, file :/: decl)) -> do
+    , iResolvedVars = HashMap.empty
+    , iUnresolvedVars = HashMap.map (const emptyInferVariable) anonMap }
+  forM_ unresolvedList \(_, decl :&: file :/: _) -> do
     dataInfo <- makeDataInfo file $ dataSig decl
     forM_ (dataVariants decl) $ generateConstraints file dataInfo
   unresolvedVars <- gets iUnresolvedVars
   if isSCCAcyclic scc then
     -- The SCC is acyclic so there cannot be cyclic constraints
-    mapM_ (inferConstraintSCC anonMap . AcyclicSCC) $ Map.toList unresolvedVars
+    mapM_ (inferConstraintSCC anonMap . AcyclicSCC) $ HashMap.toList unresolvedVars
   else
     -- There may be cyclic constraints so a second sort is needed
     mapM_ (inferConstraintSCC anonMap) $ topSort variableDeps unresolvedVars
@@ -205,36 +205,36 @@ inferDeclSCC scc = do
     { iResolvedDecls = foldr (addResolved resolvedVars) (iResolvedDecls i) unresolvedList }
   where
     unresolvedList = flattenSCC scc
-    unresolvedMap = PathMap $ Map.fromList unresolvedList
+    unresolvedMap = HashMap.fromList unresolvedList
 
-    addAnons (_, (_, file :/: DataDecl { dataSig = DataSig { dataEffects, dataArgs } })) m =
+    addAnons (_, DataDecl { dataSig = DataSig { dataEffects, dataArgs } } :&: file :/: _) m =
       foldr addEff (foldr addArg m dataArgs) dataEffects
       where
         -- Ignore arguments that weren't specified by name
-        addEff (name, VAnon var) = Map.insert var (file :/: metaSpan name)
+        addEff (_ :&: span, VAnon var) = HashMap.insert var (file :/: span)
         addEff _ = id
         addArg (UnnamedArg, _) = id
-        addArg (name, arg) = Map.insert (getAnon arg) (file :/: metaSpan name)
+        addArg (_ :&: span, arg) = HashMap.insert (getAnon arg) (file :/: span)
 
-    addResolved rvars (name, (span, file :/: decl)) =
-      pathMapInsert' name (span, file :/: decl
-        { dataSig = resDataSig $ dataSig decl })
+    addResolved rvars (name, decl :&: info) =
+      HashMap.insert name $ withInfo info decl
+        { dataSig = resDataSig $ dataSig decl }
       where
         resDataSig DataSig { dataEffects, dataArgs } = DataSig
           { dataEffects = map resEff dataEffects
           , dataArgs = map resArg dataArgs }
-        resEff (name, VAnon var) = (name, mapGet var rvars)
+        resEff (name, VAnon var) = (name, hashMapGet var rvars)
         resEff eff = eff
-        resArg (name, DataArg (VAnon var) args) = (name, DataArg (mapGet var rvars) args)
+        resArg (name, DataArg (VAnon var) args) = (name, DataArg (hashMapGet var rvars) args)
         resArg arg = arg
 
 -- | Information about all parameters of a data type declaration
-type DataInfo = Map String (Maybe (ExprKind, DataArg))
+type DataInfo = HashMap String (Maybe (ExprKind, DataArg))
 
 -- | Constructs a 'DataInfo' map from a 'DataSig'
 makeDataInfo :: AddError m => FilePath -> DataSig -> m DataInfo
 makeDataInfo file DataSig { dataEffects, dataArgs } =
-  execStateT addAll Map.empty
+  execStateT addAll HashMap.empty
   where
     addAll = do
       forM_ dataEffects \(name, variance) ->
@@ -243,16 +243,16 @@ makeDataInfo file DataSig { dataEffects, dataArgs } =
         add name $ Just (KType, arg)
 
     add UnnamedArg _ = return ()
-    add Meta { unmeta = name, metaSpan } info = do
+    add (name :&: span) info = do
       m <- get
-      if Map.member name m then do
+      if HashMap.member name m then do
         addError compileError
-          { errorFile = Just file
-          , errorSpan = metaSpan
+          { errorFile = file
+          , errorSpan = span
           , errorMessage = "the name `" ++ name ++ "` has already been taken by another parameter" }
-        put $ Map.insert name Nothing m
+        put $ HashMap.insert name Nothing m
       else
-        put $ Map.insert name info m
+        put $ HashMap.insert name info m
 
 -- | Gets the 'AnonCount' of an uninferred parameter
 getAnon :: DataArg -> AnonCount
@@ -278,10 +278,10 @@ instance Show MatchArgsError where
         , argParams = kindList }
 
 -- | Emits a 'MatchArgsError' in the given file at the given span
-addMatchError :: AddError m => FilePath -> Maybe Span -> MatchArgsError -> m ()
+addMatchError :: AddError m => FilePath -> Span -> MatchArgsError -> m ()
 addMatchError file span err =
   addError compileError
-    { errorFile = Just file
+    { errorFile = file
     , errorSpan = span
     , errorKind =
       case err of
@@ -339,18 +339,18 @@ matchArgs resolveAnon expected actual =
       | otherwise = unifyFail >> return act
 
 -- | Adds constraints for a data type's variant
-generateConstraints :: FilePath -> DataInfo -> Meta DataVariant -> Infer ()
-generateConstraints file dataInfo Meta { unmeta = (_, types) } =
+generateConstraints :: FilePath -> DataInfo -> Meta Span DataVariant -> Infer ()
+generateConstraints file dataInfo ((_, types) :&: _) =
   forM_ types $ inferTypeMatchArgs [] defaultConstraint []
   where
-    lookupNamed :: ExprKind -> Maybe Span -> String -> MaybeT Infer DataArg
+    lookupNamed :: ExprKind -> Span -> String -> MaybeT Infer DataArg
     lookupNamed expected span name =
-      case mapGet name dataInfo of
+      case hashMapGet name dataInfo of
         Just (actualKind, arg)
           | actualKind == expected -> return arg
           | otherwise -> MaybeT do
             addError compileError
-              { errorFile = Just file
+              { errorFile = file
               , errorSpan = span
               , errorMessage =
                 show actualKind ++ " parameter `" ++ name ++ "` cannot be used as " ++ aOrAn (show expected) }
@@ -359,7 +359,7 @@ generateConstraints file dataInfo Meta { unmeta = (_, types) } =
           -- Indicates that there were multiple parameters with this name so nothing can be done
           MaybeT $ return Nothing
 
-    matchArgs' :: Maybe Span -> [DataArg] -> [DataArg] -> Infer ()
+    matchArgs' :: Span -> [DataArg] -> [DataArg] -> Infer ()
     matchArgs' actualSpan expected actual =
       matchArgs resolveAnon expected actual >>= \case
         Nothing -> return ()
@@ -369,15 +369,15 @@ generateConstraints file dataInfo Meta { unmeta = (_, types) } =
         resolveAnon exp anon =
           insertConstraint anon $ addStep exp defaultConstraint
 
-    inferTypeMatchArgs :: [String] -> VarianceConstraint -> [DataArg] -> Meta Type -> Infer ()
+    inferTypeMatchArgs :: [String] -> VarianceConstraint -> [DataArg] -> MetaR Span Type -> Infer ()
     inferTypeMatchArgs locals c args typeWithMeta = do
       runMaybeT (inferType locals c typeWithMeta) >>= \case
         Nothing ->
           return ()
         Just actual ->
-          matchArgs' (metaSpan typeWithMeta) args actual
+          matchArgs' (getSpan typeWithMeta) args actual
 
-    inferType :: [String] -> VarianceConstraint -> Meta Type -> MaybeT Infer [DataArg]
+    inferType :: [String] -> VarianceConstraint -> MetaR Span Type -> MaybeT Infer [DataArg]
     inferType locals c typeWithMeta =
       -- NOTE: A large portion of this code is similar to the type checking code in InferTypes
       case unmeta typeWithMeta of
@@ -388,8 +388,8 @@ generateConstraints file dataInfo Meta { unmeta = (_, types) } =
             [] -> return ()
             (eff:_) ->
               addError compileError
-                { errorFile = Just file
-                , errorSpan = metaSpan eff
+                { errorFile = file
+                , errorSpan = getSpan eff
                 , errorMessage =
                   "`" ++ show name ++ "` " ++
                     if effCount == 0 then
@@ -401,18 +401,18 @@ generateConstraints file dataInfo Meta { unmeta = (_, types) } =
         TPoly name
           | name `elem` locals -> MaybeT do
             addError compileError
-              { errorFile = Just file
-              , errorSpan = metaSpan typeWithMeta
+              { errorFile = file
+              , errorSpan = getSpan typeWithMeta
               , errorMessage = "quantified effect `" ++ name ++ "` cannot be used as a type" }
             return Nothing
           | otherwise -> do
-            arg <- lookupNamed KType (metaSpan typeWithMeta) name
+            arg <- lookupNamed KType (getSpan typeWithMeta) name
             lift $ insertConstraint (getAnon arg) c
             return $ argParams arg
         TAnon _ -> MaybeT do
           addError compileError
-            { errorFile = Just file
-            , errorSpan = metaSpan typeWithMeta
+            { errorFile = file
+            , errorSpan = getSpan typeWithMeta
             , errorMessage = "type in data type variant cannot be left blank" }
           return Nothing
         TApp a b ->
@@ -421,8 +421,8 @@ generateConstraints file dataInfo Meta { unmeta = (_, types) } =
               runMaybeT $ inferType locals (addStep VInvariant c) b
               let (base, baseCount) = findBase a
               addError compileError
-                { errorFile = Just file
-                , errorSpan = metaSpan b
+                { errorFile = file
+                , errorSpan = getSpan b
                 , errorMessage =
                   "`" ++ show base ++ "` " ++
                     if baseCount == 0 then
@@ -445,12 +445,12 @@ generateConstraints file dataInfo Meta { unmeta = (_, types) } =
               EffectPoly name
                 | name `elem` locals -> return ()
                 | otherwise -> do
-                  arg <- lookupNamed KEffect (metaSpan eff) name
+                  arg <- lookupNamed KEffect (getSpan eff) name
                   lift $ insertConstraint (getAnon arg) effC
               EffectAnon _ ->
                 addError compileError
-                  { errorFile = Just file
-                  , errorSpan = metaSpan eff
+                  { errorFile = file
+                  , errorSpan = getSpan eff
                   , errorMessage = "effect in data type variant cannot be left blank" }
               _ -> return ()
           where
@@ -466,7 +466,7 @@ data UnwrapState
   | NotInferred
 
 -- | Tries to get a 'TypeVariance' out of an 'InferVariable' that is expected to be inferred
-unwrapVariable :: InFile (Maybe Span) -> InferVariable -> Infer TypeVariance
+unwrapVariable :: InFile Span -> InferVariable -> Infer TypeVariance
 unwrapVariable _ InvariantVariable = return VInvariant
 unwrapVariable (file :/: span) InferVariable { outputVariables, inputVariables } =
   case (check outputVariables, check inputVariables) of
@@ -474,7 +474,7 @@ unwrapVariable (file :/: span) InferVariable { outputVariables, inputVariables }
     (NoConstraints, FullyDetermined) -> return VInput
     (NoConstraints, NoConstraints) -> do
       addError compileError
-        { errorFile = Just file
+        { errorFile = file
         , errorSpan = span
         , errorCategory = Just ECInferVariance
         , errorExplain = Just $
@@ -489,14 +489,14 @@ unwrapVariable (file :/: span) InferVariable { outputVariables, inputVariables }
       compilerBug "unwrapVariable called on uninferrable inference variable"
   where
     check s =
-      case Set.lookupMax s of
-        Nothing -> NoConstraints
-        Just [] -> FullyDetermined
-        _ -> NotInferred
+      case HashSet.toList s of
+        []   -> NoConstraints
+        [[]] -> FullyDetermined
+        _    -> NotInferred
 
 -- | Checks for occurances of even or odd numbers of lists with only self-references
-checkSelfEvenOdd :: AnonCount -> (Bool, Bool) -> Set [AnonCount] -> (Bool, Bool)
-checkSelfEvenOdd self = Set.foldr check
+checkSelfEvenOdd :: AnonCount -> (Bool, Bool) -> HashSet [AnonCount] -> (Bool, Bool)
+checkSelfEvenOdd self = HashSet.foldr check
   where
     check _ status@(True, True) = status
     check xs status = checkEven xs status
@@ -517,14 +517,14 @@ checkSelfEvenOdd self = Set.foldr check
 onlyRefersToSelf :: AnonCount -> InferVariable -> Bool
 onlyRefersToSelf _ InvariantVariable = True
 onlyRefersToSelf self InferVariable { outputVariables, inputVariables } =
-  Set.foldr check True $ Set.union outputVariables inputVariables
+  HashSet.foldr check True $ HashSet.union outputVariables inputVariables
   where
     check _ False = False
     check xs _ = all (self ==) xs
 
 -- | Normalizes an inference variable's constraint set for comparison
-normalizeVariables :: Set [AnonCount] -> Set [AnonCount]
-normalizeVariables = Set.map (simplifyRepeats . sort)
+normalizeVariables :: HashSet [AnonCount] -> HashSet [AnonCount]
+normalizeVariables = HashSet.map (simplifyRepeats . sort)
   where
     simplifyRepeats = \case
       (x : y : rest@(v : w : _))
@@ -540,7 +540,7 @@ normalizeVariables = Set.map (simplifyRepeats . sort)
 expensiveCheckDisjoint :: InferVariable -> Bool
 expensiveCheckDisjoint InvariantVariable = False
 expensiveCheckDisjoint InferVariable { outputVariables, inputVariables } =
-  Set.disjoint (normalizeVariables outputVariables) (normalizeVariables inputVariables)
+  HashSet.null $ HashSet.intersection (normalizeVariables outputVariables) (normalizeVariables inputVariables)
 
 -- | An inference variable with its associated 'AnonCount'
 type InferEntry = (AnonCount, InferVariable)
@@ -555,20 +555,20 @@ data CycleState
   | CycleMatchFound TypeVariance InferEntry [InferEntry]
 
 -- | Tries to infer an 'SCC' of variables with constraints
-inferConstraintSCC :: Map AnonCount (InFile (Maybe Span)) -> SCC InferEntry -> Infer ()
+inferConstraintSCC :: HashMap AnonCount (InFile Span) -> SCC InferEntry -> Infer ()
 inferConstraintSCC anonMap scc = do
   s <- get
   let m = iResolvedVars s
   case scc of
     AcyclicSCC (anon, i) -> do
       var <- unwrapVariable (getLoc anon) $ substituteVars m i
-      put s { iResolvedVars = Map.insert anon var m }
+      put s { iResolvedVars = HashMap.insert anon var m }
     CyclicSCC vars -> do
       failed <- inferFailed m vars []
       when failed $
-        setResolved $ foldr (flip Map.insert VInvariant . fst) m vars
+        setResolved $ foldr (flip HashMap.insert VInvariant . fst) m vars
   where
-    getLoc anon = mapGet anon anonMap
+    getLoc anon = hashMapGet anon anonMap
 
     setResolved m =
       modify \i -> i
@@ -604,7 +604,7 @@ inferConstraintSCC anonMap scc = do
                   -- Otherwise, just pick the first entry in the cycle
                   fst $ head vars
           addError compileError
-            { errorFile = Just file
+            { errorFile = file
             , errorSpan = span
             , errorCategory = Just ECInferVariance
             , errorExplain = Just $
@@ -623,7 +623,7 @@ inferConstraintSCC anonMap scc = do
               "(consider removing the parameter if possible or using it concretely somewhere)" }
           return True
         CycleMatchFound var (anon, i) rest -> do
-          inferFailed (Map.insert anon var m) rest (i : toCheck)
+          inferFailed (HashMap.insert anon var m) rest (i : toCheck)
 
     inferCycle _ [] toCheck
       | not $ all (expensiveCheckDisjoint . snd) toCheck =

@@ -6,13 +6,13 @@ module Utility.Basics
   , parsePackageName
   , parseModuleName
   , pattern Underscore
-  , Path (..)
+  , Path (Path, unpath)
+  , toPath
   , (.|.)
   , pattern Core
   , pattern Local
   , pattern EmptyPath
-  , pattern Generated
-  , pattern DefaultFile
+  , pattern NoFile
 
     -- * Global Compiler State
   , MonadCompile (..)
@@ -36,7 +36,9 @@ module Utility.Basics
     -- * Positions and Spans
   , Position (..)
   , Span (..)
+  , pattern NoSpan
   , pointSpan
+  , isSpanValid
 
     -- * Formatting and Capitalization
   , plural
@@ -51,17 +53,21 @@ module Utility.Basics
   , lowerFirst
 
     -- * General Helper Functions
-  , mapGet
+  , hashMapGet
   , (<&>)
   ) where
+
+import GHC.Generics (Generic)
 
 import Data.Char
 import Data.Word
 import Data.List
-import Data.String
 
-import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
+import Data.Bits (xor)
+import Data.Hashable
+
+import Data.HashMap.Strict (HashMap)
+import qualified Data.HashMap.Strict as HashMap
 import Data.Set (Set)
 import qualified Data.Set as Set
 
@@ -77,10 +83,9 @@ data Name
   = Identifier String
   | Operator String
   | Unary String
-  deriving (Ord, Eq)
+  deriving (Ord, Eq, Generic)
 
-instance IsString Name where
-  fromString = Identifier
+instance Hashable Name
 
 instance Show Name where
   show = \case
@@ -96,50 +101,61 @@ getNameString = \case
   Unary u -> u
 
 -- | A path consisting of a series of names separated by dots
-newtype Path = Path
-  { unpath :: [Name] }
-  deriving (Ord, Eq)
+data Path = Path
+  { unpath :: [Name]
+  , pathHash :: Int }
+
+-- | Construct a new path, caching the hash value automatically
+toPath :: [Name] -> Path
+toPath names = Path
+  { unpath = names
+  , pathHash = hash names }
+
+instance Hashable Path where
+  hashWithSalt salt Path { pathHash } =
+    -- This is the implementation used by "Hashable"
+    (salt * 16777619) `xor` pathHash
+  hash Path { pathHash } = pathHash
+
+instance Eq Path where
+  Path a ha == Path b hb =
+    ha == hb && a == b
+
+instance Ord Path where
+  Path a _ `compare` Path b _ =
+    a `compare` b
 
 instance Show Path where
   show = intercalate "." . map show . unpath
 
-instance IsString Path where
-  fromString = Path . map fromString . split
-    where
-      split "" = [""]
-      split ('.':cs) = "" : split cs
-      split (c:cs) = (c : first) : rest
-        where
-          (first:rest) = split cs
-
 -- | Add a name to the end of a 'Path'
 (.|.) :: Path -> Name -> Path
-(Path p) .|. name = Path (p ++ [name])
+p .|. name = toPath (unpath p ++ [name])
+
+-- | A helper to make a 'Path' without considering hashing
+pattern DefaultPath :: [Name] -> Path
+pattern DefaultPath names <- Path { unpath = names }
+  where DefaultPath = toPath
 
 -- | Place an item in the Core module
 pattern Core :: Name -> Path
-pattern Core name = Path ["Core", name]
+pattern Core name = DefaultPath [Identifier "Core", name]
 
--- | Make an unqualified 'Path'
+-- | An unqualified local 'Path'
 pattern Local :: Name -> Path
-pattern Local name = Path [name]
+pattern Local name = DefaultPath [name]
 
 -- | A name starting with an underscore which will not be exported
 pattern Underscore :: String -> Name
 pattern Underscore name = Identifier ('_':name)
 
--- | Make an empty 'Path'
+-- | An empty 'Path'
 pattern EmptyPath :: Path
-pattern EmptyPath = Path []
+pattern EmptyPath = DefaultPath []
 
--- | Placeholder filename for compiler-generated code
-pattern Generated :: FilePath
-pattern Generated = "<compiler-generated>"
-
--- | Same as 'Generated', but matches any file as a pattern
-pattern DefaultFile :: FilePath
-pattern DefaultFile <- _
-  where DefaultFile = Generated
+-- | An empty 'FilePath' for missing file information (e.g. for generated code)
+pattern NoFile :: FilePath
+pattern NoFile = ""
 
 -- | Helper function for 'parsePackageName' and 'parseModuleName'
 parseIdentIn :: String -> Bool -> String -> Either String Name
@@ -260,9 +276,9 @@ getNewAnon = liftCompile do
 -- | An error encountered during compilation
 data CompileError = CompileError
   { -- | The file in which the error occurred (optional)
-    errorFile :: !(Maybe FilePath)
+    errorFile :: !FilePath
     -- | The span at which the error occurred (requires a file)
-  , errorSpan :: !(Maybe Span)
+  , errorSpan :: !Span
     -- | The kind of error that occurred
   , errorKind :: !ErrorKind
     -- | The general category of error (for explanations)
@@ -275,24 +291,25 @@ data CompileError = CompileError
 
 instance Ord CompileError where
   a `compare` b =
-    errorFile a `reversedMaybe` errorFile b
-    <> errorSpan a `reversedMaybe` errorSpan b
+    errorFile a `shortLast` errorFile b
+    <> errorSpan a `compare` errorSpan b
     <> errorKind a `compare` errorKind b
     <> errorCategory a `compare` errorCategory b
     <> errorExplain a `compare` errorExplain b
     <> errorMessage a `compare` errorMessage b
     where
-      -- Empty files and spans should appear last
-      Nothing `reversedMaybe` Nothing = EQ
-      Nothing `reversedMaybe` Just _  = GT
-      Just _  `reversedMaybe` Nothing = LT
-      Just a  `reversedMaybe` Just b  = a `compare` b
+      -- Short file paths should appear last
+      []     `shortLast` []     = EQ
+      []     `shortLast` _      = GT
+      _      `shortLast` []     = LT
+      (a:as) `shortLast` (b:bs) =
+        a `compare` b <> as `shortLast` bs
 
 -- | A default 'CompileError' containing everything but a message
 compileError :: CompileError
 compileError = CompileError
-  { errorFile = Nothing
-  , errorSpan = Nothing
+  { errorFile = NoFile
+  , errorSpan = NoSpan
   , errorKind = Error
   , errorCategory = Nothing
   , errorExplain = Nothing
@@ -391,14 +408,45 @@ instance Show Position where
 data Span = Span
   { spanStart :: !Position
   , spanEnd :: !Position }
-  deriving (Ord, Eq)
+
+-- | Invalid spans are sorted to be after valid spans
+instance Ord Span where
+  a `compare` b =
+    case (isSpanValid a, isSpanValid b) of
+      (False, False) -> EQ
+      (False, _)     -> GT
+      (_,     False) -> LT
+      (True,  True)  ->
+        spanStart a `compare` spanStart b
+        <> spanEnd a `compare` spanEnd b
+
+instance Eq Span where
+  NoSpan == NoSpan = True
+  Span s0 e0 == Span s1 e1 =
+    s0 == s1 && e0 == e1
 
 instance Show Span where
-  show = show . spanStart
+  show NoSpan = "<unknown>"
+  show Span { spanStart } =
+    show spanStart
 
+-- | Creates a span from the ends of two other spans, preserving 'NoSpan'
 instance Semigroup Span where
   Span { spanStart } <> Span { spanEnd } =
     Span { spanStart, spanEnd }
+
+-- | Checks if a span consists of only valid positions (@'posLine' > 0@)
+isSpanValid :: Span -> Bool
+isSpanValid Span { spanStart, spanEnd } =
+  isPositionValid spanStart && isPositionValid spanEnd
+  where
+    isPositionValid Position { posLine } =
+      posLine > 0
+
+-- | Pattern for a missing span (considered invalid by 'isSpanValid')
+pattern NoSpan :: Span
+pattern NoSpan <- (isSpanValid -> False)
+  where NoSpan = Span (Position 0 0) (Position 0 0)
 
 -- | Creates a 'Span' of a single character from a 'Position'
 pointSpan :: Position -> Span
@@ -490,13 +538,13 @@ lowerFirst :: String -> String
 lowerFirst (x:xs) = toLower x : xs
 lowerFirst _ = error "lowerFirst called on empty string"
 
--- | A version of 'Map.lookup' that calls 'error' with the key if it fails
-mapGet :: (Show k, Ord k) => k -> Map k v -> v
-mapGet key m =
-  case Map.lookup key m of
+-- | A version of 'HashMap.lookup' that calls 'error' with the key if it fails
+hashMapGet :: (Show k, Eq k, Hashable k) => k -> HashMap k v -> v
+hashMapGet key m =
+  case HashMap.lookup key m of
     Just v -> v
     Nothing ->
-      error ("map does not contain key: " ++ show key)
+      error ("HashMap does not contain key: " ++ show key)
 
 -- | A flipped version of 'fmap'
 (<&>) :: Functor f => f a -> (a -> b) -> f b

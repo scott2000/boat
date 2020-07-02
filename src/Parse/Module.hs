@@ -24,7 +24,7 @@ parseSingleFile path = do
 
 -- | Parse a single 'Module' from file
 parseFile :: FilePath -> Parser Module
-parseFile path = do
+parseFile file = do
   trySpaces >>= \case
     Right NoSpace ->
       return ()
@@ -45,8 +45,8 @@ parseFile path = do
       option m (try lineBreak >> ((m <$ hidden eof) <|> parseModule m))
       where
         parseUse =
-          keyword "use" *> nbsc *> parseMeta parseUseModule <&> \use ->
-            modAddUse use path m
+          keyword "use" *> nbsc *> withSpan parseUseModule <&> \use ->
+            modAddUse file use m
 
         parseMod = do
           keyword "mod"
@@ -61,33 +61,33 @@ parseFile path = do
           where
             operatorType = do
               ops <- parseSomeSeparatedList '<' operatorPart
-              return $ modAddOpType ops path m
+              return $ modAddOpType file ops m
             operatorPart =
-              try (OpLink <$> parseMeta (char '(' *> nbsc *> parsePath <* nbsc <* char ')'))
-              <|> (OpDeclare <$> parseMeta parseName)
+              try (OpLink <$> withSpan (char '(' *> nbsc *> parsePath <* nbsc <* char ')'))
+              <|> (OpDeclare <$> withSpan parseName)
             operatorDecl = do
               opAssoc <- option ANon (operatorAssoc <* nbsc)
-              names <- someUntil (specialOp TypeAscription) $ parseMeta parseName
-              opType <- nbsc >> parseMeta parsePath
+              names <- someUntil (specialOp TypeAscription) $ withSpan parseName
+              opType <- nbsc >> withSpan parsePath
               let decl = OpDecl { opAssoc, opType }
-              modAddOpDecls names decl path m
+              modAddOpDecls file names decl m
             operatorAssoc =
               (ALeft <$ expectLabel "left")
               <|> (ARight <$ expectLabel "right")
 
         parseEffect = do
           keyword "effect"
-          name <- nbsc >> parseMeta parseName
+          name <- nbsc >> withSpan parseName
           effectSuper <- option [] parseEffectSuper
-          modAddEffect name EffectDecl { effectSuper } path m
+          modAddEffect file name EffectDecl { effectSuper } m
           where
             parseEffectSuper = do
               try (nbsc >> specialOp TypeAscription)
-              blockOf $ parseSomeCommaList $ parseMeta parsePath
+              blockOf $ parseSomeCommaList $ withSpan parsePath
 
         parseLet = do
           keyword "let"
-          name <- nbsc *> parseMeta parseName <* nbsc
+          name <- nbsc *> withSpan parseName <* nbsc
           maybeAscription <- optional (specialOp TypeAscription *> blockOf parserExpectEnd <* nbsc)
           constraints <- option [] (parseConstraints <* nbsc)
           body <- specialOp Assignment >> blockOf parser
@@ -95,24 +95,22 @@ parseFile path = do
             bodyWithAscription =
               case maybeAscription of
                 Just ascription ->
-                  copySpan body $ ETypeAscribe body ascription
+                  copyInfo body $ ETypeAscribe body ascription
                 Nothing ->
                   body
             letDecl = LetDecl
               { letBody = bodyWithAscription
-              , letConstraints = constraints
-              , letInferredType = ()
-              , letInstanceArgs = [] }
-          modAddLet name letDecl path m
+              , letConstraints = constraints }
+          modAddLet file name letDecl m
 
         parseData = do
           keyword "data" >> nbsc
           isMod <- (keyword "mod" >> nbsc >> return True) <|> return False
           (name, dataSig) <-
-            parserExpectEnd >>= namedDataSigFromType path
+            parserExpectEnd >>= namedDataSigFromType file
           nbsc >> specialOp Assignment
           vars <- blockOf $
-            someBetweenLines (parserExpectEnd >>= variantFromType path)
+            someBetweenLines (parserExpectEnd >>= variantFromType file)
           case name of
             Nothing ->
               return m
@@ -123,18 +121,18 @@ parseFile path = do
                   , dataSig
                   , dataVariants = catMaybes vars }
               in
-                modAddData name dataDecl path m
+                modAddData file name dataDecl m
 
 -- | Parse a set of constraints for a with-clause
-parseConstraints :: Parser [Meta Constraint]
+parseConstraints :: Parser [MetaR Span Constraint]
 parseConstraints = do
   keyword "with"
   catMaybes <$> (blockOf $ parseSomeCommaList parseConstraint)
 
 -- | Tries to parse a single 'Constraint'
-parseConstraint :: Parser (Maybe (Meta Constraint))
+parseConstraint :: Parser (Maybe (MetaR Span Constraint))
 parseConstraint = do
-  (span, (baseTy, maybeAscription)) <- getSpan do
+  (baseTy, maybeAscription) :&: span <- withSpan do
     baseTy <- parserExpectEnd
     maybeAscription <- optional do
       try (nbsc >> specialOp TypeAscription)
@@ -142,5 +140,5 @@ parseConstraint = do
     return (baseTy, maybeAscription)
   file <- getFilePath
   constraint <- disambiguateConstraint file baseTy maybeAscription
-  return $ metaWithSpan' span <$> constraint
+  return $ withInfo span <$> constraint
 

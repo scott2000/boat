@@ -17,8 +17,7 @@ module Parse.Primitives
 
     -- * Positions and Spans
   , getPos
-  , getSpan
-  , parseMeta
+  , withSpan
 
     -- * Indentation and Whitespace
   , blockOf
@@ -124,7 +123,7 @@ convertParseErrors bundle =
   go initialPosState $ NonEmpty.toList $ bundleErrors bundle
   where
     initialPosState = bundlePosState bundle
-    file = Just $ sourceName $ pstateSourcePos initialPosState
+    file = sourceName $ pstateSourcePos initialPosState
     go _ [] = return ()
     go posState (err:rest) =
       case customFail of
@@ -142,7 +141,7 @@ convertParseErrors bundle =
               | otherwise = pstateSourcePos $ reachOffsetNoLine (o+errLen-1) posState'
           addError compileError
             { errorFile = file
-            , errorSpan = Just $ Span
+            , errorSpan = Span
               (Position (unPos $ sourceLine startPos) (unPos $ sourceColumn startPos))
               (Position (unPos $ sourceLine endPos) (unPos (sourceColumn endPos) + 1))
             , errorMessage = errText }
@@ -183,15 +182,10 @@ getPos = do
     , posColumn = unPos (sourceColumn pos) + columnDiff }
 
 -- | Runs a parser and returns the result along with the 'Span' of the parsed value
-getSpan :: Parser a -> Parser (Span, a)
-getSpan p = andSpan <$> getPos <*> p <*> getPos
+withSpan :: Parser a -> Parser (Meta Span a)
+withSpan p = andSpan <$> getPos <*> p <*> getPos
   where
-    andSpan start res end = (Span start end, res)
-
--- | Runs a parser and wraps it with additional 'Span' metadata
-parseMeta :: Parser a -> Parser (Meta a)
-parseMeta p =
-  uncurry metaWithSpan' <$> getSpan p
+    andSpan start res end = res :&: Span start end
 
 -- | Starts a new indented block containing the given parser
 blockOf :: Parser a -> Parser a
@@ -562,18 +556,18 @@ unexpectedStr :: String -> Parser a
 unexpectedStr = unexpected . Tokens . NonEmpty.fromList
 
 -- | Fails with a certain error message at a given span
-addFail :: Maybe Span -> String -> Parser a
-addFail maybeSpan msg = do
+addFail :: Span -> String -> Parser a
+addFail span msg = do
   file <- getFilePath
   span <-
-    case maybeSpan of
-      Nothing ->
+    case span of
+      NoSpan ->
         pointSpan <$> getPos
-      Just span ->
+      _ ->
         return span
   customFailure $ CustomFail compileError
-    { errorFile = Just file
-    , errorSpan = Just span
+    { errorFile = file
+    , errorSpan = span
     , errorMessage = msg }
 
 -- | Parses a list of items separated by a character
@@ -602,8 +596,8 @@ parseSomeCommaList p = someComma False
       when (missingComma && not previousMissing) $ do
         file <- getFilePath
         addError compileError
-          { errorFile = Just file
-          , errorSpan = Just $ pointSpan startPos
+          { errorFile = file
+          , errorSpan = pointSpan startPos
           , errorMessage = "expected comma between items in list" }
       option [] $ do
         try spaces

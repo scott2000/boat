@@ -10,6 +10,8 @@ import Control.Monad.Trans.Maybe
 
 import Data.Sequence (Seq, (|>))
 import qualified Data.Sequence as Seq
+import Data.HashMap.Strict (HashMap)
+import qualified Data.HashMap.Strict as HashMap
 import Data.IntSet (IntSet)
 import qualified Data.IntSet as IntSet
 
@@ -27,13 +29,13 @@ data AssocState = AssocState
   { -- | Directed acyclic graph describing the ordering between each vertex
     assocGraph :: Graph
     -- | Map from operator type path to its vertex in the graph
-  , assocPaths :: PathMap Vertex }
+  , assocPaths :: HashMap Path Vertex }
 
 -- | An 'AssocState' with no operator types
 defaultAssocState :: AssocState
 defaultAssocState = AssocState
   { assocGraph = Seq.empty
-  , assocPaths = pathMapEmpty }
+  , assocPaths = HashMap.empty }
 
 -- | Associates all operators in every expression based on their operator types
 assocOps :: AllDecls -> CompileIO AllDecls
@@ -45,17 +47,17 @@ assocOps decls = do
   updateExprs assocState decls
 
 -- | Adds a path to the graph and returns the index where the vertex will be added
-addPath :: Meta Path -> FilePath -> Assoc Vertex
-addPath path file = do
+addPath :: Path -> Assoc Vertex
+addPath path = do
   s <- get
   let index = Seq.length $ assocGraph s
-  put s { assocPaths = pathMapInsert path (file :/: index) $ assocPaths s }
+  put s { assocPaths = HashMap.insert path index $ assocPaths s }
   return index
 
 -- | Looks up a path and returns the index of the vertex
 lookupPath :: Path -> Assoc Vertex
 lookupPath path =
-  pathMapGet path <$> gets assocPaths
+  hashMapGet path <$> gets assocPaths
 
 -- | Adds a vertex to the graph with a set of lower precedence vertices
 addVertex :: IntSet -> Assoc ()
@@ -88,29 +90,30 @@ checkVertexOrdering graph a b =
         goAll a b = a || go b
 
 -- | Sorts the operator types into the order they should be added to the graph
-getSortedAcyclic :: AllDecls -> CompileIO [(Meta Path, InFile OpTypeEnds)]
+getSortedAcyclic :: AllDecls -> CompileIO [(Path, Meta (InFile Span) OpTypeEnds)]
 getSortedAcyclic AllDecls { allOpTypes } =
   checkForCycles $ topSort concatEnds allOpTypes
   where
-    concatEnds = \case
-      _ :/: (Nothing, Nothing) -> []
-      _ :/: (Nothing, Just b)  -> [unmeta b]
-      _ :/: (Just a,  Nothing) -> [unmeta a]
-      _ :/: (Just a,  Just b)  -> [unmeta a, unmeta b]
+    concatEnds (_, ends :&: _) =
+      case ends of
+        (Nothing, Nothing) -> []
+        (Nothing, Just b)  -> [unmeta b]
+        (Just a,  Nothing) -> [unmeta a]
+        (Just a,  Just b)  -> [unmeta a, unmeta b]
 
     checkForCycles = \case
       [] ->
         return []
       AcyclicSCC node : rest ->
-        (pathMapConvert node :) <$> checkForCycles rest
+        (node :) <$> checkForCycles rest
       CyclicSCC nodes : rest -> do
         let
-          (_, (metaSpan, file :/: _)) = head nodes
+          (_, _ :&: file :/: span) = head nodes
           nodeList =
             intercalate ", " $ map (show . fst) nodes
         addError compileError
-          { errorFile = Just file
-          , errorSpan = metaSpan
+          { errorFile = file
+          , errorSpan = span
           , errorCategory = Just ECAssocOps
           , errorExplain = Just $
             " The links to other operator types in an operator type declaration cannot rely on any of" ++
@@ -124,35 +127,35 @@ getSortedAcyclic AllDecls { allOpTypes } =
         checkForCycles rest
 
 -- | Adds a new operator type declaration to the graph
-addToGraph :: (Meta Path, InFile OpTypeEnds) -> Assoc ()
-addToGraph (path, file :/: ends) =
+addToGraph :: (Path, Meta (InFile Span) OpTypeEnds) -> Assoc ()
+addToGraph (path, ends :&: file :/: span) =
   case ends of
     (Nothing, Nothing) -> do
-      addPath path file
+      addPath path
       addVertex IntSet.empty
-    (Nothing, Just higher) -> do
-      index <- addPath path file
-      higherVertex <- lookupPath $ unmeta higher
+    (Nothing, Just (higher :&: _)) -> do
+      index <- addPath path
+      higherVertex <- lookupPath higher
       updateVertex higherVertex $ IntSet.insert index
       addVertex IntSet.empty
-    (Just lower, Nothing) -> do
-      addPath path file
-      lowerVertex <- lookupPath $ unmeta lower
+    (Just (lower :&: _), Nothing) -> do
+      addPath path
+      lowerVertex <- lookupPath lower
       addVertex $ IntSet.singleton lowerVertex
-    (Just lower, Just higher) -> do
-      lowerVertex <- lookupPath $ unmeta lower
-      higherVertex <- lookupPath $ unmeta higher
+    (Just (lower :&: _), Just (higher :&: _)) -> do
+      lowerVertex <- lookupPath lower
+      higherVertex <- lookupPath higher
       graph <- gets assocGraph
       let
         ordering = checkVertexOrdering graph lowerVertex higherVertex
-        showLast = show . last . unpath . unmeta
+        showLast = show . last . unpath
         l = showLast lower
         h = showLast higher
         p = showLast path
         showErr msg =
           addFatal compileError
-            { errorFile = Just file
-            , errorSpan = metaSpan path
+            { errorFile = file
+            , errorSpan = span
             , errorCategory = Just ECAssocOps
             , errorExplain = Just $
               " When specifying the precedence of an operator type, an upper and lower bound may be" ++
@@ -174,7 +177,7 @@ addToGraph (path, file :/: ends) =
           showErr $
             "the upper and lower link are both `" ++ l ++ "` (the same precedence)"
         Just LT -> do
-          index <- addPath path file
+          index <- addPath path
           updateVertex higherVertex $
             IntSet.insert index . IntSet.delete lowerVertex
           addVertex $ IntSet.singleton lowerVertex
@@ -185,24 +188,24 @@ updateExprs
   AssocState { assocGraph, assocPaths }
   decls@AllDecls { allOpDecls }
   = do
-    allDatas <- PathMap <$> (mapM updateData $ unPathMap $ allDatas decls)
-    allLets <- PathMap <$> (mapM updateLet $ unPathMap $ allLets decls)
+    allDatas <- mapM updateData $ allDatas decls
+    allLets <- mapM updateLet $ allLets decls
     return decls { allDatas, allLets }
     where
       comparePaths :: Path -> Path -> Maybe Ordering
       comparePaths a b =
         checkVertexOrdering assocGraph (v a) (v b)
         where
-          v path = pathMapGet path assocPaths
+          v path = hashMapGet path assocPaths
 
-      allow :: FilePath -> Maybe (Meta Path) -> Meta Path -> MaybeT CompileIO Bool
+      allow :: FilePath -> Maybe (Meta Span Path) -> Meta Span Path -> MaybeT CompileIO Bool
       allow file current next =
         case current of
           Nothing ->
             return True
           Just current ->
-            case ( pathMapLookup (unmeta current) allOpDecls
-                 , pathMapLookup (unmeta next) allOpDecls ) of
+            case ( HashMap.lookup (unmeta current) allOpDecls
+                 , HashMap.lookup (unmeta next) allOpDecls ) of
               (Nothing, Nothing) -> MaybeT do
                 missing current
                 missing next
@@ -213,7 +216,7 @@ updateExprs
               (_, Nothing) -> MaybeT do
                 missing next
                 return Nothing
-              (Just a, Just b) ->
+              (Just (a :&: _), Just (b :&: _)) ->
                 let
                   aOp = unmeta $ opType a
                   bOp = unmeta $ opType b
@@ -237,16 +240,16 @@ updateExprs
         where
           notAllowed msg = MaybeT do
             addError compileError
-              { errorFile = Just file
-              , errorSpan = metaSpan next
+              { errorFile = file
+              , errorSpan = getSpan next
               , errorCategory = Just ECAssocOps
               , errorMessage = ' ' : msg
                 ++ ", so explicit grouping is required" }
             return Nothing
-          missing path =
+          missing (path :&: span) =
             addError compileError
-              { errorFile = Just file
-              , errorSpan = metaSpan path
+              { errorFile = file
+              , errorSpan = span
               , errorCategory = Just ECAssocOps
               , errorMessage =
                 " operator `" ++ show path ++ "` has not been assigned an operator precedence," ++
@@ -295,51 +298,51 @@ updateExprs
 
       updateSome file = reassociate $ associateList file
 
-      updateData :: (Maybe Span, InFile DataDecl) -> CompileIO (Maybe Span, InFile DataDecl)
-      updateData (span, file :/: decl) = do
+      updateData :: Meta (InFile Span) DataDecl -> CompileIO (Meta (InFile Span) DataDecl)
+      updateData (decl :&: file :/: span) = do
         variants <- mapM (mapM updateVariant) $ dataVariants decl
-        return (span, file :/: decl { dataVariants = variants })
+        return $ decl { dataVariants = variants } :&: file :/: span
         where
           updateVariant (name, types) =
             (,) name <$> mapM (updateSome file) types
 
-      updateLet :: (Maybe Span, InFile LetDecl) -> CompileIO (Maybe Span, InFile LetDecl)
-      updateLet (span, file :/: decl) = do
+      updateLet :: Meta (InFile Span) LetDecl -> CompileIO (Meta (InFile Span) LetDecl)
+      updateLet (decl :&: file :/: span) = do
         body <- updateSome file $ letBody decl
-        return (span, file :/: decl { letBody = body })
+        return $ decl { letBody = body } :&: file :/: span
 
 -- | A type of function that can reassociate a list of unassociated expressions
-type Associator m = forall t. ContainsOp t => [UnOpOrExpr t] -> m (Meta t)
+type Associator m = forall t. ContainsOp t => [UnOpOrExpr t] -> m (Meta Span t)
 
 -- | Represents a part in a list of unassociated expressions
 data UnOpOrExpr a
   -- | An operator (either infix or unary)
-  = UnOp (Meta Path)
+  = UnOp (Meta Span Path)
   -- | An expression that will be given to an operator
-  | UnExpr (Meta a)
+  | UnExpr (Meta Span a)
 
 -- | A class representing anything that contains infix expressions
 class (Show a, After a) => ContainsOp a where
   -- | Convert the expression to a list of unassociated expressions
-  toUnOpList :: Meta a -> [UnOpOrExpr a]
+  toUnOpList :: Meta Span a -> [UnOpOrExpr a]
   -- | Apply a unary operator to an expression
-  applyUnary :: Meta Path -> Meta a -> Meta a
+  applyUnary :: Meta Span Path -> Meta Span a -> Meta Span a
   -- | Apply a binary operator to two expressions
-  applyBinary :: Meta Path -> Meta a -> Meta a -> Meta a
+  applyBinary :: Meta Span Path -> Meta Span a -> Meta Span a -> Meta Span a
 
 -- | Using an 'Associator', fully associate all infix expressions
-reassociate :: (Monad m, ContainsOp a) => Associator m -> Meta a -> m (Meta a)
+reassociate :: (Monad m, ContainsOp a) => Associator m -> Meta Span a -> m (Meta Span a)
 reassociate f = after $ aContainsOp (f . toUnOpList)
   where
     aContainsOp :: Monad m
-                => (forall a. ContainsOp a => Meta a -> m (Meta a))
+                => (forall a. ContainsOp a => Meta Span a -> m (Meta Span a))
                 -> AfterMap m
     aContainsOp f = aDefault
       { aExpr = f
       , aPattern = f
       , aType = f }
 
-instance ContainsOp Type where
+instance ContainsOp (Type Span) where
   toUnOpList x =
     -- Strip leading parentheses
     case unmeta x of
@@ -360,13 +363,13 @@ instance ContainsOp Type where
             [UnExpr x]
 
   applyUnary path a =
-    metaWithEnds path a $ TApp (copySpan path $ TNamed [] path) a
+    withEnds path a $ TApp (copyInfo path $ TNamed [] path) a
 
   applyBinary path a b =
-    metaWithEnds a b $
-      TApp (metaWithEnds a path $ TApp (copySpan path $ TNamed [] path) a) b
+    withEnds a b $
+      TApp (withEnds a path $ TApp (copyInfo path $ TNamed [] path) a) b
 
-instance ContainsOp Expr where
+instance ContainsOp (Expr Span) where
   toUnOpList x =
     -- Strip leading parentheses
     case unmeta x of
@@ -387,13 +390,13 @@ instance ContainsOp Expr where
             [UnExpr x]
 
   applyUnary path a =
-    metaWithEnds path a $ EApp (EGlobal <$> path) a
+    withEnds path a $ EApp (EGlobal <$> path) a
 
   applyBinary path a b =
-    metaWithEnds a b $
-      EApp (metaWithEnds a path $ EApp (EGlobal <$> path) a) b
+    withEnds a b $
+      EApp (withEnds a path $ EApp (EGlobal <$> path) a) b
 
-instance ContainsOp Pattern where
+instance ContainsOp (Pattern Span) where
   toUnOpList x =
     -- Strip leading parentheses
     case unmeta x of
@@ -414,8 +417,8 @@ instance ContainsOp Pattern where
             [UnExpr x]
 
   applyUnary path a =
-    metaWithEnds path a $ PCons path [a]
+    withEnds path a $ PCons path [a]
 
   applyBinary path a b =
-    metaWithEnds a b $ PCons path [a, b]
+    withEnds a b $ PCons path [a, b]
 

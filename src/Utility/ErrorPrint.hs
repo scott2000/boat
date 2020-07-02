@@ -362,7 +362,7 @@ firstColumnOr1 = fromMaybe 1 . firstColumn
 -- | Stores the state of a file as it is being traversed
 data PrettyErrorState = PrettyErrorState
   { -- | The file that is currently loaded
-    peCurrentFile :: !(Maybe FilePath)
+    peCurrentFile :: !FilePath
     -- | Any lines that occurred before the current position, in reverse order
   , peBefore :: ![String]
     -- | Any remaining lines in the current file (requires a loaded file)
@@ -375,7 +375,7 @@ data PrettyErrorState = PrettyErrorState
 -- | Default state with no file loaded
 peDefault :: PrettyErrorState
 peDefault = PrettyErrorState
-  { peCurrentFile = Nothing
+  { peCurrentFile = NoFile
   , peBefore = []
   , peAfter = error "peAfter accessed uninitialized"
   , peLine = 0
@@ -385,10 +385,10 @@ peDefault = PrettyErrorState
 setFile :: FilePath -> StateT PrettyErrorState IO ()
 setFile file = do
   s <- get
-  when (peCurrentFile s /= Just file) do
+  when (peCurrentFile s /= file) do
     contents <- lift $ readFile file
     modify \s -> s
-      { peCurrentFile = Just file
+      { peCurrentFile = file
       , peBefore = []
       , peAfter = lines contents
       , peLine = 1 }
@@ -550,7 +550,7 @@ printMessageFooter errorKind errorMessage = do
   where
     tag = "[" ++ show errorKind ++ "]"
     tagLength = length tag
-    
+
     formattedMessage =
       case
         case stripPrefix footerPrefix errorMessage of
@@ -581,37 +581,36 @@ prettyCompileErrors explainEnabled errs =
             when (explainEnabled && unseen) $ lift do
               putStrLn ""
               printMessageFooter Info $ getExplanation cat
-        case errorFile of
-          Just file ->
-            case errorSpan of
-              Just Span { spanStart, spanEnd } -> do
-                lift $ putStrLn ("\n" ++ file ++ ":" ++ show spanStart ++ ":")
-                setFile file
-                let startLine = posLine spanStart
-                (context, lines) <- getLineRangeAndContext spanStart spanEnd
-                let
-                  startColumn = posColumn spanStart
-                  endColumn = posColumn spanEnd
-                  endLine = posLine spanEnd
-                  hlAtStart = startColumn <= firstColumnOr1 (head lines)
-                  contextStyledLines = createContextLines hlAtStart context
-                  contextStartLine = startLine - length context
-                  styledLines =
-                    if length lines == 1 then
-                      [(Underline startColumn endColumn, head lines)]
-                    else
-                      let (start, middle, end) = takeEnds lines in
-                      [(MultilineStart startColumn, start)]
-                      ++ createMidSelection middle
-                      ++ [(MultilineEnd endColumn, end)]
-                lift $ prettyLines (errorColor errorKind) contextStartLine endLine $
-                  trimLines $ contextStyledLines ++ styledLines
-              Nothing -> do
-                s <- get
-                when (peLine s /= -1 || peCurrentFile s /= Just file) $
-                  lift $ putStrLn ("\n" ++ file ++ ": ")
-          Nothing ->
-            lift $ putStrLn ""
+        if null errorFile then
+          lift $ putStrLn ""
+        else
+          case errorSpan of
+            NoSpan -> do
+              s <- get
+              when (peLine s /= -1 || peCurrentFile s /= errorFile) $
+                lift $ putStrLn ("\n" ++ errorFile ++ ": ")
+            Span { spanStart, spanEnd } -> do
+              lift $ putStrLn ("\n" ++ errorFile ++ ":" ++ show spanStart ++ ":")
+              setFile errorFile
+              let startLine = posLine spanStart
+              (context, lines) <- getLineRangeAndContext spanStart spanEnd
+              let
+                startColumn = posColumn spanStart
+                endColumn = posColumn spanEnd
+                endLine = posLine spanEnd
+                hlAtStart = startColumn <= firstColumnOr1 (head lines)
+                contextStyledLines = createContextLines hlAtStart context
+                contextStartLine = startLine - length context
+                styledLines =
+                  if length lines == 1 then
+                    [(Underline startColumn endColumn, head lines)]
+                  else
+                    let (start, middle, end) = takeEnds lines in
+                    [(MultilineStart startColumn, start)]
+                    ++ createMidSelection middle
+                    ++ [(MultilineEnd endColumn, end)]
+              lift $ prettyLines (errorColor errorKind) contextStartLine endLine $
+                trimLines $ contextStyledLines ++ styledLines
         lift $ printMessageFooter errorKind errorMessage
         case errorExplain of
           Just explain | explainEnabled -> lift do

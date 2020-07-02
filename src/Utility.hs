@@ -8,8 +8,8 @@ module Utility
   ) where
 
 import Utility.Basics
+import Utility.TopSort
 import Utility.ErrorPrint
 import Utility.AST
 import Utility.Program
-import Utility.TopSort
 
