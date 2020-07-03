@@ -243,6 +243,8 @@ data AfterMap m = AfterMap
   , aPattern :: MetaR Span Pattern -> m (MetaR Span Pattern)
   , aType :: MetaR Span Type -> m (MetaR Span Type)
   , aEffect :: Meta Span Effect -> m (Meta Span Effect)
+    -- | Note that this function is called after the sub-effects are transformed
+  , aEffectSet :: EffectSet Span -> m (EffectSet Span)
     -- | Transformations for 'Path' require an 'ExprKind' to indicate where they are being used
   , aPath :: ExprKind -> Meta Span Path -> m Path }
 
@@ -255,6 +257,7 @@ aDefault = AfterMap
   , aPattern = pure
   , aType = pure
   , aEffect = pure
+  , aEffectSet = pure
   , aPath = const (pure . unmeta) }
 
 -- | A class for anything that can be transformed with an 'AfterMap'
@@ -275,8 +278,9 @@ newtype EffectSet info = EffectSet
 
 instance After (EffectSet Span) where
   after m =
-    mapM \EffectSet { setEffects } ->
-      EffectSet <$> Set.fromList <$> mapM (after m) (Set.toAscList setEffects)
+    mapM \effs -> do
+      effs <- EffectSet <$> Set.fromList <$> mapM (after m) (Set.toAscList $ setEffects effs)
+      aEffectSet m effs
 
 instance Show (EffectSet info) where
   show EffectSet { setEffects }
@@ -305,10 +309,10 @@ data Effect
 
 instance After Effect where
   after m x = do
-    x' <- aEffect m x
-    forM x' \case
+    x <- aEffect m x
+    forM x \case
       EffectNamed path ->
-        EffectNamed <$> aPath m KEffect (path <$ x')
+        EffectNamed <$> aPath m KEffect (path <$ x)
       other ->
         return other
 
@@ -382,8 +386,8 @@ data Type info
 
 instance After (Type Span) where
   after m x = do
-    x' <- aType m x
-    forM x' \case
+    x <- aType m x
+    forM x \case
       TNamed effs path ->
         TNamed <$> mapM (after m) effs <*> afterPath m KType path
       TApp a b ->
@@ -578,12 +582,12 @@ data Expr info
 
 instance After (Expr Span) where
   after m x = do
-    x' <- aExpr m x
-    forM x' \case
+    x <- aExpr m x
+    forM x \case
       EValue (VFun cases) ->
         EValue . VFun <$> afterCases cases
       EGlobal path ->
-        EGlobal <$> aPath m KValue (path <$ x')
+        EGlobal <$> aPath m KValue (path <$ x)
       EApp a b ->
         EApp <$> after m a <*> after m b
       ESeq a b ->
@@ -600,7 +604,7 @@ instance After (Expr Span) where
       ETypeAscribe a ty ->
         ETypeAscribe <$> after m a <*> after m ty
       EDataCons path exprs -> do
-        p <- aPath m KValue (path <$ x')
+        p <- aPath m KValue (path <$ x)
         s <- mapM (after m) exprs
         return $ EDataCons p s
       EParen a ->
@@ -698,8 +702,8 @@ data Pattern info
 
 instance After (Pattern Span) where
   after m x = do
-    x' <- aPattern m x
-    forM x' \case
+    x <- aPattern m x
+    forM x \case
       PCons path xs ->
         PCons <$> afterPath m KPattern path <*> mapM (after m) xs
       PTypeAscribe a ty ->

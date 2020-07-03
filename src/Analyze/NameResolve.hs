@@ -635,30 +635,32 @@ nameResolveEach path mod =
         resMetaPath path = forM path $ resPath $ getSpan path
 
     nameResolveEffect (name, EffectDecl { effectSuper } :&: file :/: span) = do
-      super <-
-        forM effectSuper \effect ->
-          (forM effect $ nameResolvePath file isEffect "effect" $ getSpan effect)
-      forM_ super \eff ->
-        case unmeta eff of
-          Core (Identifier "Pure") ->
+      super <- forM effectSuper $ nameResolveAfter path file
+      forM_ super \(EffectSet effs :&: _) -> do
+        when (Set.size effs == 1)
+          case Set.findMin effs of
+            EffectPure :&: span ->
+              addError compileError
+                { errorFile = file
+                , errorSpan = span
+                , errorExplain = Just $
+                  " Making an effect a subtype of `Pure` is not something that makes sense, since it" ++
+                  " represents the lack of side effects. If an effect were a subtype of `Pure`, it would" ++
+                  " be useless since it could always be left out when specifying an effect."
+                , errorMessage =
+                  "effect cannot be a subtype of `Pure`, try just using `effect " ++ show name ++ "`" }
+            _ ->
+              return ()
+        case Set.lookupIndex (meta EffectVoid) effs of
+          Nothing -> return ()
+          Just i ->
+            let _ :&: span = Set.elemAt i effs in
             addError compileError
               { errorFile = file
-              , errorSpan = getSpan eff
-              , errorExplain = Just $
-                " Making an effect a subtype of `Pure` is not something that makes sense, since it" ++
-                " represents the lack of side effects. If an effect were a subtype of `Pure`, it would" ++
-                " be useless since it could always be left out when specifying an effect."
-              , errorMessage =
-                "effect cannot be a subtype of `Pure`, try just using `effect " ++ show name ++ "`" }
-          Core (Identifier "Void") ->
-            addError compileError
-              { errorFile = file
-              , errorSpan = getSpan eff
+              , errorSpan = span
               , errorKind = Warning
               , errorMessage =
                 "all effects are implicitly subtypes of `Void`, so listing it is unnecessary" }
-          _ ->
-            return ()
       insertEffect (path .|. name) $ withInfo (file :/: span) EffectDecl
         { effectSuper = super }
 
@@ -690,10 +692,10 @@ nameResolveEach path mod =
         nameResolveVariant (name, types) =
           (,) name <$> mapM (nameResolveRestrictedType path file) types
 
-    nameResolveLet (name, decl :&: file :/: span) = do
-      body <- nameResolveAfter path file $ letBody decl
-      insertLet (path .|. name) $ withInfo (file :/: span) decl
-        { letBody = body }
+    nameResolveLet (name, LetDecl { letBody, letConstraints } :&: file :/: span) = do
+      letBody <- nameResolveAfter path file letBody
+      letConstraints <- forM letConstraints $ nameResolveAfter path file
+      insertLet (path .|. name) $ withInfo (file :/: span) LetDecl { letBody, letConstraints }
 
 -- | Resolve a single 'Path'
 nameResolvePath :: FilePath -> (Item -> Bool) -> String -> Span -> Path -> NR Path
@@ -891,10 +893,36 @@ nameResolveAfterMap :: Path -> FilePath -> AfterMap NR
 nameResolveAfterMap basePath file = aDefault
   { aUseExpr = handleUseExpr
   , aWithBindings = withLocals
+  , aEffectSet = updateEffectSet
   , aPath = updatePath }
   where
     handleUseExpr m use expr =
       addUse basePath (file :/: use) $ unmeta <$> after m expr
+
+    updateEffectSet (EffectSet set) =
+      EffectSet <$>
+        case Set.lookupIndex (meta EffectVoid) set of
+          Just voidIndex -> do
+            let
+              err = compileError
+                { errorFile = file
+                , errorKind = Warning
+                , errorMessage = "effect is unnecessary since `Void` includes all effects" }
+            forM_ (zip [0..] $ Set.toList set) \(i, _ :&: errorSpan) ->
+              when (i /= voidIndex) $ addError err { errorSpan }
+            return $ Set.singleton $ Set.elemAt voidIndex set
+          _ ->
+            case Set.lookupIndex (meta EffectPure) set of
+              Nothing -> return set
+              Just i -> do
+                when (Set.size set > 1) do
+                  let _ :&: span = Set.elemAt i set
+                  addError compileError
+                    { errorFile = file
+                    , errorSpan = span
+                    , errorKind = Warning
+                    , errorMessage = "effect `Pure` does nothing since there are other effects" }
+                return $ Set.deleteAt i set
 
     updatePath k path = nameResolvePath file kIs (show k) (getSpan path) (unmeta path)
       where

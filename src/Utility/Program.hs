@@ -335,7 +335,7 @@ modAddOpDecls file names op mod = do
 
 -- | A declaration of a new effect with an optional super-effect
 data EffectDecl = EffectDecl
-  { effectSuper :: [Meta Span Path] }
+  { effectSuper :: [MetaR Span EffectSet] }
 
 instance ShowWithName EffectDecl where
   showWithName name EffectDecl { effectSuper } =
@@ -370,7 +370,7 @@ modAddEffect file name decl mod = do
 
 -- | A constraint from a with-clause in a declaration
 data Constraint info
-  = Meta info Effect `IsSubEffectOf` EffectSet info
+  = Meta info Effect `IsSubEffectOf` MetaR info EffectSet
   | Meta info String `HasArguments` [DataArg]
   deriving (Ord, Eq)
 
@@ -380,6 +380,13 @@ instance Show (Constraint info) where
       show effect ++ " : " ++ show set
     name `HasArguments` args ->
       showWithName (unmeta name) $ DataArg VInvariant args
+
+instance After (Constraint Span) where
+  after m = mapM \case
+    eff `IsSubEffectOf` effs ->
+      IsSubEffectOf <$> after m eff <*> after m effs
+    other ->
+      return other
 
 -- | A declaration for a top-level binding of an expression
 data LetDecl = LetDecl
@@ -519,7 +526,7 @@ modAddData file name decl mod = do
 disambiguateConstraint :: AddError m
                        => FilePath
                        -> MetaR Span Type
-                       -> Maybe (EffectSet Span)
+                       -> Maybe (MetaR Span EffectSet)
                        -> m (Maybe (Constraint Span))
 disambiguateConstraint file typeWithMeta maybeAscription =
   case maybeAscription of
@@ -577,7 +584,7 @@ disambiguateConstraint file typeWithMeta maybeAscription =
               , errorSpan = getSpan typeWithMeta
               , errorMessage = "expected a single effect before `:` in constraint" }
             return Nothing
-      forM_ (setEffects bound) \eff ->
+      forM_ (setEffects $ unmeta bound) \eff ->
         case unmeta eff of
           EffectAnon _ ->
             addError compileError

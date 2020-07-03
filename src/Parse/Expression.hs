@@ -47,7 +47,21 @@ parseUseContents =
 parseEffectSet :: Parser (EffectSet Span)
 parseEffectSet = do
   effects <- parseSomeSeparatedList '+' (withSpan parseEffect)
-  return EffectSet { setEffects = Set.fromList effects }
+  setEffects <- toUniqueSet Set.empty effects
+  return EffectSet { setEffects }
+  where
+    toUniqueSet set [] = return set
+    toUniqueSet set (e:es)
+      | e `Set.member` set = do
+        file <- getFilePath
+        addError compileError
+          { errorFile = file
+          , errorSpan = getSpan e
+          , errorKind = Warning
+          , errorMessage = "effect is unnecessary since it was already listed" }
+        toUniqueSet set es
+      | otherwise =
+        toUniqueSet (Set.insert e set) es
 
 -- | Parse a single 'Effect'
 parseEffect :: Parser Effect

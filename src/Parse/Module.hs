@@ -83,7 +83,7 @@ parseFile file = do
           where
             parseEffectSuper = do
               try (nbsc >> specialOp TypeAscription)
-              blockOf $ parseSomeCommaList $ withSpan parsePath
+              blockOf $ parseSomeCommaList $ withSpan parseEffectSet
 
         parseLet = do
           keyword "let"
@@ -135,8 +135,8 @@ parseConstraint = do
   (baseTy, maybeAscription) :&: span <- withSpan do
     baseTy <- parserExpectEnd
     maybeAscription <- optional do
-      try (nbsc >> specialOp TypeAscription)
-      nbsc >> blockOf parseEffectSet
+      try (nbsc >> specialOp TypeAscription) >> nbsc
+      blockOf $ withSpan parseEffectSet
     return (baseTy, maybeAscription)
   file <- getFilePath
   constraint <- disambiguateConstraint file baseTy maybeAscription
