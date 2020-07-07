@@ -17,38 +17,28 @@ import Options.Applicative as Opt
 
 import qualified Data.HashMap.Strict as HashMap
 
--- | A phase of compilation (see "Parse" and "Analyze")
-data Phase
-  -- | Any initialization in "Main" that occurs before parsing begins
-  = PhaseInit
-  -- | The parsing phase defined in "Parse" ('parse')
-  | PhaseParser
-  -- | The name resolution phase defined in "Analyze.NameResolve" ('nameResolve')
-  | PhaseNameResolve
-  -- | The operator association phase defined in "Analyze.AssocOps" ('assocOps')
-  | PhaseAssocOps
-  -- | The variance inference phase defined in "Analyze.InferVariance" ('inferVariance')
-  | PhaseInferVariance
-  -- | The type inference phase defined in "Analyze.InferTypes" ('inferTypes')
-  | PhaseInferTypes
+import Control.Monad.Reader
 
 -- | The entry point of the compiler, parses arguments and then calls 'startCompile'
 main :: IO ()
 main = do
   currentDirectory <- getCurrentDirectory
   options <- parseArgs currentDirectory
-  phase <- newIORef PhaseInit
-  evalStateT (runCompileIO $ startCompile phase) (compileStateFromOptions options) `catches`
+  stateRef <- newIORef initialCompileState
+  runReaderT (runCompileIO startCompile) (options, stateRef) `catches`
     [ Handler \(e :: ExitCode) -> throwIO e
     , Handler \(e :: SomeException) -> do
-        phaseMsg <- readIORef phase <&> \case
-          PhaseInit -> "initialization"
-          PhaseParser -> "parsing"
-          PhaseNameResolve -> "name resolution"
-          PhaseAssocOps -> "operator association"
-          PhaseInferVariance -> "variance inference"
-          PhaseInferTypes -> "type inference"
-        compilerBugRawIO $ "unexpected crash during " ++ phaseMsg ++ ":" ++ indent (show e) ]
+        state <- readIORef stateRef
+        let
+          phaseMsg =
+            case compilePhase state of
+              PhaseInit -> "initialization"
+              PhaseParser -> "parsing"
+              PhaseNameResolve -> "name resolution"
+              PhaseAssocOps -> "operator association"
+              PhaseInferVariance -> "variance inference"
+              PhaseInferTypes -> "type inference"
+        compilerBugRawIO state $ "unexpected crash during " ++ phaseMsg ++ ":" ++ indent (show e) ]
   where
     parseArgs currentDirectory =
       execParser $ info (parseOptions <**> helper) mempty
@@ -77,9 +67,9 @@ main = do
             <> help "Enables extended explanations for certain compile errors")
 
 -- | Starts the compilation process by running each pass in order
-startCompile :: IORef Phase -> CompileIO ()
-startCompile phase = do
-  setPhase phase PhaseParser
+startCompile :: CompileIO ()
+startCompile = do
+  setPhase PhaseParser
   mods <- parse
   exitIfErrors
   liftIO $ putStrLn ("\n" ++ intercalate "\n" (map show mods))
@@ -89,16 +79,16 @@ startCompile phase = do
       { errorKind = Warning
       , errorMessage = "no code found in source files" }
 
-  setPhase phase PhaseNameResolve
+  setPhase PhaseNameResolve
   allDecls <- nameResolve mods
   exitIfErrors
 
-  setPhase phase PhaseAssocOps
+  setPhase PhaseAssocOps
   allDecls <- assocOps allDecls
   exitIfErrors
   liftIO $ putStrLn $ "\nFully resolved and associated:\n\n" ++ show allDecls
 
-  setPhase phase PhaseInferVariance
+  setPhase PhaseInferVariance
   allDecls <- inferVariance allDecls
   -- Errors here shouldn't stop compilation until after the kinds of type ascriptions are checked
 
@@ -107,13 +97,13 @@ startCompile phase = do
     \(name, DataDecl { dataSig } :&: _) -> putStrLn $
       showWithName (show name) $ dataSigToTypeKind dataSig
 
-  setPhase phase PhaseInferTypes
+  setPhase PhaseInferTypes
   _allDecls <- inferTypes allDecls
   exitIfErrors
 
   finishAndCheckErrors
   where
-    setPhase :: IORef Phase -> Phase -> CompileIO ()
-    setPhase phase newPhase =
-      liftIO $ writeIORef phase newPhase
+    setPhase phase = compileModify \s ->
+      s { compilePhase = phase }
+
 

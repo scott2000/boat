@@ -43,9 +43,8 @@ addFatal e = do
 -- | If any errors occurred, print them and exit with failure
 exitIfErrors :: MonadCompile m => m ()
 exitIfErrors = do
-  CompileState
-    { compileOptions = CompileOptions { compileExplainErrors }
-    , compileErrorCount = count } <- liftCompile get
+  CompileOptions { compileExplainErrors } <- compileOptions
+  CompileState { compileErrorCount = count } <- compileState
   when (errorCount count /= 0) do
     addError compileError
       { errorMessage =
@@ -61,7 +60,7 @@ exitIfErrors = do
 finishAndCheckErrors :: MonadCompile m => m ()
 finishAndCheckErrors = do
   exitIfErrors
-  count <- liftCompile $ gets compileErrorCount
+  count <- compileErrorCount <$> compileState
   addError compileError
     { errorKind = Done
     , errorMessage =
@@ -71,7 +70,7 @@ finishAndCheckErrors = do
 -- | Header printed before an error message for a compiler bug
 compilerBugBaseMessage :: String
 compilerBugBaseMessage =
-  "something went wrong when compiling your code! (please report this compiler bug)\n"
+  footerPrefix ++ "something went wrong when compiling your code! (please report this compiler bug)\n"
 
 -- | Prints an error message and exits (for use in code that should be unreachable)
 compilerBug :: AddFatal m => String -> m a
@@ -82,10 +81,10 @@ compilerBug msg = do
   liftIO exitFailure
 
 -- | Like 'compilerBug', but doesn't require 'CompileIO' and prints a raw message
-compilerBugRawIO :: String -> IO a
-compilerBugRawIO err = do
-  prettyCompileErrors False $ Set.singleton compileError
-    { errorMessage = compilerBugBaseMessage ++ err }
+compilerBugRawIO :: CompileState -> String -> IO a
+compilerBugRawIO state err = do
+  prettyCompileErrors False $ Set.insert compileError
+    { errorMessage = compilerBugBaseMessage ++ err } $ compileErrors state
   exitFailure
 
 -- | A prefix that indicates a message should be printed last in its file
@@ -95,7 +94,8 @@ footerPrefix = "~!~"
 -- | Prints all errors that have been generated
 printErrors :: MonadCompile m => m ()
 printErrors = liftCompile do
-  CompileState { compileErrors, compileOptions = CompileOptions { compileExplainErrors } } <- get
+  CompileOptions { compileExplainErrors } <- compileOptions
+  CompileState { compileErrors } <- compileState
   liftIO $ prettyCompileErrors compileExplainErrors compileErrors
 
 -- | Gets a printable explanation of an 'ErrorCategory'

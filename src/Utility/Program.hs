@@ -469,7 +469,10 @@ instance Show TypeKind where
 
 instance ShowWithName TypeKind where
   showWithName name TypeKind { kindEffs, kindArgs } =
-    unwords ((name ++ effectSuffixStr (map show kindEffs)) : map show kindArgs)
+    unwords ((name ++ effectSuffixStr (map show kindEffs)) : map showArg kindArgs)
+    where
+      showArg (NullaryArg var) = show var
+      showArg arg = "(" ++ show arg ++ ")"
 
 -- | Makes a 'TypeKind' that accepts no additional parameters
 pattern NullaryKind :: TypeKind
@@ -509,7 +512,8 @@ instance ShowWithName DataSig where
       showEff (UnnamedArg, eff) = show eff
       showEff (name, _) = unmeta name
 
-      showArg (UnnamedArg, arg) = show arg
+      showArg (UnnamedArg, NullaryArg var) = show var
+      showArg (UnnamedArg, arg) = "(" ++ show arg ++ ")"
       showArg (name, NullaryArg _) = unmeta name
       showArg (name, arg) = "(" ++ showWithName (unmeta name) arg ++ ")"
 

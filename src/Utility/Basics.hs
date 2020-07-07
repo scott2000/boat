@@ -15,14 +15,19 @@ module Utility.Basics
   , pattern NoFile
 
     -- * Global Compiler State
+  , CompileOptions (..)
+  , CompileState (..)
+  , initialCompileState
+  , CompileIO (..)
   , MonadCompile (..)
   , liftIO
-  , CompileIO (..)
-  , CompileState (..)
-  , compileStateFromOptions
-  , CompileOptions (..)
+  , compileOptions
+  , compileState
+  , compileModify
+  , compileModifyIO
   , CompileError (..)
   , compileError
+  , Phase (..)
   , ErrorKind (..)
   , SpecialError (..)
   , ErrorCategory (..)
@@ -66,6 +71,7 @@ import Data.Char
 import Data.Word
 import Data.List
 
+import Data.IORef
 import Data.Bits (xor)
 import Data.Hashable
 
@@ -210,6 +216,15 @@ pattern AnonAny :: Word64
 pattern AnonAny <- _
   where AnonAny = 0
 
+-- | A record of options provided as command-line arguments
+data CompileOptions = CompileOptions
+  { -- | The requested file or directory to be compiled
+    compileTarget :: !FilePath
+    -- | The requested name for the package
+  , compilePackageName :: !Name
+    -- | Whether error explanations are enabled
+  , compileExplainErrors :: !Bool }
+
 -- | Represents a monad containing a 'CompileIO', allowing modifications to compile state
 class MonadIO m => MonadCompile m where
   -- | Lift a computation from 'CompileIO'
@@ -233,15 +248,32 @@ instance (MonadCompile m, Monoid w) => MonadCompile (WriterT w m) where
 instance (MonadCompile m, Stream s) => MonadCompile (ParsecT e s m) where
   liftCompile = lift . liftCompile
 
+-- | Gets the 'CompileOptions' from 'CompileIO'
+compileOptions :: MonadCompile m => m CompileOptions
+compileOptions = liftCompile $ CompileIO $ asks fst
+
+-- | Gets the 'CompileState' from 'CompileIO'
+compileState :: MonadCompile m => m CompileState
+compileState = compileModifyIO readIORef
+
+-- | Modifies the 'CompileState' in 'CompileIO'
+compileModify :: MonadCompile m => (CompileState -> CompileState) -> m ()
+compileModify f = compileModifyIO \r ->
+  modifyIORef' r f
+
+-- | Modifies the 'CompileState' in 'CompileIO' using the 'IORef'
+compileModifyIO :: MonadCompile m => (IORef CompileState -> IO a) -> m a
+compileModifyIO = liftCompile . CompileIO . ReaderT . (. snd)
+
 -- | 'StateT' used for all stages of compilation to store state
 newtype CompileIO a = CompileIO
-  { runCompileIO :: StateT CompileState IO a }
-  deriving (Functor, Applicative, Monad, MonadIO, MonadState CompileState)
+  { runCompileIO :: ReaderT (CompileOptions, IORef CompileState) IO a }
+  deriving (Functor, Applicative, Monad, MonadIO)
 
 -- | A record used to store state throughout compilation
 data CompileState = CompileState
-  { -- | The options given to the compiler
-    compileOptions :: !CompileOptions
+  { -- | The current phase of compilation
+    compilePhase :: !Phase
     -- | The set of errors emitted during compilation
   , compileErrors :: !(Set CompileError)
     -- | The count of each type of error emitted
@@ -249,20 +281,11 @@ data CompileState = CompileState
     -- | The last unique 'AnonCount' that was given out
   , compileAnonCount :: !AnonCount }
 
--- | A record of options provided as command-line arguments
-data CompileOptions = CompileOptions
-  { -- | The requested file or directory to be compiled
-    compileTarget :: !FilePath
-    -- | The requested name for the package
-  , compilePackageName :: !Name
-    -- | Whether error explanations are enabled
-  , compileExplainErrors :: !Bool }
-
 -- | Creates a 'CompileState' from 'CompileOptions'
-compileStateFromOptions :: CompileOptions -> CompileState
-compileStateFromOptions opts = CompileState
-  { compileOptions = opts
-  , compileErrors = Set.empty
+initialCompileState :: CompileState
+initialCompileState = CompileState
+  { compileErrors = Set.empty
+  , compilePhase = PhaseInit
   , compileErrorCount = ErrorCount
     { errorCount = 0
     , warningCount = 0
@@ -270,12 +293,28 @@ compileStateFromOptions opts = CompileState
     , hasExplainError = False }
   , compileAnonCount = AnonAny }
 
+-- | A phase of compilation (see "Parse" and "Analyze")
+data Phase
+  -- | Any initialization in "Main" that occurs before parsing begins
+  = PhaseInit
+  -- | The parsing phase defined in "Parse" ('Parse.parse')
+  | PhaseParser
+  -- | The name resolution phase defined in "Analyze.NameResolve" ('Analyze.NameResolve.nameResolve')
+  | PhaseNameResolve
+  -- | The operator association phase defined in "Analyze.AssocOps" ('Analyze.AssocOps.assocOps')
+  | PhaseAssocOps
+  -- | The variance inference phase defined in "Analyze.InferVariance" ('Analyze.InferVariance.inferVariance')
+  | PhaseInferVariance
+  -- | The type inference phase defined in "Analyze.InferTypes" ('Analyze.InferTypes.inferTypes')
+  | PhaseInferTypes
+
 -- | Gets a new unique 'AnonCount' for an inference variable
 getNewAnon :: MonadCompile m => m AnonCount
-getNewAnon = liftCompile do
-  s <- get
+getNewAnon = compileModifyIO \r -> do
+  s <- readIORef r
   let newCount = compileAnonCount s + 1
-  put s { compileAnonCount = newCount }
+  let s' = s { compileAnonCount = newCount }
+  s' `seq` writeIORef r s'
   return newCount
 
 -- | An error encountered during compilation
@@ -378,7 +417,7 @@ type AddError = MonadCompile
 -- | Emits a single 'CompileError' for later printing
 addError :: AddError m => CompileError -> m ()
 addError err =
-  liftCompile $ modify \s ->
+  compileModify \s ->
     if Set.member err $ compileErrors s then
       -- Don't try to insert the error if there is already an exact duplicate of the error
       s

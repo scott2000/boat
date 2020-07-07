@@ -14,7 +14,7 @@ import Control.Monad.State.Strict
 -- | Parse source code from a given path
 parse :: CompileIO [Module]
 parse = do
-  path <- gets (compileTarget . compileOptions)
+  path <- compileTarget <$> compileOptions
   isDir <- liftIO $ doesDirectoryExist path
   if isDir then
     parseDirectory path

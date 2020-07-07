@@ -521,7 +521,7 @@ insertOpDecl path decl = do
 -- | Resolve all names in a set of modules and return a flattened map of declarations
 nameResolve :: [Module] -> CompileIO AllDecls
 nameResolve mods = do
-  baseModule <- gets (compilePackageName . compileOptions)
+  baseModule <- compilePackageName <$> compileOptions
   let
     nr = nameResolveAll (Local baseModule) mods
     nrState = runReaderT nr defaultNames
