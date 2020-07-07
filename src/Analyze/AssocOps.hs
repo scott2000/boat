@@ -363,11 +363,11 @@ instance ContainsOp (Type Span) where
             [UnExpr x]
 
   applyUnary path a =
-    withEnds path a $ TApp (copyInfo path $ TNamed [] path) a
+    withEnds path a $ TApp (TNamed <$> path) a
 
   applyBinary path a b =
     withEnds a b $
-      TApp (withEnds a path $ TApp (copyInfo path $ TNamed [] path) a) b
+      TApp (withEnds a path $ TApp (TNamed <$> path) a) b
 
 instance ContainsOp (Expr Span) where
   toUnOpList x =

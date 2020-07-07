@@ -45,10 +45,9 @@ module Utility.AST
   , reduceApplyNoInfix
   , findBase
   , expandFunction
-  , pattern TAnyFuncArrow
-  , pattern TAnyFunc
-  , pattern TEffFunc
+  , pattern TFuncArrow
   , pattern TFunc
+  , pattern TEffFunc
 
     -- * Parsing and Modifying Expressions
   , Of (..)
@@ -74,6 +73,7 @@ import Utility.Basics
 import Data.List
 import Data.Maybe
 
+import Control.Monad.Reader
 import Control.Monad.State.Strict
 import Control.Monad.Trans.Maybe
 
@@ -269,7 +269,72 @@ class After a where
 afterPath :: Monad m => AfterMap m -> ExprKind -> Meta Span Path -> m (Meta Span Path)
 afterPath m k pathWithMeta = do
   path <- aPath m k pathWithMeta
-  return (path <$ pathWithMeta)
+  return $ copyInfo pathWithMeta path
+
+class ShowExpr a where
+  isSimple :: a -> Bool
+  showExpr :: Prec -> Int -> a -> String
+
+instance ShowExpr a => ShowExpr (Meta info a) where
+  isSimple = isSimple . unmeta
+  showExpr prec indent = showExpr prec indent . unmeta
+
+instance ShowExpr String where
+  isSimple = const True
+  showExpr = const $ const id
+
+showExprBlock :: ShowExpr a => Int -> a -> String
+showExprBlock = showExpr ExpectEndPrec
+
+showExprNoSpace :: ShowExpr a => Int -> a -> String
+showExprNoSpace = showExpr ApplyPrec
+
+newline :: Int -> String
+newline indent = '\n' : replicate indent ' '
+
+parenBlock :: Prec -> Int -> (Int -> String) -> String
+parenBlock prec indent f
+  | prec < MinPrec = f indent
+  | otherwise =
+    let indent' = indent + 2 in
+    "(" ++ newline indent' ++ f indent' ++ ")"
+
+parenApp :: (ShowExpr a, ShowExpr b) => Prec -> Int -> a -> b -> String
+parenApp prec indent a b
+  | prec < ApplyPrec = normal
+  | otherwise =
+    "(" ++ normal ++ ")"
+  where
+    normal = showExpr NormalPrec indent a ++ " " ++ showExpr ApplyPrec indent b
+
+parenUnary :: ShowExpr a => Prec -> Int -> String -> a -> String
+parenUnary prec indent op ty
+  | prec < CompactPrec = normal
+  | otherwise =
+    "(" ++ normal ++ ")"
+  where
+    normal =
+      op ++ " " ++ showExpr CompactPrec indent ty
+
+parenInfix :: ShowExpr a => Prec -> Int -> a -> String -> a -> String
+parenInfix prec indent a op b
+  | prec < NormalPrec = normal
+  | prec < CompactPrec, isSimple a, isSimple b =
+    showExpr CompactPrec indent a ++ op ++ showExpr CompactPrec indent b
+  | otherwise =
+    "(" ++ normal ++ ")"
+  where
+    normal =
+      showExpr NormalPrec indent a ++ " " ++ op ++ " " ++ showExpr NormalPrec indent b
+
+parenSpecial :: (ShowExpr a, ShowExpr b) => Prec -> Int -> a -> String -> b -> String
+parenSpecial prec indent a op b
+  | prec < SpecialPrec = normal
+  | otherwise =
+    "(" ++ normal ++ ")"
+  where
+    normal =
+      showExpr SpecialPrec indent a ++ " " ++ op ++ " " ++ showExpr MinPrec indent b
 
 -- | A wrapper around a set of 'Effect's
 newtype EffectSet info = EffectSet
@@ -312,7 +377,7 @@ instance After Effect where
     x <- aEffect m x
     forM x \case
       EffectNamed path ->
-        EffectNamed <$> aPath m KEffect (path <$ x)
+        EffectNamed <$> aPath m KEffect (copyInfo x path)
       other ->
         return other
 
@@ -367,14 +432,16 @@ instance Show UseContents where
 data Type info
   -- | The @()@ type
   = TUnit
-  -- | A named type and any effect arguments
-  | TNamed [MetaR info EffectSet] (Meta info Path)
+  -- | A named type
+  | TNamed Path
   -- | A lowercase type variable
   | TPoly String
   -- | A type left blank to be inferred
   | TAnon AnonCount
   -- | An application of a type argument to a type
   | TApp (MetaR info Type) (MetaR info Type)
+  -- | An application of an effect argument to a type
+  | TEffApp (MetaR info Type) (MetaR info EffectSet)
   -- | A type with a universally quantified effect variable
   | TForEff (Meta info String) (MetaR info Type)
 
@@ -382,16 +449,18 @@ data Type info
   | TParen (MetaR info Type)
   | TUnaryOp (Meta info Path) (MetaR info Type)
   | TBinOp (Meta info Path) (MetaR info Type) (MetaR info Type)
-  deriving (Eq)
+  deriving Eq
 
 instance After (Type Span) where
   after m x = do
     x <- aType m x
     forM x \case
-      TNamed effs path ->
-        TNamed <$> mapM (after m) effs <*> afterPath m KType path
+      TNamed path ->
+        TNamed <$> aPath m KType (copyInfo x path)
       TApp a b ->
         TApp <$> after m a <*> after m b
+      TEffApp ty e ->
+        TEffApp <$> after m ty <*> after m e
       TForEff e ty ->
         TForEff e <$> aWithBindings m [unmeta e] (after m ty)
       TParen a ->
@@ -406,18 +475,31 @@ instance After (Type Span) where
       other ->
         return other
 
-instance Show (Type info) where
-  show = \case
+instance ShowExpr (Type info) where
+  isSimple = \case
+    TUnit -> True
+    TNamed _ -> True
+    TPoly _ -> True
+    TAnon _ -> True
+    _ -> False
+
+  showExpr prec indent = \case
     TUnit -> "()"
-    TNamed effs path -> show path ++ effectSuffix effs
+    TNamed path -> show path
     TPoly name -> name
     TAnon _ -> "_"
-    TEffFunc effs a b ->
-      "(" ++ show a ++ " -|" ++ show effs ++ "|> " ++ show b ++ ")"
+    TEffFunc a effs b ->
+      parenSpecial prec indent a ("-|" ++ show effs ++ "|>") b
     TFunc a b ->
-      "(" ++ show a ++ " -> " ++ show b ++ ")"
+      parenSpecial prec indent a "->" b
+    TApp (TNamed path :&: _) ty | Unary op <- last $ unpath path ->
+      parenUnary prec indent op ty
+    TApp (TApp (TNamed path :&: _) a :&: _) b | Operator op <- last $ unpath path ->
+      parenInfix prec indent a op b
     TApp a b ->
-      "(" ++ show a ++ " " ++ show b ++ ")"
+      parenApp prec indent a b
+    TEffApp ty e ->
+      parenApp prec indent ty ("|" ++ show e ++ "|")
     TForEff e ty ->
       "(|" ++ unmeta e ++ "| " ++ show ty ++ ")"
     TParen ty -> "{" ++ show ty ++ "}"
@@ -430,9 +512,13 @@ instance Show (Type info) where
     TBinOp op lhs rhs ->
       "{" ++ show op ++ " " ++ show lhs ++ " " ++ show rhs ++ "}"
 
+instance Show (Type info) where
+  show = showExprBlock 0
+
 -- | A form of a 'Type' with all applications reduced
 data ReducedApp = ReducedApp
   { reducedType :: MetaR Span Type
+  , reducedEffs :: [MetaR Span EffectSet]
   , reducedArgs :: [MetaR Span Type] }
 
 -- | Try to reduce all applications, otherwise return the conflicting infix operators
@@ -440,8 +526,11 @@ reduceApply :: MetaR Span Type -> Either (Meta Span Path, Meta Span Path) Reduce
 reduceApply typeWithMeta =
   case unmeta typeWithMeta of
     TApp a b -> do
-      ReducedApp ty args <- reduceApply a
-      Right $ ReducedApp ty (args ++ [b])
+      ReducedApp base effs args <- reduceApply a
+      Right $ ReducedApp base effs (args ++ [b])
+    TEffApp ty e -> do
+      ReducedApp base effs args <- reduceApply ty
+      Right $ ReducedApp base (effs ++ [e]) args
     TParen ty ->
       reduceApply ty
     TUnaryOp a (TBinOp b _ _ :&: _) ->
@@ -449,19 +538,22 @@ reduceApply typeWithMeta =
     TBinOp a _ (TBinOp b _ _ :&: _) ->
       Left (a, b)
     TUnaryOp path ty ->
-      Right $ ReducedApp (copyInfo path $ TNamed [] path) [ty]
+      Right $ ReducedApp (TNamed <$> path) [] [ty]
     TBinOp path a b ->
-      Right $ ReducedApp (copyInfo path $ TNamed [] path) [a, b]
+      Right $ ReducedApp (TNamed <$> path) [] [a, b]
     _ ->
-      Right $ ReducedApp typeWithMeta []
+      Right $ ReducedApp typeWithMeta [] []
 
 -- | Try to reduce all applications but don't allow infix operators
 reduceApplyNoInfix :: MetaR Span Type -> Either (Meta Span Path) ReducedApp
 reduceApplyNoInfix typeWithMeta =
   case unmeta typeWithMeta of
     TApp a b -> do
-      ReducedApp ty args <- reduceApplyNoInfix a
-      Right $ ReducedApp ty (args ++ [b])
+      ReducedApp base effs args <- reduceApplyNoInfix a
+      Right $ ReducedApp base effs (args ++ [b])
+    TEffApp ty e -> do
+      ReducedApp base effs args <- reduceApplyNoInfix ty
+      Right $ ReducedApp base (effs ++ [e]) args
     TParen ty ->
       reduceApplyNoInfix ty
     TUnaryOp path _ ->
@@ -469,43 +561,40 @@ reduceApplyNoInfix typeWithMeta =
     TBinOp path _ _ ->
       Left path
     _ ->
-      Right $ ReducedApp typeWithMeta []
+      Right $ ReducedApp typeWithMeta [] []
 
 -- | Find the base of a series of applications and the number of applications removed
-findBase :: MetaR info Type -> (MetaR info Type, Int)
-findBase = go 0
+findBase :: MetaR info Type -> (MetaR info Type, Int, Int)
+findBase = go 0 0
   where
-    go n ty =
+    go numEffs numArgs ty =
       case unmeta ty of
         TApp a _ ->
-          go (n + 1) a
+          go numEffs (numArgs + 1) a
+        TEffApp ty _ ->
+          go (numEffs + 1) numArgs ty
         _ ->
-          (ty, n)
+          (ty, numEffs, numArgs)
 
 -- | Create a function type from a series of argument types and a return type
 expandFunction :: DefaultInfo info => [MetaR info Type] -> MetaR info Type -> MetaR info Type
 expandFunction [] ty = ty
 expandFunction (ty:types) ret =
-  (meta $ TNamed [] $ meta $ Core $ Operator "->") `app` ty `app` expandFunction types ret
-  where
-    app a b = meta $ TApp a b
+  meta $ TApp (meta $ TApp (meta $ TNamed $ Core $ Operator "->") ty) $ expandFunction types ret
 
--- | A function arrow with a list of effect parameters
-pattern TAnyFuncArrow :: [MetaR info EffectSet] -> Type info
-pattern TAnyFuncArrow effs <- TNamed effs (Core (Operator "->") :&: _)
+-- | The named type @Core.(->)@
+pattern TFuncArrow :: Type info
+pattern TFuncArrow = TNamed (Core (Operator "->"))
 
--- | A function type with a list of effect parameters
-pattern TAnyFunc :: [MetaR info EffectSet] -> MetaR info Type -> MetaR info Type -> Type info
-pattern TAnyFunc effs a b <-
-  TApp (TApp (TAnyFuncArrow effs :&: _) a :&: _) b
+-- | A function type with no effect parameter
+pattern TFunc :: MetaR info Type -> MetaR info Type -> Type info
+pattern TFunc a b <-
+  TApp (TApp (TFuncArrow :&: _) a :&: _) b
 
 -- | A function type with a single effect parameter
-pattern TEffFunc :: MetaR info EffectSet -> MetaR info Type -> MetaR info Type -> Type info
-pattern TEffFunc eff a b <- TAnyFunc [eff] a b
-
--- | A function type with no effect parameters
-pattern TFunc :: MetaR info Type -> MetaR info Type -> Type info
-pattern TFunc a b <- TAnyFunc [] a b
+pattern TEffFunc :: MetaR info Type -> MetaR info EffectSet -> MetaR info Type -> Type info
+pattern TEffFunc a eff b <-
+  TEffApp (TFunc a b :&: _) eff
 
 -- | An effect representing pure code
 pattern EffectPure :: Effect
@@ -524,33 +613,48 @@ data Value info
   -- | An evaluated data constructor
   | VDataCons Path [MetaR info Value]
 
-instance Show (Value info) where
-  show = \case
-    VUnit -> "()"
-    VFun cases ->
-      "(fun" ++ showCases True cases ++ ")"
-    VDataCons path [] ->
-      show path
-    VDataCons path vals ->
-      "(" ++ show path ++ " " ++ intercalate " " (map show vals) ++ ")"
-
 instance Eq (Value info) where
   VUnit == VUnit = True
   VFun c0 == VFun c1 =
     c0 == c1
   _ == _ = False
 
+instance ShowExpr (Value info) where
+  isSimple = \case
+    VUnit -> True
+    VDataCons _ [] -> True
+    _ -> False
+
+  showExpr prec indent = \case
+    VUnit -> "()"
+    VFun cases ->
+      parenBlock prec indent \indent ->
+        let indent' = indent + 2 in
+        "fun" ++ newline indent'
+        ++ showExprBlock indent' cases
+    VDataCons path [] ->
+      show path
+    VDataCons path vals ->
+      "(" ++ show path ++ " " ++ intercalate " " (map show vals) ++ ")"
+
+instance Show (Value info) where
+  show = showExprBlock 0
+
 -- | A single case in a function or match expression
 type MatchCase info = ([MetaR info Pattern], MetaR info Expr)
 
--- | Shows a set of match cases, optionally allowing them to be on one line if short
-showCases :: Bool -> [MatchCase info] -> String
-showCases True [c] = indent (showCase c)
-showCases _ cases = "\n  " ++ intercalate "\n  " (map showCase cases)
+instance ShowExpr (MatchCase info) where
+  isSimple = const False
+  showExpr _ indent (pats, expr) =
+    let indent' = indent + 2 in
+    intercalate " " (map (showExprNoSpace indent) pats) ++ " ->"
+    ++ newline indent'
+    ++ showExprBlock indent' expr
 
--- | Shows a single match case
-showCase :: MatchCase info -> String
-showCase (pats, expr) = intercalate " " (map show pats) ++ " ->" ++ indent (show expr)
+instance ShowExpr [MatchCase info] where
+  isSimple = const False
+  showExpr prec indent =
+    intercalate (newline indent) . map (showExpr prec indent)
 
 -- | An expression that can be used to produce a 'Value'
 data Expr info
@@ -587,7 +691,7 @@ instance After (Expr Span) where
       EValue (VFun cases) ->
         EValue . VFun <$> afterCases cases
       EGlobal path ->
-        EGlobal <$> aPath m KValue (path <$ x)
+        EGlobal <$> aPath m KValue (copyInfo x path)
       EApp a b ->
         EApp <$> after m a <*> after m b
       ESeq a b ->
@@ -604,7 +708,7 @@ instance After (Expr Span) where
       ETypeAscribe a ty ->
         ETypeAscribe <$> after m a <*> after m ty
       EDataCons path exprs -> do
-        p <- aPath m KValue (path <$ x)
+        p <- aPath m KValue $ copyInfo x path
         s <- mapM (after m) exprs
         return $ EDataCons p s
       EParen a ->
@@ -649,25 +753,51 @@ instance Eq (Expr info) where
   -- EParen, EUnaryOp, and EBinOp are omitted as they will be removed by later passes
   _ == _ = False
 
-instance Show (Expr info) where
-  show = \case
-    EValue val -> show val
+instance ShowExpr (Expr info) where
+  isSimple = \case
+    EValue val -> isSimple val
+    EGlobal Path { unpath = [_] } -> True
+    EIndex _ (Just _) -> True
+    _ -> False
+
+  showExpr prec indent = \case
+    EValue val ->
+      showExpr prec indent val
     EGlobal name -> show name
     EIndex 0 Nothing -> "?"
     EIndex n Nothing -> "?" ++ show n
     EIndex _ (Just name) -> name
+    EApp (EGlobal path :&: _) ty | Unary op <- last $ unpath path ->
+      parenUnary prec indent op ty
+    EApp (EApp (EGlobal path :&: _) a :&: _) b | Operator op <- last $ unpath path ->
+      parenInfix prec indent a op b
     EApp a b ->
-      "(" ++ show a ++ " " ++ show b ++ ")"
+      parenApp prec indent a b
     ESeq a b ->
-      "(" ++ indent (show a ++ "\n" ++ show b) ++ ")"
+      parenBlock prec indent \indent' ->
+        showExprBlock indent' a
+        ++ newline indent'
+        ++ showExprBlock indent' b
     ELet p v e ->
-      "(let " ++ show p ++ " =" ++ indent (show v) ++ "\n" ++ show e ++ ")"
+      parenBlock prec indent \indent ->
+        let indent' = indent + 2 in
+        "let " ++ showExpr MinPrec indent p ++ " ="
+        ++ newline indent'
+        ++ showExprBlock indent' v
+        ++ showExprBlock indent e
     EMatchIn exprs cases ->
-      "(match " ++ intercalate " " (map show exprs) ++ showCases False cases ++ ")"
+      parenBlock prec indent \indent ->
+        let indent' = indent + 2 in
+        "match " ++ intercalate " " (map (showExprNoSpace indent) exprs)
+        ++ newline indent'
+        ++ showExprBlock indent' cases
     EUse u e ->
-      "(use " ++ show u ++ "\n" ++ show e ++ ")"
+      parenBlock prec indent \indent ->
+        "use " ++ show u
+        ++ newline indent
+        ++ showExprBlock indent e ++ ""
     ETypeAscribe expr ty ->
-      "(" ++ show expr ++ " : " ++ show ty ++ ")"
+      parenSpecial prec indent expr ":" ty
     EDataCons path [] ->
       show path
     EDataCons path exprs ->
@@ -681,6 +811,9 @@ instance Show (Expr info) where
       "{" ++ show lhs ++ " " ++ op ++ " " ++ show rhs ++ "}"
     EBinOp op lhs rhs ->
       "{" ++ show op ++ " " ++ show lhs ++ " " ++ show rhs ++ "}"
+
+instance Show (Expr info) where
+  show = showExprBlock 0
 
 -- | A pattern which can match a value and bind variables
 data Pattern info
@@ -731,12 +864,23 @@ instance Eq (Pattern info) where
   -- PParen, PUnaryOp, and PBinOp are omitted as they will be removed by later passes
   _ == _ = False
 
-instance Show (Pattern info) where
-  show = \case
+instance ShowExpr (Pattern info) where
+  isSimple = \case
+    PUnit -> True
+    PAny -> True
+    PBind (Just _) -> True
+    PCons _ [] -> True
+    _ -> False
+
+  showExpr prec indent = \case
     PUnit -> "()"
     PAny -> "_"
     PBind Nothing -> "?"
     PBind (Just name) -> name
+    PCons path [ty] | Unary op <- last $ unpath $ unmeta path ->
+      parenUnary prec indent op ty
+    PCons path [a, b] | Operator op <- last $ unpath $ unmeta path ->
+      parenInfix prec indent a op b
     PCons name [] -> show name
     PCons name pats ->
       "(" ++ show name ++ " " ++ intercalate " " (map show pats) ++ ")"
@@ -751,6 +895,9 @@ instance Show (Pattern info) where
       "{" ++ show lhs ++ " " ++ op ++ " " ++ show rhs ++ "}"
     PBinOp op lhs rhs ->
       "{" ++ show op ++ " " ++ show lhs ++ " " ++ show rhs ++ "}"
+
+instance Show (Pattern info) where
+  show = showExprBlock 0
 
 -- | Makes a list of all local variables created by the pattern
 bindingsForPat :: MetaR info Pattern -> [Maybe String]
@@ -859,7 +1006,7 @@ class ExprLike a where
 instance ExprLike (Type Span) where
   opKind _ = "type"
   opUnit = TUnit
-  opNamed = TNamed []
+  opNamed = TNamed . unmeta
   opParen ty =
     case unmeta ty of
       TUnaryOp _ _ -> TParen ty
@@ -868,12 +1015,8 @@ instance ExprLike (Type Span) where
   opUnary = TUnaryOp
   opBinary = TBinOp
   opApply a b = Right $ TApp a b
-  opEffectApply = Just effectApply
-    where
-      effectApply (TNamed es path :&: _) e =
-        Right $ TNamed (es ++ [e]) path
-      effectApply _ e =
-        Left $ copyInfo e "effect arguments can only occur immediately following a named type"
+  opEffectApply = Just \a b ->
+    Right $ TEffApp a b
   opForallEffect = Just TForEff
 
 instance ExprLike (Expr Span) where

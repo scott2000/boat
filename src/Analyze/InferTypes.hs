@@ -3,7 +3,7 @@ module Analyze.InferTypes where
 
 import Utility
 
-import Analyze.InferVariance (lookupDecl, addMatchError, matchArgs)
+import Analyze.InferVariance (lookupDecl, addMatchError, matchKinds)
 
 import Data.Maybe
 import Data.HashMap.Strict (HashMap)
@@ -66,21 +66,35 @@ instance Show ContextLocation where
       ordinal index ++ " input for match expression"
 
 -- | Looks up a data type declaration's parameters
-lookupDecl' :: Path -> Infer ([TypeVariance], [DataArg])
+lookupDecl' :: Path -> Infer TypeKind
 lookupDecl' = lookupDecl \path -> do
   decls <- asks (allDatas . iAllDecls)
   return $ HashMap.lookup path decls
 
 -- | Looks up a data type declaration's parameters given an @AllDecls@ map
-lookupDecl'' :: AddFatal m => AllDecls -> Path -> m ([TypeVariance], [DataArg])
+lookupDecl'' :: AddFatal m => AllDecls -> Path -> m TypeKind
 lookupDecl'' decls = lookupDecl \path -> do
   return $ HashMap.lookup path $ allDatas decls
 
-matchDataArg :: DataArg -> DataArg -> Maybe DataArg
-matchDataArg (DataArg var0 args0) (DataArg var1 args1)
-  | length args0 /= length args1 = Nothing
+matchTypeKind :: TypeKind -> TypeKind -> Maybe TypeKind
+matchTypeKind (TypeKind eEffs eArgs) (TypeKind aEffs aArgs)
+  | length eArgs /= length aArgs = Nothing
   | otherwise =
-    DataArg (var0 <> var1) <$> zipWithM matchDataArg args0 args1
+    TypeKind <$> matchEffs eEffs aEffs <*> zipWithM matchArg eArgs aArgs
+  where
+    matchEffs [] as = Just as
+    matchEffs es [] = Just es
+    matchEffs (e:es) (a:as) =
+      (:) <$> matchVariance e a <*> matchEffs es as
+
+    matchArg (DataArg eVar eKind) (DataArg aVar aKind) =
+      DataArg <$> matchVariance eVar aVar <*> matchTypeKind eKind aKind
+
+    matchVariance VInvariant act = Just act
+    matchVariance exp VInvariant = Just exp
+    matchVariance exp act
+      | exp == act = Just exp
+      | otherwise  = Nothing
 
 type CheckState = StateT (HashSet Path, Map (Meta Span String) (ExprKind, Maybe DataArg)) CompileIO
 
@@ -97,20 +111,24 @@ checkAndDeps decls (path, decl@(LetDecl { letBody, letConstraints } :&: file :/:
 
     checkType :: MetaR Span Type -> CheckState ()
     checkType =
-      expectKindMatchArgs [] VOutput []
+      expectKindMatchKinds [] VOutput NullaryKind
 
-    polyArgs :: Map String [DataArg]
+    polyArgs :: Map String TypeKind
     polyArgs =
       Map.fromList $ mapMaybe getArgKind letConstraints
       where
         getArgKind constraint =
           case unmeta constraint of
-            name `HasArguments` args ->
+            name `HasKind` args ->
               Just (unmeta name, args)
             _ ->
               Nothing
 
-    getVar :: Meta Span String -> MaybeT CheckState [DataArg]
+    matchVar :: DataArg -> DataArg -> Maybe DataArg
+    matchVar (DataArg eVar eKind) (DataArg aVar aKind) =
+      DataArg (eVar <> aVar) <$> matchTypeKind eKind aKind
+
+    getVar :: Meta Span String -> MaybeT CheckState TypeKind
     getVar name =
       case Map.lookup (unmeta name) polyArgs of
         Nothing -> MaybeT do
@@ -132,67 +150,70 @@ checkAndDeps decls (path, decl@(LetDecl { letBody, letConstraints } :&: file :/:
     addVar :: Meta Span String -> ExprKind -> DataArg -> CheckState ()
     addVar name kind dataArg = do
       (deps, vars) <- get
-      case Map.lookup name vars of
-        Nothing ->
-          put (deps, Map.insert name (kind, Just dataArg) vars)
-        Just (oldKind, _) | kind /= oldKind ->
+      let
+        err msg = do
           addError compileError
             { errorFile = file
             , errorSpan = getSpan name
-            , errorMessage =
-              show oldKind ++ " parameter `" ++ unmeta name ++ "` cannot also be used as " ++ aOrAn (show kind) }
-        Just (_, Nothing) -> return ()
-        Just (_, Just oldDataArg) ->
-          case matchDataArg oldDataArg dataArg of
-            Just newDataArg ->
-              put (deps, Map.insert name (kind, Just newDataArg) vars)
-            Nothing ->
-              addError compileError
-                { errorFile = file
-                , errorSpan = getSpan name
-                , errorMessage =
+            , errorMessage = msg }
+          return Nothing
+        kindMismatch oldKind =
+          err (show oldKind ++ " parameter `" ++ unmeta name ++ "` cannot also be used as " ++ aOrAn (show kind))
+      newEntry <-
+        case Map.lookup name vars of
+          Nothing ->
+            case Map.lookup (unmeta name) polyArgs of
+              Just constraintKind
+                | kind /= KType ->
+                  kindMismatch KType
+                | otherwise ->
+                  case matchTypeKind (argKind dataArg) constraintKind of
+                    Just newKind ->
+                      return $ Just dataArg { argKind = newKind }
+                    Nothing ->
+                      err $
+                        "type constrained to kind `" ++ show constraintKind ++ "`\n" ++
+                        "  cannot also be used as `" ++ show dataArg ++ "`"
+              Nothing ->
+                return $ Just dataArg
+          Just (oldKind, _) | kind /= oldKind -> do
+            kindMismatch oldKind
+          Just (_, Nothing) ->
+            return Nothing
+          Just (_, Just oldDataArg) ->
+            case matchVar dataArg oldDataArg of
+              Just newDataArg ->
+                return $ Just newDataArg
+              Nothing -> do
+                err $
                   "parameter first used as kind `" ++ show oldDataArg ++ "`\n" ++
-                  "      cannot also be used as `" ++ show dataArg ++ "`" }
+                  "      cannot also be used as `" ++ show dataArg ++ "`"
+      put (deps, Map.insert name (kind, newEntry) vars)
 
-    matchArgs' :: Span -> [DataArg] -> [DataArg] -> CheckState ()
-    matchArgs' actualSpan expected actual =
-      matchArgs missingVariance expected actual >>= \case
+    matchKinds' :: Span -> TypeKind -> TypeKind -> CheckState ()
+    matchKinds' actualSpan expected actual =
+      matchKinds missingVariance expected actual >>= \case
         Nothing -> return ()
         Just err ->
           addMatchError file actualSpan err
       where
         missingVariance _ _ =
-          compilerBug "matchArgs' called with uninferred variance during type inference"
+          compilerBug "matchKinds' called with uninferred variance during type inference"
 
-    expectKindMatchArgs :: [String] -> TypeVariance -> [DataArg] -> MetaR Span Type -> CheckState ()
-    expectKindMatchArgs locals var args typeWithMeta = do
+    expectKindMatchKinds :: [String] -> TypeVariance -> TypeKind -> MetaR Span Type -> CheckState ()
+    expectKindMatchKinds locals var args typeWithMeta = do
       runMaybeT (expectKind locals var (Just args) typeWithMeta) >>= \case
         Nothing ->
           return ()
         Just actual ->
-          matchArgs' (getSpan typeWithMeta) args actual
+          matchKinds' (getSpan typeWithMeta) args actual
 
-    expectKind :: [String] -> TypeVariance -> Maybe [DataArg] -> MetaR Span Type -> MaybeT CheckState [DataArg]
+    expectKind :: [String] -> TypeVariance -> Maybe TypeKind -> MetaR Span Type -> MaybeT CheckState TypeKind
     expectKind locals var args typeWithMeta =
       -- NOTE: A large portion of this code is similar to the type checking code in InferVariance
       case unmeta typeWithMeta of
-        TNamed effs name -> do
-          (dataEffects, dataArgs) <- lookupDecl'' decls $ unmeta name
-          let effCount = length dataEffects
-          case drop effCount effs of
-            [] -> return ()
-            (eff:_) ->
-              addError compileError
-                { errorFile = file
-                , errorSpan = getSpan eff
-                , errorMessage =
-                  "`" ++ show name ++ "` " ++
-                    if effCount == 0 then
-                      "does not accept any effect arguments"
-                    else
-                      "only accepts " ++ plural effCount "effect argument" }
-          lift $ zipWithM_ matchEff effs dataEffects
-          return dataArgs
+        TNamed name ->
+          lookupDecl'' decls name
         TPoly name
           | name `elem` locals -> MaybeT do
             addError compileError
@@ -217,34 +238,54 @@ checkAndDeps decls (path, decl@(LetDecl { letBody, letConstraints } :&: file :/:
               return Nothing
             Just expected ->
               return expected
-        TApp a b ->
-          expectKind locals var Nothing a >>= \case
+        TApp a b -> do
+          TypeKind effs args <- expectKind locals var Nothing a
+          case args of
             [] -> MaybeT do
-              let (base, baseCount) = findBase a
+              let (base, _, argCount) = findBase a
               addError compileError
                 { errorFile = file
                 , errorSpan = getSpan b
                 , errorMessage =
                   "`" ++ show base ++ "` " ++
-                    if baseCount == 0 then
-                      "does not accept any arguments"
+                    if argCount == 0 then
+                      "does not accept any type arguments"
                     else
-                      "only accepts " ++ plural baseCount "argument" }
+                      "only accepts " ++ plural argCount  "type argument" }
               return Nothing
-            DataArg { argVariance, argParams } : rest -> lift do
-              expectKindMatchArgs locals (var <> argVariance) argParams b
-              return rest
+            DataArg { argVariance, argKind } : rest -> lift do
+              expectKindMatchKinds locals (var <> argVariance) argKind b
+              return $ TypeKind effs rest
+        TEffApp ty e -> do
+          TypeKind effs args <- expectKind locals var Nothing ty
+          case effs of
+            [] -> MaybeT do
+              matchEff e VInvariant
+              let (base, effCount, _) = findBase ty
+              addError compileError
+                { errorFile = file
+                , errorSpan = getSpan e
+                , errorMessage =
+                  "`" ++ show base ++ "` " ++
+                    if effCount == 0 then
+                      "does not accept any effect arguments"
+                    else
+                      "only accepts " ++ plural effCount  "effect argument" }
+              return Nothing
+            argVariance : rest -> lift do
+              matchEff e $ var <> argVariance
+              return $ TypeKind rest args
         TForEff e ty -> do
-          lift $ expectKindMatchArgs (unmeta e : locals) var [] ty
-          return []
+          lift $ expectKindMatchKinds (unmeta e : locals) var NullaryKind ty
+          return NullaryKind
         _ ->
-          return []
+          return NullaryKind
       where
-        matchEff effs argVariance =
+        matchEff effs var =
           forM_ (setEffects $ unmeta effs) \eff ->
             case unmeta eff of
               EffectPoly name ->
-                addVar (name <$ eff) KEffect $ NullaryArg (var <> argVariance)
+                addVar (name <$ eff) KEffect $ NullaryArg var
               _ ->
                 return ()
 
@@ -299,12 +340,12 @@ checkAndDeps decls (path, decl@(LetDecl { letBody, letConstraints } :&: file :/:
 hasBlank :: MetaR Span Type -> Bool
 hasBlank typeWithMeta =
   case unmeta typeWithMeta of
-    TNamed effs _ ->
-      any (any isBlank . setEffects . unmeta) effs
     TAnon _ ->
       True
     TApp a b ->
       hasBlank a || hasBlank b
+    TEffApp ty e ->
+      hasBlank ty || any isBlank (setEffects $ unmeta e)
     TForEff _ ty ->
       hasBlank ty
     _ ->

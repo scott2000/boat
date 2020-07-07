@@ -104,8 +104,8 @@ startCompile phase = do
 
   liftIO $ putStrLn $ "\nInferred variances:\n"
   liftIO $ forM_ (HashMap.toList $ allDatas allDecls) $
-    \(name, DataDecl { dataSig = DataSig { dataEffects, dataArgs } } :&: _) -> putStrLn $
-      show name ++ effectSuffixStr (map (show . snd) dataEffects) ++ unwords ("" : map (show . snd) dataArgs)
+    \(name, DataDecl { dataSig } :&: _) -> putStrLn $
+      showWithName (show name) $ dataSigToTypeKind dataSig
 
   setPhase phase PhaseInferTypes
   _allDecls <- inferTypes allDecls

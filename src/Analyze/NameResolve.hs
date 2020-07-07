@@ -636,36 +636,37 @@ nameResolveEach path mod =
 
     nameResolveEffect (name, EffectDecl { effectSuper } :&: file :/: span) = do
       super <- forM effectSuper $ nameResolveAfter path file
-      forM_ super \(EffectSet effs :&: _) -> do
-        when (Set.size effs == 1)
-          case Set.findMin effs of
-            EffectPure :&: span ->
-              addError compileError
-                { errorFile = file
-                , errorSpan = span
-                , errorExplain = Just $
-                  " Making an effect a subtype of `Pure` is not something that makes sense, since it" ++
-                  " represents the lack of side effects. If an effect were a subtype of `Pure`, it would" ++
-                  " be useless since it could always be left out when specifying an effect."
-                , errorMessage =
-                  "effect cannot be a subtype of `Pure`, try just using `effect " ++ show name ++ "`" }
-            _ ->
-              return ()
-        case Set.lookupIndex (meta EffectVoid) effs of
-          Nothing -> return ()
-          Just i ->
-            let _ :&: span = Set.elemAt i effs in
-            addError compileError
-              { errorFile = file
-              , errorSpan = span
-              , errorKind = Warning
-              , errorMessage =
-                "all effects are implicitly subtypes of `Void`, so listing it is unnecessary" }
+      forM_ super \case
+        EffectPure :&: span ->
+          addError compileError
+            { errorFile = file
+            , errorSpan = span
+            , errorExplain = Just $
+              " Making an effect a subtype of `Pure` is not something that makes sense, since it" ++
+              " represents the lack of side effects. If an effect were a subtype of `Pure`, it would" ++
+              " be useless since it could always be left out when specifying an effect."
+            , errorMessage =
+              "effect cannot be a subtype of `Pure`, try just using `effect " ++ show name ++ "`" }
+        EffectVoid :&: span ->
+          addError compileError
+            { errorFile = file
+            , errorSpan = span
+            , errorKind = Warning
+            , errorMessage =
+              "all effects are implicitly subtypes of `Void`, so listing it is unnecessary" }
+        EffectNamed _ :&: _ ->
+          return ()
+        other :&: span ->
+          addError compileError
+            { errorFile = file
+            , errorSpan = span
+            , errorMessage =
+              "expected a named effect, but found `" ++ show other ++ "` instead" }
       insertEffect (path .|. name) $ withInfo (file :/: span) EffectDecl
         { effectSuper = super }
 
-    nameResolveData (name, decl@DataDecl { dataSig = DataSig { dataEffects, dataArgs } } :&: file :/: span) = do
-      let parameters = map (unmeta . fst) dataEffects ++ map (unmeta . fst) dataArgs
+    nameResolveData (name, decl@DataDecl { dataSig = DataSig { dataEffs, dataArgs } } :&: file :/: span) = do
+      let parameters = map (unmeta . fst) dataEffs ++ map (unmeta . fst) dataArgs
       variants <- withLocals parameters $ mapM (mapM nameResolveVariant) $ dataVariants decl
       let dataName = path .|. name
       insertData dataName $ withInfo (file :/: span) decl
@@ -695,6 +696,25 @@ nameResolveEach path mod =
     nameResolveLet (name, LetDecl { letBody, letConstraints } :&: file :/: span) = do
       letBody <- nameResolveAfter path file letBody
       letConstraints <- forM letConstraints $ nameResolveAfter path file
+      forM letConstraints \case
+        name `IsSubEffectOf` (eff :&: span) :&: _ ->
+          case eff of
+            EffectPure ->
+              addError compileError
+                { errorFile = file
+                , errorSpan = span
+                , errorKind = Warning
+                , errorMessage =
+                  "this constraint is the same as replacing `" ++ unmeta name ++ "` with `Pure`" }
+            EffectVoid ->
+              addError compileError
+                { errorFile = file
+                , errorSpan = span
+                , errorKind = Warning
+                , errorMessage =
+                  "all effects are subtypes of `Void`, so this constraint does nothing" }
+            _ -> return ()
+        _ -> return ()
       insertLet (path .|. name) $ withInfo (file :/: span) LetDecl { letBody, letConstraints }
 
 -- | Resolve a single 'Path'

@@ -161,22 +161,6 @@ parserPartial =
               , errorMessage = "effect variable name must start with a lowercase letter" }
           nbsc >> forEff name <$> parserPrec NormalPrec
 
--- | Represents the precedence of a type of operation
-data Prec
-  -- | A special precedence for when an expression will be terminated by a special operator
-  = ExpectEndPrec
-  -- | The default precedence for an expression
-  | MinPrec
-  -- | The precedence for a regular operator surrounded by whitespace
-  | SpecialPrec
-  -- | The precedence for a regular operator surrounded by whitespace
-  | NormalPrec
-  -- | The precedence for function application
-  | ApplyPrec
-  -- | The precedence for a compact operator not surrounded by whitespace
-  | CompactPrec
-  deriving (Ord, Eq)
-
 -- | Parse a single expression
 parser :: Parsable a => Parser (Meta Span a)
 parser = parserPrec MinPrec
@@ -326,9 +310,8 @@ instance Parsable (Type Span) where
   parseSpecial (FunctionArrow :&: span) =
     Just $ metaExtendPrec \lhs rhs ->
       let
-        arrow = withInfo span $ Core $ Operator "->"
-        withNoEff = withInfo span $ TNamed [] arrow
-        firstApp = withEnds lhs arrow $ TApp withNoEff lhs
+        arrow = withInfo span TFuncArrow
+        firstApp = withEnds lhs arrow $ TApp arrow lhs
       in
         TApp firstApp rhs
   parseSpecial (SplitArrow :&: span) =
@@ -340,8 +323,8 @@ instance Parsable (Type Span) where
       parserPrec prec <&> \rhs ->
         let
           arrowSpan = span <> endSpan
-          arrow = withInfo arrowSpan $ Core $ Operator "->"
-          withEff = withInfo arrowSpan $ TNamed [effects] arrow
+          arrow = withInfo arrowSpan TFuncArrow
+          withEff = withInfo arrowSpan $ TEffApp arrow effects
           firstApp = withEnds lhs withEff $ TApp withEff lhs
         in
           withEnds firstApp rhs $ TApp firstApp rhs

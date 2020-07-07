@@ -20,9 +20,9 @@ data VarianceConstraint = VarianceConstraint
   , vDeps :: [AnonCount] }
 
 -- | The constraint given to parameters used directly in variants
-defaultConstraint :: VarianceConstraint
-defaultConstraint = VarianceConstraint
-  { vBase = VOutput
+defaultConstraint :: TypeVariance -> VarianceConstraint
+defaultConstraint vBase = VarianceConstraint
+  { vBase = vBase
   , vDeps = [] }
 
 -- | Modifies a constraint to be contained in another constrained parameter
@@ -41,12 +41,14 @@ declDeps =
 
     typeDeps ty =
       case unmeta ty of
-        TAnyFuncArrow _ ->
+        TFuncArrow ->
           return ()
-        TNamed _ name ->
-          tell $ HashSet.singleton $ unmeta name
+        TNamed name ->
+          tell $ HashSet.singleton name
         TApp a b ->
           typeDeps a >> typeDeps b
+        TEffApp ty _ ->
+          typeDeps ty
         TForEff _ ty ->
           typeDeps ty
         _ ->
@@ -145,24 +147,23 @@ defaultInferState = InferState
   , iResolvedVars = HashMap.empty
   , iUnresolvedVars = HashMap.empty }
 
--- | Removes the unneeded parameter names from a 'DataSig'
-removeNames :: DataSig -> ([TypeVariance], [DataArg])
-removeNames DataSig { dataEffects, dataArgs } =
-  (map snd dataEffects, map snd dataArgs)
-
 -- | Looks up a data type declaration's parameters using a provided lookup function
-lookupDecl :: AddFatal m => (Path -> m (Maybe (Meta (InFile Span) DataDecl))) -> Path -> m ([TypeVariance], [DataArg])
+lookupDecl :: AddFatal m => (Path -> m (Maybe (Meta (InFile Span) DataDecl))) -> Path -> m TypeKind
 lookupDecl _ (Core (Operator "->")) =
-  return ([VOutput], [DataArg VInput [], DataArg VOutput []])
+  return TypeKind
+    { kindEffs = [VOutput]
+    , kindArgs =
+      [ NullaryArg VInput
+      , NullaryArg VOutput ] }
 lookupDecl lookup path = do
   lookup path >>= \case
     Just decl ->
-      return $ removeNames $ dataSig $ unmeta decl
+      return $ dataSigToTypeKind $ dataSig $ unmeta decl
     Nothing ->
       compilerBug $ "lookupDecl couldn't find `" ++ show path ++ "`"
 
 -- | Looks up a data type declaration's parameters
-lookupDecl' :: Path -> Infer ([TypeVariance], [DataArg])
+lookupDecl' :: Path -> Infer TypeKind
 lookupDecl' = lookupDecl \path -> do
   InferState { iResolvedDecls, iUnresolvedDecls } <- get
   return $ HashMap.lookup path iResolvedDecls <|> HashMap.lookup path iUnresolvedDecls
@@ -207,8 +208,8 @@ inferDeclSCC scc = do
     unresolvedList = flattenSCC scc
     unresolvedMap = HashMap.fromList unresolvedList
 
-    addAnons (_, DataDecl { dataSig = DataSig { dataEffects, dataArgs } } :&: file :/: _) m =
-      foldr addEff (foldr addArg m dataArgs) dataEffects
+    addAnons (_, DataDecl { dataSig = DataSig { dataEffs, dataArgs } } :&: file :/: _) m =
+      foldr addEff (foldr addArg m dataArgs) dataEffs
       where
         -- Ignore arguments that weren't specified by name
         addEff (_ :&: span, VAnon var) = HashMap.insert var (file :/: span)
@@ -220,8 +221,8 @@ inferDeclSCC scc = do
       HashMap.insert name $ withInfo info decl
         { dataSig = resDataSig $ dataSig decl }
       where
-        resDataSig DataSig { dataEffects, dataArgs } = DataSig
-          { dataEffects = map resEff dataEffects
+        resDataSig DataSig { dataEffs, dataArgs } = DataSig
+          { dataEffs = map resEff dataEffs
           , dataArgs = map resArg dataArgs }
         resEff (name, VAnon var) = (name, hashMapGet var rvars)
         resEff eff = eff
@@ -233,11 +234,11 @@ type DataInfo = HashMap String (Maybe (ExprKind, DataArg))
 
 -- | Constructs a 'DataInfo' map from a 'DataSig'
 makeDataInfo :: AddError m => FilePath -> DataSig -> m DataInfo
-makeDataInfo file DataSig { dataEffects, dataArgs } =
+makeDataInfo file DataSig { dataEffs, dataArgs } =
   execStateT addAll HashMap.empty
   where
     addAll = do
-      forM_ dataEffects \(name, variance) ->
+      forM_ dataEffs \(name, variance) ->
         add name $ Just (KEffect, NullaryArg variance)
       forM_ dataArgs \(name, arg) ->
         add name $ Just (KType, arg)
@@ -259,26 +260,24 @@ getAnon :: DataArg -> AnonCount
 getAnon DataArg { argVariance = VAnon anon } = anon
 getAnon _ = error "getAnon called with inferred variance"
 
--- | Represents an error from 'matchArgs'
-data MatchArgsError
+-- | Represents an error from 'matchKinds'
+data MatchKindsError
   = RequiresArgs Int
-  | MustAcceptArgs Int
-  | GeneralMismatch [DataArg] [DataArg]
+  | MustAcceptArgs ExprKind Int
+  | GeneralMismatch TypeKind TypeKind
 
-instance Show MatchArgsError where
+instance Show MatchKindsError where
   show = \case
-    RequiresArgs n -> "type requires " ++ plural n "more argument"
-    MustAcceptArgs n -> "type must accept " ++ plural n "more argument"
+    RequiresArgs n ->
+      "type requires " ++ plural n "more argument"
+    MustAcceptArgs kind n ->
+      "type must accept " ++ plural n ("more " ++ show kind ++ " argument")
     GeneralMismatch expected actual ->
-      "cannot pass type argument of kind `" ++ showKind actual ++ "`\n" ++
-      "  to a type constructor expecting `" ++ showKind expected ++ "`"
-    where
-      showKind kindList = show DataArg
-        { argVariance = VInvariant
-        , argParams = kindList }
+      "cannot pass type argument of kind `" ++ show actual ++ "`\n" ++
+      "  to a type constructor expecting `" ++ show expected ++ "`"
 
--- | Emits a 'MatchArgsError' in the given file at the given span
-addMatchError :: AddError m => FilePath -> Span -> MatchArgsError -> m ()
+-- | Emits a 'MatchKindsError' in the given file at the given span
+addMatchError :: AddError m => FilePath -> Span -> MatchKindsError -> m ()
 addMatchError file span err =
   addError compileError
     { errorFile = file
@@ -295,40 +294,44 @@ addMatchError file span err =
     , errorMessage = show err }
 
 -- | Matches the expected arguments with the actual arguments for a type
-matchArgs :: AddFatal m
-          => (TypeVariance -> AnonCount -> m ()) -- ^ Specifies what to do for uninferred variance
-          -> [DataArg]                           -- ^ The arguments that the type is expected to accept
-          -> [DataArg]                           -- ^ The arguments that the type actually accepts
-          -> m (Maybe MatchArgsError)            -- ^ The error produced by unification (if any)
-matchArgs resolveAnon expected actual =
+matchKinds :: Monad m
+           => (TypeVariance -> AnonCount -> m ()) -- ^ Specifies what to do for uninferred variance
+           -> TypeKind                            -- ^ The arguments that the type is expected to accept
+           -> TypeKind                            -- ^ The arguments that the type actually accepts
+           -> m (Maybe MatchKindsError)           -- ^ The error produced by unification (if any)
+matchKinds resolveAnon expected@(TypeKind eEffs eArgs) (TypeKind aEffs aArgs) =
   -- This might seem backwards because the lists correspond to missing arguments, not given ones
-  case length expected `compare` length actual of
-    LT ->
-      return $ Just $ RequiresArgs $ length actual - length expected
-    GT ->
-      return $ Just $ MustAcceptArgs $ length expected - length actual
-    EQ -> do
-      (actual, mismatches) <- runWriterT $ zipWithM unifyArg expected actual
-      return $
-        if getAny mismatches then
-          Just $ GeneralMismatch expected actual
-        else
-          Nothing
+  if length eEffs > length aEffs then
+    return $ Just $ MustAcceptArgs KEffect $ length eEffs - length aEffs
+  else
+    case length eArgs `compare` length aArgs of
+      LT ->
+        return $ Just $ RequiresArgs $ length aArgs - length eArgs
+      GT ->
+        return $ Just $ MustAcceptArgs KType $ length eArgs - length aArgs
+      EQ -> do
+        (actual, mismatches) <- runWriterT $
+          TypeKind <$> zipWithM unifyVar eEffs aEffs <*> zipWithM unifyArg eArgs aArgs
+        return $
+          if getAny mismatches then
+            Just $ GeneralMismatch expected actual
+          else
+            Nothing
   where
     unifyFail =
       tell $ Any True
 
-    unifyArg (DataArg expVar expArg) (DataArg actVar actArg) = do
+    unifyArg (DataArg expVar (TypeKind eEffs eArgs)) (DataArg actVar actual@(TypeKind aEffs aArgs)) = do
       var <- unifyVar expVar actVar
-      args <-
-        if length expArg == length actArg then
-          zipWithM unifyArg expArg actArg
+      kind <-
+        if length eEffs <= length aEffs && length eArgs == length aArgs then
+          TypeKind <$> zipWithM unifyVar eEffs aEffs <*> zipWithM unifyArg eArgs aArgs
         else
-          unifyFail >> return actArg
-      return $ DataArg var args
+          unifyFail >> return actual
+      return $ DataArg var kind
 
     unifyVar (VAnon _) _ =
-      compilerBug "matchArgs called with uninferred expected type"
+      error "matchKinds called with uninferred expected type"
     unifyVar VInvariant other =
       return other
     unifyVar exp (VAnon anon) = do
@@ -341,7 +344,7 @@ matchArgs resolveAnon expected actual =
 -- | Adds constraints for a data type's variant
 generateConstraints :: FilePath -> DataInfo -> Meta Span DataVariant -> Infer ()
 generateConstraints file dataInfo ((_, types) :&: _) =
-  forM_ types $ inferTypeMatchArgs [] defaultConstraint []
+  forM_ types $ inferTypeMatchKinds [] (defaultConstraint VOutput) NullaryKind
   where
     lookupNamed :: ExprKind -> Span -> String -> MaybeT Infer DataArg
     lookupNamed expected span name =
@@ -359,45 +362,30 @@ generateConstraints file dataInfo ((_, types) :&: _) =
           -- Indicates that there were multiple parameters with this name so nothing can be done
           MaybeT $ return Nothing
 
-    matchArgs' :: Span -> [DataArg] -> [DataArg] -> Infer ()
-    matchArgs' actualSpan expected actual =
-      matchArgs resolveAnon expected actual >>= \case
+    matchKinds' :: Span -> TypeKind -> TypeKind -> Infer ()
+    matchKinds' actualSpan expected actual =
+      matchKinds resolveAnon expected actual >>= \case
         Nothing -> return ()
         Just err ->
           addMatchError file actualSpan err
       where
         resolveAnon exp anon =
-          insertConstraint anon $ addStep exp defaultConstraint
+          insertConstraint anon $ addStep exp $ defaultConstraint VOutput
 
-    inferTypeMatchArgs :: [String] -> VarianceConstraint -> [DataArg] -> MetaR Span Type -> Infer ()
-    inferTypeMatchArgs locals c args typeWithMeta = do
+    inferTypeMatchKinds :: [String] -> VarianceConstraint -> TypeKind -> MetaR Span Type -> Infer ()
+    inferTypeMatchKinds locals c args typeWithMeta = do
       runMaybeT (inferType locals c typeWithMeta) >>= \case
         Nothing ->
           return ()
         Just actual ->
-          matchArgs' (getSpan typeWithMeta) args actual
+          matchKinds' (getSpan typeWithMeta) args actual
 
-    inferType :: [String] -> VarianceConstraint -> MetaR Span Type -> MaybeT Infer [DataArg]
+    inferType :: [String] -> VarianceConstraint -> MetaR Span Type -> MaybeT Infer TypeKind
     inferType locals c typeWithMeta =
       -- NOTE: A large portion of this code is similar to the type checking code in InferTypes
       case unmeta typeWithMeta of
-        TNamed effs name -> do
-          (dataEffects, dataArgs) <- lift $ lookupDecl' $ unmeta name
-          let effCount = length dataEffects
-          case drop effCount effs of
-            [] -> return ()
-            (eff:_) ->
-              addError compileError
-                { errorFile = file
-                , errorSpan = getSpan eff
-                , errorMessage =
-                  "`" ++ show name ++ "` " ++
-                    if effCount == 0 then
-                      "does not accept any effect arguments"
-                    else
-                      "only accepts " ++ plural effCount "effect argument" }
-          zipWithM_ matchEff effs dataEffects
-          return dataArgs
+        TNamed name ->
+          lift $ lookupDecl' name
         TPoly name
           | name `elem` locals -> MaybeT do
             addError compileError
@@ -408,53 +396,71 @@ generateConstraints file dataInfo ((_, types) :&: _) =
           | otherwise -> do
             arg <- lookupNamed KType (getSpan typeWithMeta) name
             lift $ insertConstraint (getAnon arg) c
-            return $ argParams arg
+            return $ argKind arg
         TAnon _ -> MaybeT do
           addError compileError
             { errorFile = file
             , errorSpan = getSpan typeWithMeta
             , errorMessage = "type in data type variant cannot be left blank" }
           return Nothing
-        TApp a b ->
-          inferType locals c a >>= \case
+        TApp a b -> do
+          TypeKind effs args <- inferType locals c a
+          case args of
             [] -> MaybeT do
-              runMaybeT $ inferType locals (addStep VInvariant c) b
-              let (base, baseCount) = findBase a
+              runMaybeT $ inferType locals (defaultConstraint VInvariant) b
+              let (base, _, argCount) = findBase a
               addError compileError
                 { errorFile = file
                 , errorSpan = getSpan b
                 , errorMessage =
                   "`" ++ show base ++ "` " ++
-                    if baseCount == 0 then
-                      "does not accept any arguments"
+                    if argCount == 0 then
+                      "does not accept any type arguments"
                     else
-                      "only accepts " ++ plural baseCount "argument" }
+                      "only accepts " ++ plural argCount  "type argument" }
               return Nothing
-            DataArg { argVariance, argParams } : rest -> lift do
-              inferTypeMatchArgs locals (addStep argVariance c) argParams b
-              return rest
+            DataArg { argVariance, argKind } : rest -> lift do
+              inferTypeMatchKinds locals (addStep argVariance c) argKind b
+              return $ TypeKind effs rest
+        TEffApp ty e -> do
+          TypeKind effs args <- inferType locals c ty
+          case effs of
+            [] -> MaybeT do
+              runMaybeT $ matchEff e $ defaultConstraint VInvariant
+              let (base, effCount, _) = findBase ty
+              addError compileError
+                { errorFile = file
+                , errorSpan = getSpan e
+                , errorMessage =
+                  "`" ++ show base ++ "` " ++
+                    if effCount == 0 then
+                      "does not accept any effect arguments"
+                    else
+                      "only accepts " ++ plural effCount  "effect argument" }
+              return Nothing
+            argVariance : rest -> lift do
+              runMaybeT $ matchEff e $ addStep argVariance c
+              return $ TypeKind rest args
         TForEff e typeWithMeta -> do
-          lift $ inferTypeMatchArgs (unmeta e : locals) c [] typeWithMeta
-          return []
+          lift $ inferTypeMatchKinds (unmeta e : locals) c NullaryKind typeWithMeta
+          return NullaryKind
         _ ->
-          return []
+          return NullaryKind
       where
-        matchEff effs argVariance =
+        matchEff effs c =
           forM_ (setEffects $ unmeta effs) \eff ->
             case unmeta eff of
               EffectPoly name
                 | name `elem` locals -> return ()
                 | otherwise -> do
                   arg <- lookupNamed KEffect (getSpan eff) name
-                  lift $ insertConstraint (getAnon arg) effC
+                  lift $ insertConstraint (getAnon arg) c
               EffectAnon _ ->
                 addError compileError
                   { errorFile = file
                   , errorSpan = getSpan eff
                   , errorMessage = "effect in data type variant cannot be left blank" }
               _ -> return ()
-          where
-            effC = addStep argVariance c
 
 -- | Describes the states a set of dependencies of an 'InferVariable' can have
 data UnwrapState

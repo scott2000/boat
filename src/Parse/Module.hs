@@ -9,6 +9,7 @@ import Text.Megaparsec
 import Text.Megaparsec.Char
 
 import Data.Maybe
+import qualified Data.Set as Set
 
 -- | Run 'parseFile' on a certain path and return the parsed module
 parseSingleFile :: FilePath -> CompileIO Module
@@ -83,7 +84,21 @@ parseFile file = do
           where
             parseEffectSuper = do
               try (nbsc >> specialOp TypeAscription)
-              blockOf $ parseSomeCommaList $ withSpan parseEffectSet
+              blockOf $ parseSomeCommaList parseSingleEffect
+            parseSingleEffect = do
+              EffectSet effs :&: span <- withSpan parseEffectSet
+              case Set.toList effs of
+                [eff] ->
+                  return eff
+                _ -> do
+                  file <- getFilePath
+                  addError compileError
+                    { errorFile = file
+                    , errorSpan = span
+                    , errorMessage =
+                      "effects cannot inherit from a single set of multiple effects\n" ++
+                      "(to inherit from multiple effects at once, separate them with commas)" }
+                  withInfo span . EffectAnon <$> getNewAnon
 
         parseLet = do
           keyword "let"
@@ -105,16 +120,17 @@ parseFile file = do
 
         parseData = do
           keyword "data" >> nbsc
-          isMod <- (keyword "mod" >> nbsc >> return True) <|> return False
-          (name, dataSig) <-
+          isMod <-
+            (keyword "mod" >> nbsc >> return True) <|> return False
+          namedDataSig <-
             parserExpectEnd >>= namedDataSigFromType file
           nbsc >> specialOp Assignment
           vars <- blockOf $
             someBetweenLines (parserExpectEnd >>= variantFromType file)
-          case name of
+          case namedDataSig of
             Nothing ->
               return m
-            Just name ->
+            Just (name, dataSig) ->
               let
                 dataDecl = DataDecl
                   { dataMod = isMod

@@ -48,6 +48,7 @@ executable boat
                        ScopedTypeVariables,
                        ConstraintKinds,
                        ViewPatterns,
+                       MonadFailDesugaring,
                        DeriveFunctor,
                        DeriveFoldable,
                        DeriveTraversable,

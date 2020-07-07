@@ -16,8 +16,11 @@ module Utility.Program
   , variantFromType
   , DataSig (..)
   , namedDataSigFromType
+  , dataSigToTypeKind
   , pattern UnnamedArg
   , TypeVariance (..)
+  , TypeKind (..)
+  , pattern NullaryKind
   , DataArg (..)
   , pattern NullaryArg
 
@@ -56,7 +59,6 @@ import Utility.Basics
 import Utility.AST
 
 import Data.List
-import Data.Maybe
 import Data.Char
 
 import Data.HashMap.Strict (HashMap)
@@ -66,7 +68,6 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
 import Control.Monad.State.Strict
-import Control.Monad.Trans.Maybe
 
 -- | Class for showing a value with an externally provided name
 class ShowWithName a where
@@ -335,7 +336,7 @@ modAddOpDecls file names op mod = do
 
 -- | A declaration of a new effect with an optional super-effect
 data EffectDecl = EffectDecl
-  { effectSuper :: [MetaR Span EffectSet] }
+  { effectSuper :: [Meta Span Effect] }
 
 instance ShowWithName EffectDecl where
   showWithName name EffectDecl { effectSuper } =
@@ -370,21 +371,21 @@ modAddEffect file name decl mod = do
 
 -- | A constraint from a with-clause in a declaration
 data Constraint info
-  = Meta info Effect `IsSubEffectOf` MetaR info EffectSet
-  | Meta info String `HasArguments` [DataArg]
+  = Meta info String `IsSubEffectOf` Meta info Effect
+  | Meta info String `HasKind` TypeKind
   deriving (Ord, Eq)
 
 instance Show (Constraint info) where
   show = \case
     effect `IsSubEffectOf` set ->
       show effect ++ " : " ++ show set
-    name `HasArguments` args ->
-      showWithName (unmeta name) $ DataArg VInvariant args
+    name `HasKind` typeKind ->
+      showWithName (unmeta name) typeKind
 
 instance After (Constraint Span) where
   after m = mapM \case
     eff `IsSubEffectOf` effs ->
-      IsSubEffectOf <$> after m eff <*> after m effs
+      IsSubEffectOf eff <$> after m effs
     other ->
       return other
 
@@ -457,10 +458,27 @@ pattern SymbolOutput = Local (Operator "+")
 pattern SymbolInput :: Path
 pattern SymbolInput = Local (Operator "-")
 
+-- | The kind of a type parameter
+data TypeKind = TypeKind
+  { kindEffs :: [TypeVariance]
+  , kindArgs :: [DataArg] }
+  deriving (Ord, Eq)
+
+instance Show TypeKind where
+  show = showWithName (show VInvariant)
+
+instance ShowWithName TypeKind where
+  showWithName name TypeKind { kindEffs, kindArgs } =
+    unwords ((name ++ effectSuffixStr (map show kindEffs)) : map show kindArgs)
+
+-- | Makes a 'TypeKind' that accepts no additional parameters
+pattern NullaryKind :: TypeKind
+pattern NullaryKind = TypeKind [] []
+
 -- | Represents the kind of a parameter for a 'DataDecl'
 data DataArg = DataArg
   { argVariance :: !TypeVariance
-  , argParams :: [DataArg] }
+  , argKind :: !TypeKind }
   deriving (Ord, Eq)
 
 instance Show DataArg where
@@ -468,13 +486,12 @@ instance Show DataArg where
     showWithName (show $ argVariance arg) arg
 
 instance ShowWithName DataArg where
-  showWithName name DataArg { argParams }
-    | null argParams = name
-    | otherwise = "(" ++ unwords (name : map show argParams) ++ ")"
+  showWithName name =
+    showWithName name . argKind
 
 -- | Makes a 'DataArg' that accepts no additional parameters
 pattern NullaryArg :: TypeVariance -> DataArg
-pattern NullaryArg variance = DataArg variance []
+pattern NullaryArg variance = DataArg variance NullaryKind
 
 -- | Used in place of a name for arguments that weren't named
 pattern UnnamedArg :: Meta Span String
@@ -482,14 +499,25 @@ pattern UnnamedArg = DefaultMeta "_"
 
 -- | Represents the effect and type parameters a 'DataDecl' can accept
 data DataSig = DataSig
-  { dataEffects :: [(Meta Span String, TypeVariance)]
+  { dataEffs :: [(Meta Span String, TypeVariance)]
   , dataArgs :: [(Meta Span String, DataArg)] }
 
 instance ShowWithName DataSig where
-  showWithName name DataSig { dataArgs, dataEffects } =
-    name ++ effectSuffixStr (map (unmeta . fst) dataEffects) ++ unwords ("" : map showArg dataArgs)
+  showWithName name DataSig { dataEffs, dataArgs } =
+    unwords ((name ++ effectSuffixStr (map showEff dataEffs)) : map showArg dataArgs)
     where
-      showArg (name, dataArg) = showWithName (unmeta name) dataArg
+      showEff (UnnamedArg, eff) = show eff
+      showEff (name, _) = unmeta name
+
+      showArg (UnnamedArg, arg) = show arg
+      showArg (name, NullaryArg _) = unmeta name
+      showArg (name, arg) = "(" ++ showWithName (unmeta name) arg ++ ")"
+
+-- | Converts a 'DataSig' to a 'TypeKind' by discarding the names of the arguments
+dataSigToTypeKind :: DataSig -> TypeKind
+dataSigToTypeKind DataSig { dataEffs, dataArgs } = TypeKind
+  { kindEffs = map snd dataEffs
+  , kindArgs = map snd dataArgs }
 
 -- | A single variant of a 'DataDecl'
 type DataVariant = (Meta Span Name, [MetaR Span Type])
@@ -524,10 +552,10 @@ modAddData file name decl mod = do
 
 -- | Parses a constraint from a type that would be ambiguous on its own
 disambiguateConstraint :: AddError m
-                       => FilePath
-                       -> MetaR Span Type
-                       -> Maybe (MetaR Span EffectSet)
-                       -> m (Maybe (Constraint Span))
+                       => FilePath                     -- ^ The file being parsed
+                       -> MetaR Span Type              -- ^ The initial part of the constraint
+                       -> Maybe (MetaR Span EffectSet) -- ^ The ascription part of the constraint (if any)
+                       -> m (Maybe (Constraint Span))  -- ^ The parsed constraint (if valid)
 disambiguateConstraint file typeWithMeta maybeAscription =
   case maybeAscription of
     Nothing ->
@@ -536,63 +564,65 @@ disambiguateConstraint file typeWithMeta maybeAscription =
         Left _ ->
           -- Anything using an infix operator must be a trait constraint
           traitsUnimplemented
-        Right (ReducedApp (baseTy :&: baseSpan) args) ->
-          case baseTy of
-            TNamed _ _ ->
-              -- Named types are for trait constraints
-              traitsUnimplemented
-            TPoly name
-              | null args -> do
-                addError compileError
-                  { errorFile = file
-                  , errorSpan = getSpan typeWithMeta
-                  , errorMessage = "expected arguments after kind constraint" }
-                return Nothing
-              | otherwise -> do
-                -- This is a kind constraint like (m (+))
-                argKinds <- forM args $ dataArgFromType file
-                return $ Just $ (name :&: baseSpan) `HasArguments` argKinds
-            TAnon _ -> do
+        Right (ReducedApp (baseTy :&: baseSpan) effs args) ->
+          let
+            err msg = do
               addError compileError
                 { errorFile = file
                 , errorSpan = baseSpan
-                , errorMessage = "constraint name cannot be left blank" }
+                , errorMessage = msg }
               return Nothing
-            _ -> do
-              addError compileError
-                { errorFile = file
-                , errorSpan = baseSpan
-                , errorMessage = "expected a name for a constraint" }
-              return Nothing
-    Just bound -> runMaybeT do
+          in
+            case baseTy of
+              TNamed _ ->
+                -- Named types are for trait constraints
+                traitsUnimplemented
+              TPoly name
+                | null effs && null args ->
+                  err "expected arguments after kind constraint"
+                | otherwise -> do
+                  -- This is a kind constraint like (m (+))
+                  typeKindFromEffsAndArgs file effs args <&> fmap \argKind ->
+                    (name :&: baseSpan) `HasKind` argKind
+              TAnon _ -> do
+                err "constraint name cannot be left blank"
+              _ -> do
+                err "expected a name for a constraint"
+    Just (EffectSet bound :&: boundSpan) -> do
       -- There was an ascription, so this is an effect constraint
       eff <-
-        case unmeta typeWithMeta of
-          TNamed [] name ->
-            return $ EffectNamed $ unmeta name
-          TPoly name ->
-            return $ EffectPoly name
-          TAnon anon -> do
+        let
+          err msg = do
             addError compileError
               { errorFile = file
               , errorSpan = getSpan typeWithMeta
-              , errorMessage = "expected a specific effect before `:` in constraint" }
-            return $ EffectAnon anon
-          _ -> MaybeT do
-            addError compileError
-              { errorFile = file
-              , errorSpan = getSpan typeWithMeta
-              , errorMessage = "expected a single effect before `:` in constraint" }
+              , errorMessage = msg }
             return Nothing
-      forM_ (setEffects $ unmeta bound) \eff ->
-        case unmeta eff of
-          EffectAnon _ ->
+        in
+          case unmeta typeWithMeta of
+            TNamed _ ->
+              err "expected a lowercase effect variable before `:` in constraint"
+            TPoly name ->
+              return $ Just $ copyInfo typeWithMeta name
+            _ ->
+              err "expected a single effect variable before `:` in constraint"
+      super <-
+        case Set.toList $ bound of
+          [EffectAnon _ :&: span] -> do
             addError compileError
               { errorFile = file
-              , errorSpan = getSpan eff
-              , errorMessage = "effect in constraint cannot be left blank" }
-          _ -> return ()
-      return $ copyInfo typeWithMeta eff `IsSubEffectOf` bound
+              , errorSpan = span
+              , errorMessage = "upper bound for effect constraint cannot be left blank" }
+            return Nothing
+          [eff] ->
+            return $ Just eff
+          _ -> do
+            addError compileError
+              { errorFile = file
+              , errorSpan = boundSpan
+              , errorMessage = "effect variables can only be constrained by a single effect" }
+            return Nothing
+      return $ IsSubEffectOf <$> eff <*> super
   where
     traitsUnimplemented = do
       addError compileError
@@ -602,183 +632,196 @@ disambiguateConstraint file typeWithMeta maybeAscription =
       return Nothing
 
 -- | A common subset of the possibilities for a type or effect
-data MaybeLowercase
-  = MLNamed Path
-  | MLPoly String
-  | MLAnon
-  | MLOther String
+data TypeOrEffect
+  = TENamed Path
+  | TEPoly String
+  | TEAnon
+  | TEOther String
 
--- | Tries to extract a 'DataDecl' parameter if possible
-extractParameter :: AddError m
-                 => (String -> m (Maybe (Meta Span String, TypeVariance)))
-                 -> Span
-                 -> String
-                 -> MaybeLowercase
-                 -> m (Maybe (Meta Span String, TypeVariance))
-extractParameter err span kind = \case
-  MLNamed SymbolOutput ->
-    unnamed VOutput
-  MLNamed SymbolInput ->
-    unnamed VInput
-  MLNamed (Path { unpath = path }) ->
-    case path of
-      [Identifier ('_':rest)] ->
-        let
-          suggestion =
-            case rest of
-              (x:_) | isAlpha x ->
-                ", did you mean `" ++ lowerFirst rest ++ "`?"
-              _ -> ""
-        in
-          err (kind ++ " parameter name must start with a lowercase letter" ++ suggestion)
-      [Identifier name] ->
-        err (kind ++ " parameter name must be lowercase, did you mean `" ++ lowerFirst name ++ "`?")
-      _ ->
-        err (kind ++ " parameter name must be unqualified, did you mean `" ++ show (last path) ++ "`?")
-  MLPoly local ->
-    getNewAnon >>= justParam local . VAnon
-  MLAnon ->
-    unnamed VInvariant
-  MLOther other ->
-    err ("expected name for " ++ kind ++ " parameter, found `" ++ other ++ "` instead")
+instance Show TypeOrEffect where
+  show = \case
+    TENamed path -> show path
+    TEPoly name -> name
+    TEAnon -> "_"
+    TEOther other -> other
+
+-- | Either a 'Type' or an 'Effect'
+class FromTypeOrEffect a where
+  -- | Get the 'ExprKind' and the @TypeOrEffect@ from this value
+  fromTE :: a -> (ExprKind, TypeOrEffect)
+
+instance FromTypeOrEffect (Type info) where
+  fromTE ty =
+    (,) KType case ty of
+      TNamed path -> TENamed path
+      TPoly poly -> TEPoly poly
+      TAnon _ -> TEAnon
+      other -> TEOther $ show other
+
+instance FromTypeOrEffect Effect where
+  fromTE eff =
+    (,) KEffect case eff of
+      EffectNamed path -> TENamed path
+      EffectPoly poly -> TEPoly poly
+      EffectAnon _ -> TEAnon
+      other -> TEOther $ show other
+
+-- | Extract an unnamed variance from a 'Type' or an 'Effect'
+extractUnnamed :: (AddError m, FromTypeOrEffect a) => FilePath -> Meta Span a -> m (Maybe TypeVariance)
+extractUnnamed file (typeOrEffect :&: span) =
+  case te of
+    TENamed SymbolOutput ->
+      return $ Just VOutput
+    TENamed SymbolInput ->
+      return $ Just VInput
+    TEAnon ->
+      return $ Just VInvariant
+    other ->
+      err ("expected variance for " ++ show kind ++ " parameter, found `" ++ show other ++ "` instead")
   where
-    justParam name var =
-      return $ Just (name :&: span, var)
-    unnamed var =
-      justParam "_" var
-
--- | Parses a given type as a 'DataArg'
-dataArgFromType :: AddError m
-                => FilePath
-                -> MetaR Span Type
-                -> m DataArg
-dataArgFromType file typeWithMeta =
-  -- It doesn't matter what is returned on error since it won't be needed until the next phase anyway
-  case reduceApplyNoInfix typeWithMeta of
-    Left path -> do
+    (kind, te) = fromTE typeOrEffect
+    err msg = do
       addError compileError
         { errorFile = file
-        , errorSpan = getSpan path
-        , errorCategory = Just ECInferVariance
-        , errorMessage =
-          "type parameter variances must use prefix notation" }
-      return $ DataArg VInvariant []
-    Right (ReducedApp (baseTy :&: baseSpan) args) -> do
-      baseVariance <- case baseTy of
-        TNamed [] (DefaultMeta SymbolOutput) -> return VOutput
-        TNamed [] (DefaultMeta SymbolInput) -> return VInput
-        TAnon _ -> return VInvariant
-        _ -> do
-          addError compileError
-            { errorFile = file
-            , errorSpan = baseSpan
-            , errorCategory = Just ECInferVariance
-            , errorMessage =
-              "expected one of (+), (-), or _ for higher-kinded type parameter variance" }
-          return VInvariant
-      paramsVariance <- forM args $ dataArgFromType file
-      return DataArg
-        { argVariance = baseVariance
-        , argParams = paramsVariance }
-
--- | Tries to parse a given type as a 'DataArg' with a name for the base
-namedDataArgFromType :: AddError m
-                     => FilePath
-                     -> MetaR Span Type
-                     -> m (Maybe (Meta Span String, DataArg))
-namedDataArgFromType file typeWithMeta =
-  case reduceApplyNoInfix typeWithMeta of
-    Left path -> do
-      addError compileError
-        { errorFile = file
-        , errorSpan = getSpan path
-        , errorMessage =
-          "expected a type parameter, not an infix operator" }
+        , errorSpan = span
+        , errorMessage = msg }
       return Nothing
-    Right (ReducedApp (baseTy :&: baseSpan) args) -> do
-      let
-        err msg = do
-          addError compileError
-            { errorFile = file
-            , errorSpan = baseSpan
-            , errorMessage = msg }
-          return Nothing
-      nameAndVariance <- extractParameter err baseSpan "type" $
-        case baseTy of
-          TNamed [] path -> MLNamed $ unmeta path
-          TPoly local -> MLPoly local
-          TAnon _ -> MLAnon
-          other -> MLOther (show other)
-      case nameAndVariance of
-        Nothing -> return Nothing
-        Just (name, variance) -> do
-          params <- forM args $ dataArgFromType file
-          return $ Just (name, DataArg { argVariance = variance, argParams = params })
 
--- | Tries to parse a named 'DataSig' from a given type
+-- | Extract a named argument from a 'Type' or an 'Effect'
+extractNamed :: (AddError m, FromTypeOrEffect a)
+             => FilePath
+             -> Meta Span a
+             -> m (Maybe (Meta Span String, TypeVariance))
+extractNamed file (typeOrEffect :&: span) =
+  case te of
+    TENamed SymbolOutput ->
+      unnamed VOutput
+    TENamed SymbolInput ->
+      unnamed VInput
+    TENamed (Path { unpath = path }) ->
+      case path of
+        [Identifier ('_':rest)] ->
+          let
+            suggestion =
+              case rest of
+                (x:_) | isAlpha x ->
+                  ", did you mean `" ++ lowerFirst rest ++ "`?"
+                _ -> ""
+          in
+            err (show kind ++ " parameter name must start with a lowercase letter" ++ suggestion)
+        [Identifier name] ->
+          err (show kind ++ " parameter name must be lowercase, did you mean `" ++ lowerFirst name ++ "`?")
+        _ ->
+          err (show kind ++ " parameter name must be unqualified, did you mean `" ++ show (last path) ++ "`?")
+    TEAnon ->
+      unnamed VInvariant
+    TEPoly local ->
+      getNewAnon <&> \anon ->
+        Just (local :&: span, VAnon anon)
+    TEOther other ->
+      err ("expected name for " ++ show kind ++ " parameter, found `" ++ other ++ "` instead")
+  where
+    (kind, te) = fromTE typeOrEffect
+    unnamed var =
+      return $ Just ("_" :&: span, var)
+    err msg = do
+      addError compileError
+        { errorFile = file
+        , errorSpan = span
+        , errorMessage = msg }
+      return Nothing
+
+-- | Using an extraction function, extract a single effect from a set of effects
+extractSingleEffect :: AddError m
+                    => FilePath
+                    -> (FilePath -> Meta Span Effect -> m (Maybe a))
+                    -> MetaR Span EffectSet
+                    -> m (Maybe a)
+extractSingleEffect file parseEffect (EffectSet set :&: span) =
+  case Set.toList set of
+    [eff] ->
+      parseEffect file eff
+    _ -> do
+      addError compileError
+        { errorFile = file
+        , errorSpan = span
+        , errorMessage = "each effect parameter must be in its own set of pipes, not separated by `+`" }
+      return Nothing
+
+-- | Tries to parse a 'TypeKind' from lists of effect and type arguments
+typeKindFromEffsAndArgs :: AddError m => FilePath -> [MetaR Span EffectSet] -> [MetaR Span Type] -> m (Maybe TypeKind)
+typeKindFromEffsAndArgs file effs args = do
+  effs <- forM effs $ extractSingleEffect file extractUnnamed
+  args <- forM args \ty ->
+    typeKindFromType file extractUnnamed ty <&> fmap \(argVariance, argKind) ->
+      DataArg { argVariance, argKind }
+  return $ TypeKind <$> sequence effs <*> sequence args
+
+-- | Tries to parse a 'TypeKind' given a way to parse the head of the type
+typeKindFromType :: AddError m
+                 => FilePath
+                 -> (FilePath -> MetaR Span Type -> m (Maybe a))
+                 -> MetaR Span Type
+                 -> m (Maybe (a, TypeKind))
+typeKindFromType file parseHead typeWithMeta =
+  case reduceApplyNoInfix typeWithMeta of
+    Left path -> do
+      addError compileError
+        { errorFile = file
+        , errorSpan = getSpan typeWithMeta
+        , errorMessage = "unexpected infix operator in type kind declaration: " ++ show path }
+      return Nothing
+    Right (ReducedApp baseTy effs args) -> do
+      head <- parseHead file baseTy
+      kind <- typeKindFromEffsAndArgs file effs args
+      return $ (,) <$> head <*> kind
+
+-- | Tries to parse a 'DataSig' from a given type
 namedDataSigFromType :: AddError m
-                     => FilePath                           -- ^ The file where the data type is defined
+                     => FilePath                            -- ^ The file where the data type is defined
                      -> MetaR Span Type                     -- ^ The type containing the signature to parse
-                     -> m (Maybe (Meta Span Name), DataSig) -- ^ The parsed name (if valid) and signature
+                     -> m (Maybe (Meta Span Name, DataSig)) -- ^ The parsed name and signature (if valid)
 namedDataSigFromType file typeWithMeta =
   case reduceApply typeWithMeta of
-    Left (_, b) -> do
+    Left (_, _ :&: span) -> do
       addError compileError
         { errorFile = file
-        , errorSpan = getSpan b
-        , errorMessage =
-          "expected only a single operator for data type delcaration, found multiple instead" }
-      -- The data signature doesn't matter since the name is invalid anyway
-      return (Nothing, DataSig [] [])
-    Right (ReducedApp (baseTy :&: nSpan) args) -> do
-      (name, effs) <-
-        let
-          err span msg = do
-            addError compileError
-              { errorFile = file
-              , errorSpan = span
-              , errorMessage = msg }
-            return (Nothing, [])
-        in
-          case baseTy of
-            TNamed effs pathWithMeta ->
-              let Path { unpath = names } :&: span = pathWithMeta in
-              if last names == Operator "->" then
-                err span "data type name cannot be (->) because this is a special item"
-              else
-                case names of
-                  [name] ->
-                    return (Just $ copyInfo pathWithMeta name, effs)
-                  _ ->
-                    err span ("data type name must be unqualified, did you mean `" ++ show (last names) ++ "`?")
-            TPoly local ->
-              err nSpan ("data type name must be capitalized, did you mean `" ++ capFirst local ++ "`?")
-            other ->
-              err nSpan ("expected a name for the data type, found `" ++ show other ++ "` instead")
-      effs <- forM effs \effSet ->
+        , errorSpan = span
+        , errorMessage = "expected only a single operator for data type delcaration, found multiple instead" }
+      return Nothing
+    Right (ReducedApp (baseTy :&: baseSpan) effs args) -> do
+      name <-
         let
           err msg = do
             addError compileError
               { errorFile = file
-              , errorSpan = getSpan effSet
+              , errorSpan = baseSpan
               , errorMessage = msg }
             return Nothing
         in
-          case Set.toList $ setEffects $ unmeta effSet of
-            [eff] ->
-              extractParameter err (getSpan eff) "effect" $
-                case unmeta eff of
-                  EffectNamed path -> MLNamed path
-                  EffectPoly local -> MLPoly local
-                  _ -> MLAnon
-            _ -> err "effect parameters must each be in their own set of pipes, you cannot use `+` in between"
-      vars <- forM args $ namedDataArgFromType file
-      -- Errors can be ignored since they will be checked at the end of the phase (before the signature can be used)
-      return (name, DataSig (catMaybes effs) (catMaybes vars))
+          case baseTy of
+            TNamed Path { unpath = names } ->
+              if last names == Operator "->" then
+                err "data type name cannot be (->) because this is a special item"
+              else
+                case names of
+                  [name] ->
+                    return $ Just $ name :&: baseSpan
+                  _ ->
+                    err ("data type name must be unqualified, did you mean `" ++ show (last names) ++ "`?")
+            TPoly local ->
+              err ("data type name must be capitalized, did you mean `" ++ capFirst local ++ "`?")
+            other ->
+              err ("expected a name for the data type, found `" ++ show other ++ "` instead")
+      effs <- forM effs $ extractSingleEffect file extractNamed
+      args <- forM args \ty ->
+        typeKindFromType file extractNamed ty <&> fmap \((name, argVariance), argKind) ->
+          (name, DataArg { argVariance, argKind })
+      return $ (,) <$> name <*> (DataSig <$> sequence effs <*> sequence args)
 
 -- | Tries to parse a 'DataVariant' from a given type
 variantFromType :: AddError m
-                => FilePath                         -- ^ The file where the data type is defined
+                => FilePath                          -- ^ The file where the data type is defined
                 -> MetaR Span Type                   -- ^ The type containing the signature to parse
                 -> m (Maybe (Meta Span DataVariant)) -- ^ The parsed variant (if valid)
 variantFromType file typeWithMeta =
@@ -794,29 +837,29 @@ variantFromType file typeWithMeta =
             "cannot resolve relative operator precedence of `"
             ++ show b ++ "` after `" ++ show a ++ "` without explicit parentheses" }
       return Nothing
-    Right (ReducedApp baseTy args) ->
+    Right (ReducedApp (baseTy :&: baseSpan) effs args) ->
       let
         err msg = do
           addError compileError
             { errorFile = file
-            , errorSpan = getSpan baseTy
+            , errorSpan = baseSpan
             , errorMessage = msg }
           return Nothing
       in
-        case unmeta baseTy of
-          TNamed _ (Core (Operator "->") :&: _) ->
+        case baseTy of
+          TNamed (Core (Operator "->")) ->
             err "data type variant name cannot use (->) in an infix position, this syntax is reserved for types"
-          TNamed (eff : _) _ -> do
-            addError compileError
-              { errorFile = file
-              , errorSpan = getSpan eff
-              , errorMessage = "data type variants cannot take effect arguments" }
-            return Nothing
-          TNamed [] pathWithMeta ->
-            let names = unpath $ unmeta pathWithMeta in
+          TNamed Path { unpath = names } ->
             case names of
-              [name] ->
-                return $ Just $ copyInfo typeWithMeta (copyInfo pathWithMeta name, args)
+              [name]
+                | (eff : _) <- effs -> do
+                  addError compileError
+                    { errorFile = file
+                    , errorSpan = getSpan eff
+                    , errorMessage = "data type variants cannot take effect arguments" }
+                  return Nothing
+                | otherwise ->
+                  return $ Just $ copyInfo typeWithMeta (name :&: baseSpan, args)
               _ ->
                 err ("data type variant names must be unqualified, did you mean `" ++ show (last names) ++ "`?")
           TPoly local ->

@@ -40,14 +40,17 @@ module Utility.Basics
   , pointSpan
   , isSpanValid
 
-    -- * Formatting and Capitalization
-  , plural
-  , ordinal
-  , aOrAn
+    -- * Language Information
+  , Prec (..)
   , isKeyword
   , isIdentFirst
   , isIdentRest
   , isOperatorChar
+
+    -- * Formatting and Capitalization
+  , plural
+  , ordinal
+  , aOrAn
   , isCap
   , capFirst
   , lowerFirst
@@ -68,6 +71,8 @@ import Data.Hashable
 
 import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HashMap
+import Data.HashSet (HashSet)
+import qualified Data.HashSet as HashSet
 import Data.Set (Set)
 import qualified Data.Set as Set
 
@@ -435,14 +440,6 @@ instance Semigroup Span where
   Span { spanStart } <> Span { spanEnd } =
     Span { spanStart, spanEnd }
 
--- | Checks if a span consists of only valid positions (@'posLine' > 0@)
-isSpanValid :: Span -> Bool
-isSpanValid Span { spanStart, spanEnd } =
-  isPositionValid spanStart && isPositionValid spanEnd
-  where
-    isPositionValid Position { posLine } =
-      posLine > 0
-
 -- | Pattern for a missing span (considered invalid by 'isSpanValid')
 pattern NoSpan :: Span
 pattern NoSpan <- (isSpanValid -> False)
@@ -453,6 +450,62 @@ pointSpan :: Position -> Span
 pointSpan pos = Span
   { spanStart = pos
   , spanEnd = pos { posColumn = posColumn pos + 1 } }
+
+-- | Checks if a span consists of only valid positions (@'posLine' > 0@)
+isSpanValid :: Span -> Bool
+isSpanValid Span { spanStart, spanEnd } =
+  isPositionValid spanStart && isPositionValid spanEnd
+  where
+    isPositionValid Position { posLine } =
+      posLine > 0
+
+-- | Represents the precedence of a type of operation
+data Prec
+  -- | A special precedence for when an expression will be terminated by a special operator
+  = ExpectEndPrec
+  -- | The default precedence for an expression
+  | MinPrec
+  -- | The precedence for a special operator like @(->)@
+  | SpecialPrec
+  -- | The precedence for a regular operator surrounded by whitespace
+  | NormalPrec
+  -- | The precedence for function application
+  | ApplyPrec
+  -- | The precedence for a compact operator not surrounded by whitespace
+  | CompactPrec
+  deriving (Ord, Eq)
+
+-- | A set of strings that are considered keywords
+keywords :: HashSet String
+keywords = HashSet.fromList
+  [ "_"
+  , "use"
+  , "mod"
+  , "operator"
+  , "type"
+  , "effect"
+  , "data"
+  , "let"
+  , "with"
+  , "fun"
+  , "match"
+  , "unary" ]
+
+-- | Checks if a given string is a keyword
+isKeyword :: String -> Bool
+isKeyword w = w `HashSet.member` keywords
+
+-- | Checks if a character is valid at the start of an identifier
+isIdentFirst :: Char -> Bool
+isIdentFirst x = (isAlpha x || x == '_') && isAscii x
+
+-- | Checks if a character is valid after the first character of an identifier
+isIdentRest :: Char -> Bool
+isIdentRest  x = (isAlpha x || isDigit x || x == '_') && isAscii x
+
+-- | Checks if a character is valid in an infix or unary operator
+isOperatorChar :: Char -> Bool
+isOperatorChar w = w `elem` ("+-*/%^!=<>:?|&~$." :: String)
 
 -- | Prepends a number to a string with an optional plural suffix
 plural :: Int -> String -> String
@@ -489,38 +542,6 @@ aOrAn str = article ++ str
       'o' -> True
       'u' -> True
       _ -> False
-
--- | A set of strings that are considered keywords
-keywords :: Set String
-keywords = Set.fromList
-  [ "_"
-  , "use"
-  , "mod"
-  , "operator"
-  , "type"
-  , "effect"
-  , "data"
-  , "let"
-  , "with"
-  , "fun"
-  , "match"
-  , "unary" ]
-
--- | Checks if a given string is a keyword
-isKeyword :: String -> Bool
-isKeyword w = w `Set.member` keywords
-
--- | Checks if a character is valid at the start of an identifier
-isIdentFirst :: Char -> Bool
-isIdentFirst x = (isAlpha x || x == '_') && isAscii x
-
--- | Checks if a character is valid after the first character of an identifier
-isIdentRest :: Char -> Bool
-isIdentRest  x = (isAlpha x || isDigit x || x == '_') && isAscii x
-
--- | Checks if a character is valid in an infix or unary operator
-isOperatorChar :: Char -> Bool
-isOperatorChar w = w `elem` ("+-*/%^!=<>:?|&~$." :: String)
 
 -- | Checks if a character is considered uppercase (A-Z or _)
 isCap :: Char -> Bool
