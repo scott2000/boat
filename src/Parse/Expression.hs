@@ -8,7 +8,6 @@ import Text.Megaparsec
 import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as L
 
-import qualified Data.Set as Set
 import Control.Monad.State.Strict
 
 -- | Parse a single 'Name'
@@ -47,21 +46,8 @@ parseUseContents =
 parseEffectSet :: Parser (EffectSet Span)
 parseEffectSet = do
   effects <- parseSomeSeparatedList '+' (withSpan parseEffect)
-  setEffects <- toUniqueSet Set.empty effects
-  return EffectSet { setEffects }
-  where
-    toUniqueSet set [] = return set
-    toUniqueSet set (e:es)
-      | e `Set.member` set = do
-        file <- getFilePath
-        addError compileError
-          { errorFile = file
-          , errorSpan = getSpan e
-          , errorKind = Warning
-          , errorMessage = "effect is unnecessary since it was already listed" }
-        toUniqueSet set es
-      | otherwise =
-        toUniqueSet (Set.insert e set) es
+  file <- getFilePath
+  toUniqueEffectSet file effects
 
 -- | Parse a single 'Effect'
 parseEffect :: Parser Effect

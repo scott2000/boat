@@ -919,7 +919,8 @@ nameResolveAfterMap basePath file = aDefault
     handleUseExpr m use expr =
       addUse basePath (file :/: use) $ unmeta <$> after m expr
 
-    updateEffectSet (EffectSet set) =
+    updateEffectSet resolvedEffs = do
+      EffectSet set <- toUniqueEffectSet file resolvedEffs
       EffectSet <$>
         case Set.lookupIndex (meta EffectVoid) set of
           Just voidIndex -> do

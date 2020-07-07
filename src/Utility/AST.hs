@@ -33,6 +33,7 @@ module Utility.AST
   , EffectSet (..)
   , emptyEffectSet
   , singletonEffectSet
+  , toUniqueEffectSet
   , Effect (..)
   , pattern EffectPure
   , pattern EffectVoid
@@ -244,7 +245,7 @@ data AfterMap m = AfterMap
   , aType :: MetaR Span Type -> m (MetaR Span Type)
   , aEffect :: Meta Span Effect -> m (Meta Span Effect)
     -- | Note that this function is called after the sub-effects are transformed
-  , aEffectSet :: EffectSet Span -> m (EffectSet Span)
+  , aEffectSet :: [Meta Span Effect] -> m (EffectSet Span)
     -- | Transformations for 'Path' require an 'ExprKind' to indicate where they are being used
   , aPath :: ExprKind -> Meta Span Path -> m Path }
 
@@ -257,7 +258,7 @@ aDefault = AfterMap
   , aPattern = pure
   , aType = pure
   , aEffect = pure
-  , aEffectSet = pure
+  , aEffectSet = pure . EffectSet . Set.fromList
   , aPath = const (pure . unmeta) }
 
 -- | A class for anything that can be transformed with an 'AfterMap'
@@ -343,22 +344,46 @@ newtype EffectSet info = EffectSet
 
 instance After (EffectSet Span) where
   after m =
-    mapM \effs -> do
-      effs <- EffectSet <$> Set.fromList <$> mapM (after m) (Set.toAscList $ setEffects effs)
-      aEffectSet m effs
+    mapM \effs ->
+      mapM (after m) (Set.toAscList $ setEffects effs) >>= aEffectSet m
 
 instance Show (EffectSet info) where
   show EffectSet { setEffects }
     | Set.null setEffects = "Pure"
     | otherwise = intercalate " + " $ map (show . unmeta) $ Set.toAscList setEffects
 
--- | An empty @EffectSet@
+-- | An empty 'EffectSet'
 emptyEffectSet :: EffectSet info
 emptyEffectSet = EffectSet Set.empty
 
--- | An @EffectSet@ with a single element
+-- | An 'EffectSet' with a single element
 singletonEffectSet :: Meta info Effect -> EffectSet info
 singletonEffectSet = EffectSet . Set.singleton
+
+-- | Convert a list of effects to an 'EffectSet', giving an warning for duplicate effects
+toUniqueEffectSet :: AddError m => FilePath -> [Meta Span Effect] -> m (EffectSet Span)
+toUniqueEffectSet file = go Set.empty
+  where
+    go set [] =
+      return $ EffectSet set
+    go set (new:rest) =
+      case Set.lookupIndex new set of
+        Nothing ->
+          go (Set.insert new set) rest
+        Just oldIndex -> do
+          let
+            _ :&: oldSpan = Set.elemAt oldIndex set
+            newSpan = getSpan new
+            -- Make sure the warning isn't emitted for the first effect, even if the list is out of order
+            (set', span)
+              | newSpan < oldSpan = (Set.insert new set, oldSpan)
+              | otherwise         = (set, newSpan)
+          addError compileError
+            { errorFile = file
+            , errorSpan = span
+            , errorKind = Warning
+            , errorMessage = "effect is unnecessary since it was already listed" }
+          go set' rest
 
 -- | An effect that can occur in impure code
 data Effect
@@ -594,7 +619,7 @@ pattern TFunc a b <-
 -- | A function type with a single effect parameter
 pattern TEffFunc :: MetaR info Type -> MetaR info EffectSet -> MetaR info Type -> Type info
 pattern TEffFunc a eff b <-
-  TEffApp (TFunc a b :&: _) eff
+  TApp (TEffApp (TApp (TFuncArrow :&: _) a :&: _) eff :&: _) b
 
 -- | An effect representing pure code
 pattern EffectPure :: Effect
