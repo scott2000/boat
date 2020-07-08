@@ -391,22 +391,24 @@ instance After (Constraint Span) where
 
 -- | A declaration for a top-level binding of an expression
 data LetDecl = LetDecl
-  { letBody :: MetaR Span Expr
-  , letConstraints :: [MetaR Span Constraint] }
+  { letTypeAscription :: Maybe (MetaR Span Type)
+  , letConstraints :: [MetaR Span Constraint]
+  , letBody :: MetaR Span Expr }
 
 instance ShowWithName LetDecl where
-  showWithName name decl =
-    "let " ++ name ++ typeClause ++ withClause ++ " =" ++ indent (show body)
+  showWithName name LetDecl { letTypeAscription, letConstraints, letBody } =
+    let indent = indentationIncrement in
+    "let " ++ name ++ typeClause ++ withClause ++ " ="
+    ++ newline indent
+    ++ showExprBlock indent letBody
     where
-      (body, typeClause) =
-        case letBody decl of
-          ETypeAscribe expr ty :&: _ ->
-            (expr, " : " ++ show ty)
-          other ->
-            (other, "")
+      typeClause =
+        case letTypeAscription of
+          Nothing -> ""
+          Just ty -> " : " ++ show ty
 
       withClause =
-        case letConstraints decl of
+        case letConstraints of
           [] -> ""
           cs -> " with " ++ intercalate ", " (map show cs)
 

@@ -51,6 +51,7 @@ module Utility.Basics
   , isIdentFirst
   , isIdentRest
   , isOperatorChar
+  , indentationIncrement
 
     -- * Formatting and Capitalization
   , plural
@@ -545,6 +546,10 @@ isIdentRest  x = (isAlpha x || isDigit x || x == '_') && isAscii x
 -- | Checks if a character is valid in an infix or unary operator
 isOperatorChar :: Char -> Bool
 isOperatorChar w = w `elem` ("+-*/%^!=<>:?|&~$." :: String)
+
+-- | The number of spaces to insert for indentation
+indentationIncrement :: Int
+indentationIncrement = 2
 
 -- | Prepends a number to a string with an optional plural suffix
 plural :: Int -> String -> String

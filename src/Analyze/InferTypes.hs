@@ -18,6 +18,25 @@ import Control.Monad.State.Strict
 import Control.Monad.Reader
 import Control.Monad.Trans.Maybe
 
+-- (A + a?) : (B + b)
+--   b ~ (A - B) + a? + b'
+-- (A + a?) : B
+--   assert(A : B)
+--   a? ~ (B - A)
+--
+-- (A + a) = (B + b) => A + B + c
+--   a ~ (B - A) + c
+--   b ~ (A - B) + c
+-- (A + a) = B => A + B
+--   assert(A : B)
+--   a ~ (B - A)
+-- A = (B + b) => A + B
+--   assert(B : A)
+--   b ~ (A - B)
+-- A = B => A + B
+--   assert(A : B)
+--   assert(B : A)
+
 type Infer = ReaderT InferInfo (StateT InferState CompileIO)
 
 data InferInfo = InferInfo
@@ -101,10 +120,15 @@ type CheckState = StateT (HashSet Path, Map (Meta Span String) (ExprKind, Maybe 
 checkAndDeps :: AllDecls
              -> (Path, Meta (InFile Span) LetDecl)
              -> CompileIO ([Path], (Path, Meta (InFile Span) LetDecl, Set (Meta Span String)))
-checkAndDeps decls (path, decl@(LetDecl { letBody, letConstraints } :&: file :/: _)) = do
-  (deps, vars) <- execStateT (check letBody) (HashSet.empty, Map.empty)
+checkAndDeps decls (path, decl@(LetDecl { letTypeAscription, letConstraints, letBody } :&: file :/: _)) = do
+  (deps, vars) <- execStateT checkAll (HashSet.empty, Map.empty)
   return (HashSet.toList deps, (path, decl, Map.keysSet vars))
   where
+    checkAll :: CheckState ()
+    checkAll = do
+      mapM_ checkType letTypeAscription
+      check letBody
+
     addPath :: Path -> CheckState ()
     addPath path = modify \(d, v) ->
       (HashSet.insert path d, v)
@@ -355,6 +379,9 @@ hasBlank typeWithMeta =
       case unmeta eff of
         EffectAnon _ -> True
         _ -> False
+
+newLocal :: MonadCompile m => m Effect
+newLocal = EffectLocal <$> getNewAnon
 
 inferTypes :: AllDecls -> CompileIO InferredDecls
 inferTypes decls = do

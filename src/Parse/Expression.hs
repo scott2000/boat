@@ -310,10 +310,10 @@ instance Parsable (Type Span) where
         let
           arrowSpan = span <> endSpan
           arrow = withInfo arrowSpan TFuncArrow
-          withEff = withInfo arrowSpan $ TEffApp arrow effects
-          firstApp = withEnds lhs withEff $ TApp withEff lhs
+          firstApp = withEnds lhs arrow $ TApp arrow lhs
+          withEff = copyInfo firstApp $ TEffApp firstApp effects
         in
-          withEnds firstApp rhs $ TApp firstApp rhs
+          withEnds withEff rhs $ TApp withEff rhs
 
   parseSpecial _ = Nothing
 

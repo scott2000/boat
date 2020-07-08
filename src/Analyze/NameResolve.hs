@@ -678,7 +678,9 @@ nameResolveEach path mod =
       forM variants \((name, types) :&: span) ->
         let variantPath = constructorPath .|. unmeta name in
         insertLet variantPath $ withInfo (file :/: span) LetDecl
-          { letBody =
+          { letTypeAscription = Nothing
+          , letConstraints = []
+          , letBody =
             withInfo span $
               if null types then
                 EValue $ VDataCons variantPath []
@@ -687,15 +689,15 @@ nameResolveEach path mod =
                 EValue $ VFun [
                   ( replicate count $ meta $ PBind Nothing
                   , withInfo span $ EDataCons variantPath $
-                    reverse [0 .. count-1] <&> \n -> meta $ EIndex n Nothing )]
-          , letConstraints = [] }
+                    reverse [0 .. count-1] <&> \n -> meta $ EIndex n Nothing )] }
       where
         nameResolveVariant (name, types) =
           (,) name <$> mapM (nameResolveRestrictedType path file) types
 
-    nameResolveLet (name, LetDecl { letBody, letConstraints } :&: file :/: span) = do
-      letBody <- nameResolveAfter path file letBody
+    nameResolveLet (name, LetDecl { letTypeAscription, letConstraints, letBody } :&: file :/: span) = do
+      letTypeAscription <- forM letTypeAscription $ nameResolveAfter path file
       letConstraints <- forM letConstraints $ nameResolveAfter path file
+      letBody <- nameResolveAfter path file letBody
       forM letConstraints \case
         name `IsSubEffectOf` (eff :&: span) :&: _ ->
           case eff of
@@ -715,7 +717,8 @@ nameResolveEach path mod =
                   "all effects are subtypes of `Void`, so this constraint does nothing" }
             _ -> return ()
         _ -> return ()
-      insertLet (path .|. name) $ withInfo (file :/: span) LetDecl { letBody, letConstraints }
+      insertLet (path .|. name) $ withInfo (file :/: span)
+        LetDecl { letTypeAscription, letConstraints, letBody }
 
 -- | Resolve a single 'Path'
 nameResolvePath :: FilePath -> (Item -> Bool) -> String -> Span -> Path -> NR Path

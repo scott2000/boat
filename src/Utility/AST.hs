@@ -57,6 +57,10 @@ module Utility.AST
   , afterPath
   , AfterMap (..)
   , aDefault
+  , ShowExpr (..)
+  , showExprBlock
+  , showExprNoSpace
+  , newline
 
     -- * Global and Local Identifiers
   , isLocalIdentifier
@@ -272,8 +276,11 @@ afterPath m k pathWithMeta = do
   path <- aPath m k pathWithMeta
   return $ copyInfo pathWithMeta path
 
+-- | Like 'Show', but provides additional information about precedence and indentation
 class ShowExpr a where
+  -- | Returns true if the expression is just a name
   isSimple :: a -> Bool
+  -- | Formats the expression given the current precedence and indentation level
   showExpr :: Prec -> Int -> a -> String
 
 instance ShowExpr a => ShowExpr (Meta info a) where
@@ -284,22 +291,27 @@ instance ShowExpr String where
   isSimple = const True
   showExpr = const $ const id
 
+-- | Show an expression block with no parentheses at the outermost level
 showExprBlock :: ShowExpr a => Int -> a -> String
 showExprBlock = showExpr ExpectEndPrec
 
+-- | Show an expression with parentheses around any applications
 showExprNoSpace :: ShowExpr a => Int -> a -> String
 showExprNoSpace = showExpr ApplyPrec
 
+-- | Add a newline with a certain indentation level
 newline :: Int -> String
 newline indent = '\n' : replicate indent ' '
 
+-- | Automatically surround an indented block in parentheses
 parenBlock :: Prec -> Int -> (Int -> String) -> String
 parenBlock prec indent f
   | prec < MinPrec = f indent
   | otherwise =
-    let indent' = indent + 2 in
+    let indent' = indent + indentationIncrement in
     "(" ++ newline indent' ++ f indent' ++ ")"
 
+-- | Automatically surround a function application in parentheses
 parenApp :: (ShowExpr a, ShowExpr b) => Prec -> Int -> a -> b -> String
 parenApp prec indent a b
   | prec < ApplyPrec = normal
@@ -308,6 +320,7 @@ parenApp prec indent a b
   where
     normal = showExpr NormalPrec indent a ++ " " ++ showExpr ApplyPrec indent b
 
+-- | Automatically surround a unary operator in parentheses
 parenUnary :: ShowExpr a => Prec -> Int -> String -> a -> String
 parenUnary prec indent op ty
   | prec < CompactPrec = normal
@@ -317,6 +330,7 @@ parenUnary prec indent op ty
     normal =
       op ++ " " ++ showExpr CompactPrec indent ty
 
+-- | Automatically surround an infix operator in parentheses
 parenInfix :: ShowExpr a => Prec -> Int -> a -> String -> a -> String
 parenInfix prec indent a op b
   | prec < NormalPrec = normal
@@ -328,6 +342,7 @@ parenInfix prec indent a op b
     normal =
       showExpr NormalPrec indent a ++ " " ++ op ++ " " ++ showExpr NormalPrec indent b
 
+-- | Automatically surround a special operator in parentheses
 parenSpecial :: (ShowExpr a, ShowExpr b) => Prec -> Int -> a -> String -> b -> String
 parenSpecial prec indent a op b
   | prec < SpecialPrec = normal
@@ -654,7 +669,7 @@ instance ShowExpr (Value info) where
     VUnit -> "()"
     VFun cases ->
       parenBlock prec indent \indent ->
-        let indent' = indent + 2 in
+        let indent' = indent + indentationIncrement in
         "fun" ++ newline indent'
         ++ showExprBlock indent' cases
     VDataCons path [] ->
@@ -671,7 +686,7 @@ type MatchCase info = ([MetaR info Pattern], MetaR info Expr)
 instance ShowExpr (MatchCase info) where
   isSimple = const False
   showExpr _ indent (pats, expr) =
-    let indent' = indent + 2 in
+    let indent' = indent + indentationIncrement in
     intercalate " " (map (showExprNoSpace indent) pats) ++ " ->"
     ++ newline indent'
     ++ showExprBlock indent' expr
@@ -805,14 +820,15 @@ instance ShowExpr (Expr info) where
         ++ showExprBlock indent' b
     ELet p v e ->
       parenBlock prec indent \indent ->
-        let indent' = indent + 2 in
+        let indent' = indent + indentationIncrement in
         "let " ++ showExpr MinPrec indent p ++ " ="
         ++ newline indent'
         ++ showExprBlock indent' v
+        ++ newline indent
         ++ showExprBlock indent e
     EMatchIn exprs cases ->
       parenBlock prec indent \indent ->
-        let indent' = indent + 2 in
+        let indent' = indent + indentationIncrement in
         "match " ++ intercalate " " (map (showExprNoSpace indent) exprs)
         ++ newline indent'
         ++ showExprBlock indent' cases

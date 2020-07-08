@@ -107,15 +107,10 @@ parseFile file = do
           constraints <- option [] (parseConstraints <* nbsc)
           body <- specialOp Assignment >> blockOf parser
           let
-            bodyWithAscription =
-              case maybeAscription of
-                Just ascription ->
-                  copyInfo body $ ETypeAscribe body ascription
-                Nothing ->
-                  body
             letDecl = LetDecl
-              { letBody = bodyWithAscription
-              , letConstraints = constraints }
+              { letTypeAscription = maybeAscription
+              , letConstraints = constraints
+              , letBody = body }
           modAddLet file name letDecl m
 
         parseData = do

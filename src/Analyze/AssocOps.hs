@@ -308,8 +308,9 @@ updateExprs
 
       updateLet :: Meta (InFile Span) LetDecl -> CompileIO (Meta (InFile Span) LetDecl)
       updateLet (decl :&: file :/: span) = do
-        body <- updateSome file $ letBody decl
-        return $ decl { letBody = body } :&: file :/: span
+        letTypeAscription <- mapM (updateSome file) $ letTypeAscription decl
+        letBody <- updateSome file $ letBody decl
+        return $ decl { letTypeAscription, letBody } :&: file :/: span
 
 -- | A type of function that can reassociate a list of unassociated expressions
 type Associator m = forall t. ContainsOp t => [UnOpOrExpr t] -> m (Meta Span t)
