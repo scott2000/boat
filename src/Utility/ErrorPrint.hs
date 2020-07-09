@@ -118,7 +118,7 @@ getExplanation = \case
     " ways, but instead will simply require explicit parentheses. It is also important to note that" ++
     " an operator does not always need to be given an operator type. In this case, it simply must always" ++
     " be parenthesized when used with other operators."
-  ECInferVariance ->
+  ECVariance ->
     " Although Boat does not allow subtypes in general, it does allow subtypes for effects." ++
     " Because of this, the compiler must infer extra information about the variance of parameters" ++
     " for data types. To understand why, first notice that `a -> b` is a subtype of `a -|IO|> b`," ++
@@ -574,13 +574,11 @@ prettyCompileErrors explainEnabled errs =
       , errorCategory
       , errorExplain
       , errorMessage } = do
-        case errorCategory of
-          Nothing -> return ()
-          Just cat -> do
-            unseen <- unseenCategory cat
-            when (explainEnabled && unseen) $ lift do
-              putStrLn ""
-              printMessageFooter Info $ getExplanation cat
+        forM_ errorCategory \cat -> do
+          unseen <- unseenCategory cat
+          when (explainEnabled && unseen) $ lift do
+            putStrLn ""
+            printMessageFooter Info $ getExplanation cat
         if null errorFile then
           lift $ putStrLn ""
         else

@@ -327,7 +327,7 @@ data CompileError = CompileError
     -- | The kind of error that occurred
   , errorKind :: !ErrorKind
     -- | The general category of error (for explanations)
-  , errorCategory :: !(Maybe ErrorCategory)
+  , errorCategory :: ![ErrorCategory]
     -- | An explanation that is more specific to this error
   , errorExplain :: !(Maybe String)
     -- | The basic error message to print
@@ -356,14 +356,14 @@ compileError = CompileError
   { errorFile = NoFile
   , errorSpan = NoSpan
   , errorKind = Error
-  , errorCategory = Nothing
+  , errorCategory = []
   , errorExplain = Nothing
   , errorMessage = error "compileError was not given an error message" }
 
 -- | A general category of error that may need an in-depth explanation
 data ErrorCategory
   = ECAssocOps
-  | ECInferVariance
+  | ECVariance
   deriving (Ord, Eq)
 
 -- | Stores the number of each type of error (useful for determining when to stop compilation)
@@ -436,7 +436,7 @@ addError err =
       { compileErrors = Set.insert err $ compileErrors s
       , compileErrorCount =
         case (errorCategory err, errorExplain err) of
-          (Nothing, Nothing) -> count
+          ([], Nothing) -> count
           _ -> count { hasExplainError = True } }
 
 -- | A position in a file consisting of a line number and column number (starting at 1)

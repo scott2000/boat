@@ -593,13 +593,13 @@ parseSomeCommaList p = someComma False
       missingComma <- try do
         spaces
         (char ',' >> return False) <|> lookAhead (token canStartItem Set.empty)
-      when (missingComma && not previousMissing) $ do
+      when (missingComma && not previousMissing) do
         file <- getFilePath
         addError compileError
           { errorFile = file
           , errorSpan = pointSpan startPos
           , errorMessage = "expected comma between items in list" }
-      option [] $ do
+      option [] do
         try spaces
         someComma (missingComma || previousMissing)
 

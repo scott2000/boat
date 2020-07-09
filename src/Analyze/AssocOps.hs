@@ -114,7 +114,7 @@ getSortedAcyclic AllDecls { allOpTypes } =
         addError compileError
           { errorFile = file
           , errorSpan = span
-          , errorCategory = Just ECAssocOps
+          , errorCategory = [ECAssocOps]
           , errorExplain = Just $
             " The links to other operator types in an operator type declaration cannot rely on any of" ++
             " the operator types currently being defined in their definitions. If this were allowed," ++
@@ -156,7 +156,7 @@ addToGraph (path, ends :&: file :/: span) =
           addFatal compileError
             { errorFile = file
             , errorSpan = span
-            , errorCategory = Just ECAssocOps
+            , errorCategory = [ECAssocOps]
             , errorExplain = Just $
               " When specifying the precedence of an operator type, an upper and lower bound may be" ++
               " specified by placing them in parentheses. These upper and lower bounds must already" ++
@@ -198,14 +198,14 @@ updateExprs
         where
           v path = hashMapGet path assocPaths
 
-      allow :: FilePath -> Maybe (Meta Span Path) -> Meta Span Path -> MaybeT CompileIO Bool
+      allow :: ContainsOp a => FilePath -> Maybe (Meta Span Path) -> Meta Span a -> MaybeT CompileIO Bool
       allow file current next =
         case current of
           Nothing ->
             return True
           Just current ->
             case ( HashMap.lookup (unmeta current) allOpDecls
-                 , HashMap.lookup (unmeta next) allOpDecls ) of
+                 , getPath next >>= \next -> HashMap.lookup (unmeta next) allOpDecls ) of
               (Nothing, Nothing) -> MaybeT do
                 missing current
                 missing next
@@ -242,7 +242,7 @@ updateExprs
             addError compileError
               { errorFile = file
               , errorSpan = getSpan next
-              , errorCategory = Just ECAssocOps
+              , errorCategory = [ECAssocOps]
               , errorMessage = ' ' : msg
                 ++ ", so explicit grouping is required" }
             return Nothing
@@ -250,7 +250,7 @@ updateExprs
             addError compileError
               { errorFile = file
               , errorSpan = span
-              , errorCategory = Just ECAssocOps
+              , errorCategory = [ECAssocOps]
               , errorMessage =
                 " operator `" ++ show path ++ "` has not been assigned an operator precedence," ++
                 " so explicit grouping is required" }
@@ -277,7 +277,7 @@ updateExprs
             next <- getNext
             a <- case next of
               UnOp unaryOp ->
-                applyUnary unaryOp <$> goExpr (Just unaryOp)
+                applyUnary unaryOp <$> goExpr (getPath unaryOp)
               UnExpr expr ->
                 return expr
             goBin current a
@@ -289,7 +289,7 @@ updateExprs
                 allowed <- lift $ allow file current binaryOp
                 if allowed then do
                   put rest
-                  b <- goExpr (Just binaryOp)
+                  b <- goExpr $ getPath binaryOp
                   goBin current (applyBinary binaryOp a b)
                 else
                   return a
@@ -318,7 +318,7 @@ type Associator m = forall t. ContainsOp t => [UnOpOrExpr t] -> m (Meta Span t)
 -- | Represents a part in a list of unassociated expressions
 data UnOpOrExpr a
   -- | An operator (either infix or unary)
-  = UnOp (Meta Span Path)
+  = UnOp (Meta Span a)
   -- | An expression that will be given to an operator
   | UnExpr (Meta Span a)
 
@@ -326,14 +326,28 @@ data UnOpOrExpr a
 class (Show a, After a) => ContainsOp a where
   -- | Convert the expression to a list of unassociated expressions
   toUnOpList :: Meta Span a -> [UnOpOrExpr a]
+  -- | Strip any leading parentheses
+  stripParen :: Meta Span a -> Meta Span a
+  -- | Get the 'Path' if this is a global identifier
+  getPath :: Meta Span a -> Maybe (Meta Span Path)
   -- | Apply a unary operator to an expression
-  applyUnary :: Meta Span Path -> Meta Span a -> Meta Span a
+  applyUnary :: Meta Span a -> Meta Span a -> Meta Span a
   -- | Apply a binary operator to two expressions
-  applyBinary :: Meta Span Path -> Meta Span a -> Meta Span a -> Meta Span a
+  applyBinary :: Meta Span a -> Meta Span a -> Meta Span a -> Meta Span a
+
+-- | Like 'toUnOpList', but takes an 'Unassociated' instead
+uToUnOpList :: ContainsOp a => Unassociated Span a -> [UnOpOrExpr a]
+uToUnOpList = \case
+  UParen op ->
+    [UnExpr op]
+  UUnaryOp op rhs ->
+    UnOp op : toUnOpList rhs
+  UBinOp op lhs rhs ->
+    UnExpr lhs : UnOp op : toUnOpList rhs
 
 -- | Using an 'Associator', fully associate all infix expressions
-reassociate :: (Monad m, ContainsOp a) => Associator m -> Meta Span a -> m (Meta Span a)
-reassociate f = after $ aContainsOp (f . toUnOpList)
+reassociate :: (ContainsOp a, Monad m) => Associator m -> Meta Span a -> m (Meta Span a)
+reassociate f = after $ aContainsOp (f . toUnOpList . stripParen)
   where
     aContainsOp :: Monad m
                 => (forall a. ContainsOp a => Meta Span a -> m (Meta Span a))
@@ -345,81 +359,88 @@ reassociate f = after $ aContainsOp (f . toUnOpList)
 
 instance ContainsOp (Type Span) where
   toUnOpList x =
-    -- Strip leading parentheses
     case unmeta x of
-      TParen a ->
-        toUnOpList a
+      TUnassociated u ->
+        uToUnOpList u
       _ ->
-        go x
-    where
-      go x =
-        case unmeta x of
-          TParen a ->
-            [UnExpr a]
-          TUnaryOp path a ->
-            UnOp path : toUnOpList a
-          TBinOp path a b ->
-            UnExpr a : UnOp path : toUnOpList b
-          _ ->
-            [UnExpr x]
+        [UnExpr x]
 
-  applyUnary path a =
-    withEnds path a $ TApp (TNamed <$> path) a
+  stripParen x =
+    case unmeta x of
+      TUnassociated (UParen op) ->
+        stripParen op
+      _ ->
+        x
 
-  applyBinary path a b =
-    withEnds a b $
-      TApp (withEnds a path $ TApp (TNamed <$> path) a) b
+  getPath = \case
+    TNamed path :&: span ->
+      Just $ path :&: span
+    _ ->
+      Nothing
+
+  applyUnary op rhs =
+    withEnds op rhs $ TApp op rhs
+
+  applyBinary op lhs rhs =
+    withEnds lhs rhs $
+      TApp (withEnds lhs op $ TApp op lhs) rhs
 
 instance ContainsOp (Expr Span) where
   toUnOpList x =
-    -- Strip leading parentheses
     case unmeta x of
-      EParen a ->
-        toUnOpList a
+      EUnassociated u ->
+        uToUnOpList u
       _ ->
-        go x
-    where
-      go x =
-        case unmeta x of
-          EParen a ->
-            [UnExpr a]
-          EUnaryOp path a ->
-            UnOp path : toUnOpList a
-          EBinOp path a b ->
-            UnExpr a : UnOp path : toUnOpList b
-          _ ->
-            [UnExpr x]
+        [UnExpr x]
 
-  applyUnary path a =
-    withEnds path a $ EApp (EGlobal <$> path) a
+  stripParen x =
+    case unmeta x of
+      EUnassociated (UParen op) ->
+        stripParen op
+      _ ->
+        x
 
-  applyBinary path a b =
-    withEnds a b $
-      EApp (withEnds a path $ EApp (EGlobal <$> path) a) b
+  getPath = \case
+    EGlobal path :&: span ->
+      Just $ path :&: span
+    _ ->
+      Nothing
+
+  applyUnary op rhs =
+    withEnds op rhs $ EApp op rhs
+
+  applyBinary op lhs rhs =
+    withEnds lhs rhs $
+      EApp (withEnds lhs op $ EApp op lhs) rhs
 
 instance ContainsOp (Pattern Span) where
   toUnOpList x =
-    -- Strip leading parentheses
     case unmeta x of
-      PParen a ->
-        toUnOpList a
+      PUnassociated u ->
+        uToUnOpList u
       _ ->
-        go x
-    where
-      go x =
-        case unmeta x of
-          PParen a ->
-            [UnExpr a]
-          PUnaryOp path a ->
-            UnOp path : toUnOpList a
-          PBinOp path a b ->
-            UnExpr a : UnOp path : toUnOpList b
-          _ ->
-            [UnExpr x]
+        [UnExpr x]
 
-  applyUnary path a =
-    withEnds path a $ PCons path [a]
+  stripParen x =
+    case unmeta x of
+      PUnassociated (UParen op) ->
+        stripParen op
+      _ ->
+        x
 
-  applyBinary path a b =
-    withEnds a b $ PCons path [a, b]
+  getPath = \case
+    PCons path [] :&: _ ->
+      Just path
+    _ ->
+      Nothing
+
+  applyUnary (PCons op [] :&: _) rhs =
+    withEnds op rhs $ PCons op [rhs]
+  applyUnary _ _ =
+    error "applyUnary called with local variable"
+
+  applyBinary (PCons op [] :&: _) lhs rhs =
+    withEnds lhs rhs $ PCons op [lhs, rhs]
+  applyBinary _ _ _ =
+    error "applyBinary called with local variable"
 

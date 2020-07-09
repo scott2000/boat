@@ -541,7 +541,7 @@ instance ShowWithName DataDecl where
     where
       mod = if dataMod then "mod " else ""
       showVariant (name, types) =
-        show name ++ " " ++ unwords (map show types)
+        show $ expandApp (TNamed . Local <$> name) [] types
 
 -- | Adds a 'DataDecl' to the module
 modAddData

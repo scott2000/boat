@@ -290,7 +290,7 @@ addMatchError file span err =
         _ ->
           -- Basic errors such as forgetting an argument are simple to understand so use a primary error
           Error
-    , errorCategory = Just ECInferVariance
+    , errorCategory = [ECVariance]
     , errorMessage = show err }
 
 -- | Matches the expected arguments with the actual arguments for a type
@@ -482,7 +482,7 @@ unwrapVariable (file :/: span) InferVariable { outputVariables, inputVariables }
       addError compileError
         { errorFile = file
         , errorSpan = span
-        , errorCategory = Just ECInferVariance
+        , errorCategory = [ECVariance]
         , errorExplain = Just $
           " Since this parameter is not used, it is not necessary to give it a name." ++
           " Instead, you can directly replace it with whichever variance you want it to have."
@@ -602,7 +602,7 @@ inferConstraintSCC anonMap scc = do
           -- Emit an error about not being able to infer anything
           let
             (file :/: span) =
-              getLoc $ case find (uncurry onlyRefersToSelf) vars of
+              getLoc case find (uncurry onlyRefersToSelf) vars of
                 Just (anon, _) ->
                   -- If a variable only refers to itself, pick it because it is easier to fix
                   anon
@@ -612,7 +612,7 @@ inferConstraintSCC anonMap scc = do
           addError compileError
             { errorFile = file
             , errorSpan = span
-            , errorCategory = Just ECInferVariance
+            , errorCategory = [ECVariance]
             , errorExplain = Just $
               " The Boat compiler looks at how a parameter is used in order to determine its variance" ++
               " so that programs don't need to explicitly state it in most cases. However, in this case" ++

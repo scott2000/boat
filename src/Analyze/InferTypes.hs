@@ -226,7 +226,7 @@ checkAndDeps decls (path, decl@(LetDecl { letTypeAscription, letConstraints, let
                       addError compileError
                         { errorFile = file
                         , errorSpan = span
-                        , errorCategory = Just ECInferVariance
+                        , errorCategory = [ECVariance]
                         , errorExplain = Just $
                           " Any type variables that are used in place of a type constructor (like `m` in `m Nat`)" ++
                           " must be used in a constraint that specifies their kind. If the type variable is not" ++
@@ -262,6 +262,7 @@ checkAndDeps decls (path, decl@(LetDecl { letTypeAscription, letConstraints, let
               addError compileError
                 { errorFile = file
                 , errorSpan = span
+                , errorCategory = [ECVariance]
                 , errorMessage = msg }
           case kind of
             Nothing ->
@@ -456,12 +457,6 @@ checkAndDeps decls (path, decl@(LetDecl { letTypeAscription, letConstraints, let
           check a >> checkType ty
         EDataCons path exprs ->
           addPath path >> mapM_ (check) exprs
-        EParen a ->
-          check a
-        EUnaryOp path a ->
-          addPath (unmeta path) >> check a
-        EBinOp path a b ->
-          check a >> addPath (unmeta path) >> check b
         _ ->
           return ()
       where
@@ -475,12 +470,6 @@ checkAndDeps decls (path, decl@(LetDecl { letTypeAscription, letConstraints, let
           mapM_ (checkPat) xs
         PTypeAscribe a ty ->
           checkPat a >> checkType ty
-        PParen a ->
-          checkPat a
-        PUnaryOp _ a ->
-          checkPat a
-        PBinOp _ a b ->
-          checkPat a >> checkPat b
         _ ->
           return ()
 

@@ -387,7 +387,7 @@ addUse path (file :/: useWithMeta@(use :&: span)) nr
               let
                 finalNames' = addName Explicit id path (name, item) $ finalNames names
                 names' = names { finalNames = finalNames' }
-              withNames names' $ case rest of
+              withNames names' case rest of
                 [] -> nr
                 _ ->
                   let subPath = path .|. name in

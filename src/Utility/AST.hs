@@ -23,6 +23,7 @@ module Utility.AST
 
     -- * Basic Expressions
   , ExprKind (..)
+  , Unassociated (..)
   , MatchCase
   , Expr (..)
   , Value (..)
@@ -47,6 +48,7 @@ module Utility.AST
   , reduceApplyNoInfix
   , findBase
   , expandFunction
+  , expandApp
   , pattern TFuncArrow
   , pattern TFunc
   , pattern TEffFunc
@@ -354,6 +356,41 @@ parenSpecial prec indent a op b
     normal =
       showExpr SpecialPrec indent a ++ " " ++ op ++ " " ++ showExpr MinPrec indent b
 
+-- | A type containing an unassociated operator expression
+data Unassociated info a
+  = UParen
+    { uOp :: (Meta info a) }
+  | UUnaryOp
+    { uOp :: (Meta info a)
+    , uRhs :: (Meta info a) }
+  | UBinOp
+    { uOp :: (Meta info a)
+    , uLhs :: (Meta info a)
+    , uRhs :: (Meta info a) }
+  deriving Eq
+
+instance ShowExpr a => ShowExpr (Unassociated info a) where
+  isSimple = const False
+  showExpr _ indent = \case
+    UParen op ->
+      "{" ++ showExprBlock indent op ++ "}"
+    UUnaryOp op rhs ->
+      "{" ++ showExprNoSpace indent op ++ " " ++ showExprNoSpace indent rhs ++ "}"
+    UBinOp op lhs rhs ->
+      "{" ++ showExprNoSpace indent lhs ++
+      " `" ++ showExprNoSpace indent op ++
+      "` " ++ showExprNoSpace indent rhs ++ "}"
+
+-- | Calls 'after' on the expressions contained in the 'Unassociated'
+afterUnassociated :: (After a, Monad m) => AfterMap m -> Unassociated Span a -> m (Unassociated Span a)
+afterUnassociated m = \case
+  UParen op ->
+    UParen <$> after m op
+  UUnaryOp op rhs ->
+    UUnaryOp <$> after m op <*> after m rhs
+  UBinOp op lhs rhs ->
+    UBinOp <$> after m op <*> after m lhs <*> after m rhs
+
 -- | A wrapper around a set of 'Effect's
 newtype EffectSet info = EffectSet
   { setEffects :: Set (Meta info Effect) }
@@ -486,11 +523,8 @@ data Type info
   | TEffApp (MetaR info Type) (MetaR info EffectSet)
   -- | A type with a universally quantified effect variable
   | TForEff (Meta info String) (MetaR info Type)
-
-  -- Unassociated operators
-  | TParen (MetaR info Type)
-  | TUnaryOp (Meta info Path) (MetaR info Type)
-  | TBinOp (Meta info Path) (MetaR info Type) (MetaR info Type)
+  -- | An unassociated operator expression
+  | TUnassociated (Unassociated info (Type info))
   deriving Eq
 
 instance After (Type Span) where
@@ -505,15 +539,8 @@ instance After (Type Span) where
         TEffApp <$> after m ty <*> after m e
       TForEff e ty ->
         TForEff e <$> aWithBindings m [unmeta e] (after m ty)
-      TParen a ->
-        TParen <$> after m a
-      TUnaryOp path a ->
-        TUnaryOp <$> afterPath m KType path <*> after m a
-      TBinOp path a b -> do
-        a <- after m a
-        path <- afterPath m KType path
-        b <- after m b
-        return $ TBinOp path a b
+      TUnassociated u ->
+        TUnassociated <$> afterUnassociated m u
       other ->
         return other
 
@@ -544,15 +571,8 @@ instance ShowExpr (Type info) where
       parenApp prec indent ty ("|" ++ show e ++ "|")
     TForEff e ty ->
       "(|" ++ unmeta e ++ "| " ++ show ty ++ ")"
-    TParen ty -> "{" ++ show ty ++ "}"
-    TUnaryOp (Path { unpath = [Unary op] } :&: _) ty ->
-      "{" ++ op ++ show ty ++ "}"
-    TUnaryOp op ty ->
-      "{" ++ show op ++ " " ++ show ty ++ "}"
-    TBinOp (Path { unpath = [Operator op] } :&: _) lhs rhs ->
-      "{" ++ show lhs ++ " " ++ op ++ " " ++ show rhs ++ "}"
-    TBinOp op lhs rhs ->
-      "{" ++ show op ++ " " ++ show lhs ++ " " ++ show rhs ++ "}"
+    TUnassociated u ->
+      showExpr prec indent u
 
 instance Show (Type info) where
   show = showExprBlock 0
@@ -569,12 +589,12 @@ findBlank (ty :&: span) =
       findBlank ty <|> foldr (<|>) Nothing (map findBlankEff $ Set.toAscList $ setEffects $ unmeta e)
     TForEff _ ty ->
       findBlank ty
-    TParen ty ->
-      findBlank ty
-    TUnaryOp _ ty ->
-      findBlank ty
-    TBinOp _ lhs rhs ->
-      findBlank lhs <|> findBlank rhs
+    TUnassociated (UParen op) ->
+      findBlank op
+    TUnassociated (UUnaryOp op rhs) ->
+      findBlank op <|> findBlank rhs
+    TUnassociated (UBinOp op lhs rhs) ->
+      findBlank op <|> findBlank lhs <|> findBlank rhs
     _ ->
       Nothing
   where
@@ -592,7 +612,7 @@ data ReducedApp = ReducedApp
   , reducedArgs :: [MetaR Span Type] }
 
 -- | Try to reduce all applications, otherwise return the conflicting infix operators
-reduceApply :: MetaR Span Type -> Either (Meta Span Path, Meta Span Path) ReducedApp
+reduceApply :: MetaR Span Type -> Either (MetaR Span Type, MetaR Span Type) ReducedApp
 reduceApply typeWithMeta =
   case unmeta typeWithMeta of
     TApp a b -> do
@@ -601,21 +621,21 @@ reduceApply typeWithMeta =
     TEffApp ty e -> do
       ReducedApp base effs args <- reduceApply ty
       Right $ ReducedApp base (effs ++ [e]) args
-    TParen ty ->
+    TUnassociated (UParen ty) ->
       reduceApply ty
-    TUnaryOp a (TBinOp b _ _ :&: _) ->
+    TUnassociated (UUnaryOp a (TUnassociated (UBinOp b _ _) :&: _)) ->
       Left (a, b)
-    TBinOp a _ (TBinOp b _ _ :&: _) ->
+    TUnassociated (UBinOp a _ (TUnassociated (UBinOp b _ _) :&: _)) ->
       Left (a, b)
-    TUnaryOp path ty ->
-      Right $ ReducedApp (TNamed <$> path) [] [ty]
-    TBinOp path a b ->
-      Right $ ReducedApp (TNamed <$> path) [] [a, b]
+    TUnassociated (UUnaryOp op rhs) ->
+      Right $ ReducedApp op [] [rhs]
+    TUnassociated (UBinOp op lhs rhs) ->
+      Right $ ReducedApp op [] [lhs, rhs]
     _ ->
       Right $ ReducedApp typeWithMeta [] []
 
 -- | Try to reduce all applications but don't allow infix operators
-reduceApplyNoInfix :: MetaR Span Type -> Either (Meta Span Path) ReducedApp
+reduceApplyNoInfix :: MetaR Span Type -> Either (MetaR Span Type) ReducedApp
 reduceApplyNoInfix typeWithMeta =
   case unmeta typeWithMeta of
     TApp a b -> do
@@ -624,12 +644,12 @@ reduceApplyNoInfix typeWithMeta =
     TEffApp ty e -> do
       ReducedApp base effs args <- reduceApplyNoInfix ty
       Right $ ReducedApp base (effs ++ [e]) args
-    TParen ty ->
+    TUnassociated (UParen ty) ->
       reduceApplyNoInfix ty
-    TUnaryOp path _ ->
-      Left path
-    TBinOp path _ _ ->
-      Left path
+    TUnassociated (UUnaryOp op _) ->
+      Left op
+    TUnassociated (UBinOp op _ _) ->
+      Left op
     _ ->
       Right $ ReducedApp typeWithMeta [] []
 
@@ -650,7 +670,15 @@ findBase = go 0 0
 expandFunction :: DefaultInfo info => [MetaR info Type] -> MetaR info Type -> MetaR info Type
 expandFunction [] ty = ty
 expandFunction (ty:types) ret =
-  meta $ TApp (meta $ TApp (meta $ TNamed $ Core $ Operator "->") ty) $ expandFunction types ret
+  expandApp (meta TFuncArrow) [] [ty, expandFunction types ret]
+
+-- | Create a type application from effect and type arguments and a base type
+expandApp :: DefaultInfo info => MetaR info Type -> [MetaR info EffectSet] -> [MetaR info Type] -> MetaR info Type
+expandApp base effs args =
+  foldl' expandArg (foldl' expandEff base effs) args
+  where
+    expandEff ty e = meta $ TEffApp ty e
+    expandArg a b = meta $ TApp a b
 
 -- | The named type @Core.(->)@
 pattern TFuncArrow :: Type info
@@ -748,11 +776,8 @@ data Expr info
   | ETypeAscribe (MetaR info Expr) (MetaR info Type)
   -- | The same as 'VDataCons' but for expressions
   | EDataCons Path [MetaR info Expr]
-
-  -- Unassociated operators
-  | EParen (MetaR info Expr)
-  | EUnaryOp (Meta info Path) (MetaR info Expr)
-  | EBinOp (Meta info Path) (MetaR info Expr) (MetaR info Expr)
+  -- | An unassociated operator expression
+  | EUnassociated (Unassociated info (Expr info))
 
 instance After (Expr Span) where
   after m x = do
@@ -781,15 +806,8 @@ instance After (Expr Span) where
         p <- aPath m KValue $ copyInfo x path
         s <- mapM (after m) exprs
         return $ EDataCons p s
-      EParen a ->
-        EParen <$> after m a
-      EUnaryOp path a ->
-        EUnaryOp <$> afterPath m KValue path <*> after m a
-      EBinOp path a b -> do
-        a <- after m a
-        path <- afterPath m KValue path
-        b <- after m b
-        return $ EBinOp path a b
+      EUnassociated u ->
+        EUnassociated <$> afterUnassociated m u
       other ->
         return other
     where
@@ -873,15 +891,8 @@ instance ShowExpr (Expr info) where
       show path
     EDataCons path exprs ->
       "(" ++ show path ++ " " ++ intercalate " " (map show exprs) ++ ")"
-    EParen expr -> "{" ++ show expr ++ "}"
-    EUnaryOp (Path { unpath = [Unary op] } :&: _) expr ->
-      "{" ++ op ++ show expr ++ "}"
-    EUnaryOp op expr ->
-      "{" ++ show op ++ " " ++ show expr ++ "}"
-    EBinOp (Path { unpath = [Operator op] } :&: _) lhs rhs ->
-      "{" ++ show lhs ++ " " ++ op ++ " " ++ show rhs ++ "}"
-    EBinOp op lhs rhs ->
-      "{" ++ show op ++ " " ++ show lhs ++ " " ++ show rhs ++ "}"
+    EUnassociated u ->
+      showExpr prec indent u
 
 instance Show (Expr info) where
   show = showExprBlock 0
@@ -898,11 +909,8 @@ data Pattern info
   | PCons (Meta Span Path) [MetaR info Pattern]
   -- | Ascribes a type to a pattern
   | PTypeAscribe (MetaR info Pattern) (MetaR info Type)
-
-  -- Unassociated operators
-  | PParen (MetaR info Pattern)
-  | PUnaryOp (Meta info Path) (MetaR info Pattern)
-  | PBinOp (Meta info Path) (MetaR info Pattern) (MetaR info Pattern)
+  -- | An unassociated operator expression
+  | PUnassociated (Unassociated info (Pattern info))
 
 instance After (Pattern Span) where
   after m x = do
@@ -912,15 +920,8 @@ instance After (Pattern Span) where
         PCons <$> afterPath m KPattern path <*> mapM (after m) xs
       PTypeAscribe a ty ->
         PTypeAscribe <$> after m a <*> after m ty
-      PParen a ->
-        PParen <$> after m a
-      PUnaryOp path a ->
-        PUnaryOp <$> afterPath m KPattern path <*> after m a
-      PBinOp path a b -> do
-        a <- after m a
-        path <- afterPath m KPattern path
-        b <- after m b
-        return $ PBinOp path a b
+      PUnassociated u ->
+        PUnassociated <$> afterUnassociated m u
       other ->
         return other
 
@@ -957,15 +958,8 @@ instance ShowExpr (Pattern info) where
       "(" ++ show name ++ " " ++ intercalate " " (map show pats) ++ ")"
     PTypeAscribe pat ty ->
       "(" ++ show pat ++ " : " ++ show ty ++ ")"
-    PParen pat -> "{" ++ show pat ++ "}"
-    PUnaryOp (Path { unpath = [Unary op] } :&: _) pat ->
-      "{" ++ op ++ show pat ++ "}"
-    PUnaryOp op pat ->
-      "{" ++ show op ++ " " ++ show pat ++ "}"
-    PBinOp (Path { unpath = [Operator op] } :&: _) lhs rhs ->
-      "{" ++ show lhs ++ " " ++ op ++ " " ++ show rhs ++ "}"
-    PBinOp op lhs rhs ->
-      "{" ++ show op ++ " " ++ show lhs ++ " " ++ show rhs ++ "}"
+    PUnassociated u ->
+      showExpr prec indent u
 
 instance Show (Pattern info) where
   show = showExprBlock 0
@@ -981,11 +975,11 @@ bindingsForPat pat =
       pats >>= bindingsForPat
     PTypeAscribe pat _ ->
       bindingsForPat pat
-    PParen pat ->
-      bindingsForPat pat
-    PUnaryOp _ pat ->
-      bindingsForPat pat
-    PBinOp _ lhs rhs ->
+    PUnassociated (UParen op) ->
+      bindingsForPat op
+    PUnassociated (UUnaryOp _ rhs) ->
+      bindingsForPat rhs
+    PUnassociated (UBinOp _ lhs rhs) ->
       bindingsForPat lhs ++ bindingsForPat rhs
 
 -- | Assert that there are no duplicate bindings in a set of patterns
@@ -1011,11 +1005,11 @@ assertUniqueBindings file pats =
           mapM_ check pats
         PTypeAscribe pat _ ->
           check pat
-        PParen pat ->
-          check pat
-        PUnaryOp _ pat ->
-          check pat
-        PBinOp _ lhs rhs ->
+        PUnassociated (UParen op) ->
+          check op
+        PUnassociated (UUnaryOp _ rhs) ->
+          check rhs
+        PUnassociated (UBinOp _ lhs rhs) ->
           check lhs >> check rhs
         _ ->
           return ()
@@ -1053,12 +1047,8 @@ class ExprLike a where
   opUnit :: a
   -- | Creates a named expression from a path
   opNamed :: Meta Span Path -> a
-  -- | Creates an expression in parentheses
-  opParen :: Meta Span a -> a
-  -- | Creates an expression with a unary operator
-  opUnary :: Meta Span Path -> Meta Span a -> a
-  -- | Creates an expression with a binary operator
-  opBinary :: Meta Span Path -> Meta Span a -> Meta Span a -> a
+  -- | Creates an unassociated operator expression
+  opUnassociated :: Unassociated Span a -> a
   -- | Tries to create an application of two expressions
   opApply :: Meta Span a -> Meta Span a -> Either (Meta Span String) (a)
 
@@ -1078,13 +1068,7 @@ instance ExprLike (Type Span) where
   opKind _ = "type"
   opUnit = TUnit
   opNamed = TNamed . unmeta
-  opParen ty =
-    case unmeta ty of
-      TUnaryOp _ _ -> TParen ty
-      TBinOp _ _ _ -> TParen ty
-      other -> other
-  opUnary = TUnaryOp
-  opBinary = TBinOp
+  opUnassociated = TUnassociated
   opApply a b = Right $ TApp a b
   opEffectApply = Just \a b ->
     Right $ TEffApp a b
@@ -1094,13 +1078,7 @@ instance ExprLike (Expr Span) where
   opKind _ = "expression"
   opUnit = EValue VUnit
   opNamed = EGlobal . unmeta
-  opParen expr =
-    case unmeta expr of
-      EUnaryOp _ _ -> EParen expr
-      EBinOp _ _ _ -> EParen expr
-      other -> other
-  opUnary = EUnaryOp
-  opBinary = EBinOp
+  opUnassociated = EUnassociated
   opApply a b = Right $ EApp a b
   opSeq = Just ESeq
 
@@ -1108,13 +1086,7 @@ instance ExprLike (Pattern Span) where
   opKind _ = "pattern"
   opUnit = PUnit
   opNamed name = PCons name []
-  opParen pat =
-    case unmeta pat of
-      PUnaryOp _ _ -> PParen pat
-      PBinOp _ _ _ -> PParen pat
-      other -> other
-  opUnary = PUnaryOp
-  opBinary = PBinOp
+  opUnassociated = PUnassociated
   opApply (PCons name xs :&: _) x =
     Right $ PCons name (xs ++ [x])
   opApply _ x =

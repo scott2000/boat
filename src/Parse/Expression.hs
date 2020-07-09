@@ -52,17 +52,17 @@ parseEffectSet = do
 -- | Parse a single 'Effect'
 parseEffect :: Parser Effect
 parseEffect = label "effect" $
-  parseCapIdent "effect" (EffectNamed . unmeta) EffectPoly
+  (withSpan parsePath >>= getCapIdent "effect" (EffectNamed . unmeta) EffectPoly)
   <|> (keyword "_" >> EffectAnon <$> getNewAnon)
 
 -- | Parse an identifier in one of two given ways depending on capitalization
-parseCapIdent :: String
-              -> (Meta Span Path -> a)
-              -> (String -> a)
-              -> Parser a
-parseCapIdent kind named localBind = do
-  pathWithMeta <- withSpan parsePath
-  let path = unmeta pathWithMeta
+getCapIdent :: String
+            -> (Meta Span Path -> a)
+            -> (String -> a)
+            -> Meta Span Path
+            -> Parser a
+getCapIdent kind named localBind pathWithMeta =
+  let path = unmeta pathWithMeta in
   case extractLocalPath path of
     Just name ->
       return $ localBind $ name
@@ -78,30 +78,41 @@ parseCapIdent kind named localBind = do
           return $ named $ pathWithMeta
 
 -- | Represents a parsed infix operator (including those surrounded by backticks)
-data InfixOp = InfixOp
+data InfixOp a = InfixOp
   { infixBacktick :: Bool
-  , infixPath :: Meta Span Path }
+  , infixPath :: Meta Span a }
 
 -- | Parse an infix operator, or fail with a special operator and its span
-infixOp :: Parser (Either (Meta Span SpecialOp) InfixOp)
+infixOp :: Parsable a => Parser (Either (Meta Span SpecialOp) (InfixOp a))
 infixOp = label "operator" (backtickOp <|> normalOp)
   where
-    backtickOp =
-      Right . InfixOp True <$> withSpan (char '`' *> parsePath <* char '`')
+    backtickOp = do
+      name <- withSpan (char '`' *> parsePath <* char '`')
+      Right . InfixOp True . copyInfo name <$> parseBacktick name
     normalOp =
       withSpan nonReservedOp <&> \case
         SpecialOp op :&: span ->
           Left $ op :&: span
         PlainOp op :&: span ->
-          Right $ InfixOp False $ withInfo span $ Local $ Operator op
+          Right $ InfixOp False $ withInfo span $ opNamed (withInfo span $ Local $ Operator op)
 
 -- | A class for an expression that can be parsed that uses operator precedence
 class ExprLike a => Parsable a where
-  -- | Parse a single basic expression
-  parseOne :: Parser a
+  -- | Parse a single simple identifier
+  parseSimpleIdentifier :: Meta Span Path -> Parser a
+  -- | Parse a single complex expression (anything not covered in 'parseSimpleIdentifier')
+  parseComplex :: Parser a
+  -- | Parse a single simple identifier that can be allowed in a backtick infix operator
+  parseBacktick :: Meta Span Path -> Parser a
+  parseBacktick = parseSimpleIdentifier
   -- | Try to parse a given special operator
   parseSpecial :: Meta Span SpecialOp -> Maybe (Prec -> Meta Span a -> Parser (Meta Span a))
   parseSpecial _ = Nothing
+
+-- | Parse a single basic expression
+parseOne :: forall a. Parsable a => Parser a
+parseOne = label (opKind (Of :: Of a)) $
+  (withSpan parsePath >>= parseSimpleIdentifier) <|> parseComplex
 
 -- | Parse an expression inside of parentheses
 paren :: Parsable a => Parser (Meta Span a)
@@ -109,7 +120,7 @@ paren =
   withSpan (char '(' *> (emptyParen <|> fullParen))
   where
     emptyParen = opUnit <$ char ')'
-    fullParen = opParen <$> blockOf parser <* spaces <* char ')'
+    fullParen = opUnassociated . UParen <$> blockOf parser <* spaces <* char ')'
 
 -- | Parse a single expression, including ones with a prefix operator
 parserPartial :: Parsable a => Parser (Meta Span a)
@@ -130,7 +141,7 @@ parserPartial =
             ++ "\n(make sure prefix operators have no space after them)"
         else
           return path
-      opUnary path <$> parserPrec CompactPrec
+      opUnassociated . UUnaryOp (copyInfo path $ opNamed path) <$> parserPrec CompactPrec
 
     parseEffectForall =
       case opForallEffect of
@@ -243,11 +254,12 @@ parserBase prec current =
                 CompactPrec
           if prec <= opPrec then
             return $ Just do
-              bin <- metaExtendPrec (opBinary $ infixPath parsedOp) opPrec current
+              let lhs `binOp` rhs = opUnassociated $ UBinOp (infixPath parsedOp) lhs rhs
+              bin <- metaExtendPrec binOp opPrec current
               if prec == opPrec then
                 return bin
               else
-                parserBase prec $ copyInfo bin $ opParen bin
+                parserBase prec $ copyInfo bin $ opUnassociated $ UParen bin
           else
             return Nothing
 
@@ -289,9 +301,11 @@ metaExtendFail f prec current = do
   withEnds current next <$> eitherToFail (f current next)
 
 instance Parsable (Type Span) where
-  parseOne = label "type" $
-    parseCapIdent "type" opNamed TPoly
-    <|> (keyword "_" >> TAnon <$> getNewAnon)
+  parseSimpleIdentifier =
+    getCapIdent "type" opNamed TPoly
+
+  parseComplex =
+    keyword "_" >> TAnon <$> getNewAnon
 
   parseSpecial (FunctionArrow :&: span) =
     Just $ metaExtendPrec \lhs rhs ->
@@ -318,10 +332,19 @@ instance Parsable (Type Span) where
   parseSpecial _ = Nothing
 
 instance Parsable (Expr Span) where
-  parseOne = label "expression" $
-    -- Identifiers must come first to avoid matching keyword prefix
-    parseExprIdent
-    <|> parseExprIndex
+  parseSimpleIdentifier (path :&: _) =
+    case extractLocalPath path of
+      Just local ->
+        findBindingFor local <&> \case
+          Just n ->
+            EIndex n (Just local)
+          Nothing ->
+            EGlobal path
+      Nothing ->
+        return $ EGlobal path
+
+  parseComplex =
+    parseExprIndex
     <|> parseLet
     <|> parseFunction
     <|> parseMatch
@@ -330,20 +353,6 @@ instance Parsable (Expr Span) where
   parseSpecial (TypeAscription :&: _) =
     Just $ metaExtendPrec ETypeAscribe
   parseSpecial _ = Nothing
-
--- | Parse an identifier for an expression using the current local variable bindings in scope
-parseExprIdent :: Parser (Expr Span)
-parseExprIdent = do
-  path <- try parsePath
-  case extractLocalPath path of
-    Just local ->
-      findBindingFor local <&> \case
-        Just n ->
-          EIndex n (Just local)
-        Nothing ->
-          EGlobal path
-    Nothing ->
-      return $ EGlobal path
 
 -- | Parse a DeBruijn expression index to refer to an unnamed local variable
 parseExprIndex :: Parser (Expr Span)
@@ -419,10 +428,23 @@ matchCase = do
   return (pats, expr)
 
 instance Parsable (Pattern Span) where
-  parseOne = label "pattern" $
-    parseCapIdent "pattern" opNamed (PBind . Just)
-    <|> (PAny <$ keyword "_")
-    <|> (PBind Nothing <$ reservedOp QuestionMark)
+  parseSimpleIdentifier =
+    getCapIdent "pattern" opNamed (PBind . Just)
+
+  parseComplex =
+    (PAny <$ keyword "_") <|> (PBind Nothing <$ reservedOp QuestionMark)
+
+  parseBacktick path =
+    getCapIdent "pattern" Right Left path >>= \case
+      Right path ->
+        return $ opNamed path
+      Left local -> do
+        file <- getFilePath
+        addError compileError
+          { errorFile = file
+          , errorSpan = getSpan path
+          , errorMessage = "only named patterns can be used as infix operators" }
+        return $ PBind $ Just local
 
   parseSpecial (TypeAscription :&: _) =
     Just $ metaExtendPrec PTypeAscribe
