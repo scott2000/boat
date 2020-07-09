@@ -5,7 +5,6 @@ import Utility
 
 import Analyze.InferVariance (lookupDecl, addMatchError, matchKinds)
 
-import Data.Maybe
 import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HashMap
 import Data.Map.Strict (Map)
@@ -20,19 +19,20 @@ import Control.Monad.Trans.Maybe
 
 -- (A + a?) : (B + b)
 --   b ~ (A - B) + a? + b'
+--   checkBounds(b)
 -- (A + a?) : B
 --   assert(A : B)
---   a? ~ (B - A)
+--   a? : B
 --
 -- (A + a) = (B + b) => A + B + c
 --   a ~ (B - A) + c
+--   checkBounds(a)
 --   b ~ (A - B) + c
+--   checkBounds(b)
 -- (A + a) = B => A + B
 --   assert(A : B)
---   a ~ (B - A)
--- A = (B + b) => A + B
---   assert(B : A)
---   b ~ (A - B)
+--   a ~ (B - A) + a'
+--   a' : B
 -- A = B => A + B
 --   assert(A : B)
 --   assert(B : A)
@@ -41,7 +41,8 @@ type Infer = ReaderT InferInfo (StateT InferState CompileIO)
 
 data InferInfo = InferInfo
   { iAllDecls :: !AllDecls
-  , iEffectExpansions :: !(HashMap Path (Set Effect)) }
+  , iEffectExpansions :: !(HashMap Path (Set Effect))
+  , iLocalEffectExpansions :: !(HashMap String (Set Effect)) }
 
 data InferState = InferState
   { iResolvedDecls :: !(PathMap InferredLetDecl)
@@ -115,19 +116,58 @@ matchTypeKind (TypeKind eEffs eArgs) (TypeKind aEffs aArgs)
       | exp == act = Just exp
       | otherwise  = Nothing
 
-type CheckState = StateT (HashSet Path, Map (Meta Span String) (ExprKind, Maybe DataArg)) CompileIO
+type LetInfo = (HashSet Path, HashMap String (Meta Span (Maybe TypeKind)))
+
+type LetComponent = (Path, Meta (InFile Span) LetDecl, LetInfo)
+
+type CheckState = ReaderT (Maybe (HashMap String (Meta Span TypeKind))) (StateT LetInfo CompileIO)
 
 checkAndDeps :: AllDecls
              -> (Path, Meta (InFile Span) LetDecl)
-             -> CompileIO ([Path], (Path, Meta (InFile Span) LetDecl, Set (Meta Span String)))
+             -> CompileIO ([Path], LetComponent)
 checkAndDeps decls (path, decl@(LetDecl { letTypeAscription, letConstraints, letBody } :&: file :/: _)) = do
-  (deps, vars) <- execStateT checkAll (HashSet.empty, Map.empty)
-  return (HashSet.toList deps, (path, decl, Map.keysSet vars))
+  info <- flip execStateT (HashSet.empty, HashMap.empty) do
+    polyArgs <-
+      let
+        addAll map [] = return map
+        addAll map (c:cs) =
+          case unmeta c of
+            (name :&: span) `HasKind` kind ->
+              case HashMap.lookup name map of
+                Nothing ->
+                  addAll (HashMap.insert name (kind :&: span) map) cs
+                Just (oldKind :&: oldSpan) -> do
+                  let
+                    (map', suffix) =
+                      case matchTypeKind kind oldKind of
+                        Nothing -> (map, " (and the kinds are incompatible!)")
+                        Just k  -> (HashMap.insert name (k :&: oldSpan) map, "")
+                  addError compileError
+                    { errorFile = file
+                    , errorSpan = span
+                    , errorMessage =
+                      "duplicate kind constraint for `" ++ name ++ "`" ++ suffix }
+                  addAll map' cs
+            _ ->
+              addAll map cs
+      in
+        addAll HashMap.empty letConstraints
+    flip runReaderT (Just polyArgs) $ mapM_ checkType letTypeAscription
+    (deps, vars) <- get
+    let difference = HashMap.difference polyArgs vars
+    put (deps, vars <> HashMap.map (\(k :&: s) -> Just k :&:s) difference)
+    flip runReaderT Nothing $ check letBody
+    forM_ difference \(_ :&: span) -> do
+      addError compileError
+        { errorFile = file
+        , errorSpan = span
+        , errorKind = SpecialError SecondaryError
+        , errorMessage =
+          "type variable present in constraint but not used in type of `" ++ show letName ++ "`" }
+  return (HashSet.toList $ fst info, (path, decl, info))
   where
-    checkAll :: CheckState ()
-    checkAll = do
-      mapM_ checkType letTypeAscription
-      check letBody
+    letName :: Name
+    letName = last $ unpath path
 
     addPath :: Path -> CheckState ()
     addPath path = modify \(d, v) ->
@@ -136,182 +176,265 @@ checkAndDeps decls (path, decl@(LetDecl { letTypeAscription, letConstraints, let
     checkType :: MetaR Span Type -> CheckState ()
     checkType =
       expectKindMatchKinds [] VOutput NullaryKind
-
-    polyArgs :: Map String TypeKind
-    polyArgs =
-      Map.fromList $ mapMaybe getArgKind letConstraints
       where
-        getArgKind constraint =
-          case unmeta constraint of
-            name `HasKind` args ->
-              Just (unmeta name, args)
-            _ ->
-              Nothing
-
-    matchVar :: DataArg -> DataArg -> Maybe DataArg
-    matchVar (DataArg eVar eKind) (DataArg aVar aKind) =
-      DataArg (eVar <> aVar) <$> matchTypeKind eKind aKind
-
-    getVar :: Meta Span String -> MaybeT CheckState TypeKind
-    getVar name =
-      case Map.lookup (unmeta name) polyArgs of
-        Nothing -> MaybeT do
+        unusedInType :: ExprKind -> Meta Span String -> CheckState ()
+        unusedInType kind (name :&: span) =
           addError compileError
             { errorFile = file
-            , errorSpan = getSpan name
-            , errorCategory = Just ECInferVariance
+            , errorSpan = span
             , errorExplain = Just $
-              " Any type variables that are used in place of a type constructor (like `m` in `m Nat`)" ++
-              " must be used in a constraint that specifies their kind. If the type variable is not already" ++
-              " being used in a constraint, a special constraint can be used to only specify the kind but" ++
-              " not introduce any other requirements. For instance, `f (-) (+)` or `m _` could be added" ++
-              " in a `with` clause to give those specific kinds to the arguments to `f` and `m`."
-            , errorMessage = "cannot determine kind of `" ++ unmeta name ++ "` from constraints" }
-          return Nothing
-        Just args ->
-          return args
+              " All " ++ show kind ++ " variables that are used in the body of a let declaration must first" ++
+              " be used in the type signature or in a constraint. Either add this " ++ show kind ++ " variable" ++
+              " to the type signature of `" ++ show letName ++ "`, or replace it with `_` if you don't care" ++
+              " what type should go here."
+            , errorMessage =
+              show kind ++ " variable `" ++ name ++ "` must also be used in type signature or constraint" }
 
-    addVar :: Meta Span String -> ExprKind -> DataArg -> CheckState ()
-    addVar name kind dataArg = do
-      (deps, vars) <- get
-      let
-        err msg = do
+        kindMismatch :: ExprKind -> ExprKind -> Meta Span String -> CheckState ()
+        kindMismatch kind oldKind (name :&: span) =
           addError compileError
             { errorFile = file
-            , errorSpan = getSpan name
-            , errorMessage = msg }
-          return Nothing
-        kindMismatch oldKind =
-          err (show oldKind ++ " parameter `" ++ unmeta name ++ "` cannot also be used as " ++ aOrAn (show kind))
-      newEntry <-
-        case Map.lookup name vars of
-          Nothing ->
-            case Map.lookup (unmeta name) polyArgs of
-              Just constraintKind
-                | kind /= KType ->
-                  kindMismatch KType
-                | otherwise ->
-                  case matchTypeKind (argKind dataArg) constraintKind of
-                    Just newKind ->
-                      return $ Just dataArg { argKind = newKind }
+            , errorSpan = span
+            , errorMessage =
+              show oldKind ++ " parameter `" ++ name ++ "` cannot also be used as " ++ aOrAn (show kind) }
+
+        getVar :: Meta Span String -> MaybeT CheckState TypeKind
+        getVar (name :&: span) =
+          ask >>= \case
+            Nothing -> do
+              -- The type signature has alredy been infererd, so check there for the variable
+              vars <- gets snd
+              case HashMap.lookup name vars of
+                Nothing -> MaybeT do
+                  -- The variable wasn't used in the type, so it isn't allowed
+                  unusedInType KType (name :&: span)
+                  return Nothing
+                Just (Nothing :&: _) -> MaybeT do
+                  -- The variable was used as an effect, so it isn't allowed
+                  kindMismatch KType KEffect (name :&: span)
+                  return Nothing
+                Just (Just kind :&: _) ->
+                  return kind
+            Just polyArgs ->
+              -- The type signature has not been inferred, so the variable must appear in a constraint
+              case HashMap.lookup name polyArgs of
+                Nothing -> MaybeT do
+                  -- The variable wasn't used in a constraint, so it isn't allowed
+                  vars <- gets snd
+                  let
+                    noConstraintErr suffix =
+                      addError compileError
+                        { errorFile = file
+                        , errorSpan = span
+                        , errorCategory = Just ECInferVariance
+                        , errorExplain = Just $
+                          " Any type variables that are used in place of a type constructor (like `m` in `m Nat`)" ++
+                          " must be used in a constraint that specifies their kind. If the type variable is not" ++
+                          " already being used in a constraint, a special constraint can be used to only specify " ++
+                          " the kind but not introduce any other requirements. For instance, `f (-) (+)` or `m _`" ++
+                          " could be added in a `with` clause to give those specific kinds to the arguments to" ++
+                          " `f` and `m`."
+                        , errorMessage =
+                          "cannot determine kind of `" ++ name ++ "` from constraints" ++ suffix }
+                  case HashMap.lookup name vars of
                     Nothing ->
-                      err $
-                        "type constrained to kind `" ++ show constraintKind ++ "`\n" ++
-                        "  cannot also be used as `" ++ show dataArg ++ "`"
-              Nothing ->
-                return $ Just dataArg
-          Just (oldKind, _) | kind /= oldKind -> do
-            kindMismatch oldKind
-          Just (_, Nothing) ->
-            return Nothing
-          Just (_, Just oldDataArg) ->
-            case matchVar dataArg oldDataArg of
-              Just newDataArg ->
-                return $ Just newDataArg
-              Nothing -> do
-                err $
-                  "parameter first used as kind `" ++ show oldDataArg ++ "`\n" ++
-                  "      cannot also be used as `" ++ show dataArg ++ "`"
-      put (deps, Map.insert name (kind, newEntry) vars)
+                      -- The variable wasn't used before this, so there is no suggestion about the kind
+                      noConstraintErr ""
+                    Just (Nothing :&: _) ->
+                      -- The variable was used as an effect, so use that error message instead
+                      kindMismatch KType KEffect (name :&: span)
+                    Just (Just NullaryKind :&: _) ->
+                      -- The variable was used, but just as a regular type so it wouldn't give a good suggestion
+                      noConstraintErr ""
+                    Just (Just kind :&: _) ->
+                      -- The variable was used before, so give a suggestion about what its kind might be
+                      noConstraintErr ("\n(try adding a constraint of `" ++ showWithName name kind ++ "`)")
+                  return Nothing
+                Just (kind :&: _) ->
+                  return kind
 
-    matchKinds' :: Span -> TypeKind -> TypeKind -> CheckState ()
-    matchKinds' actualSpan expected actual =
-      matchKinds missingVariance expected actual >>= \case
-        Nothing -> return ()
-        Just err ->
-          addMatchError file actualSpan err
-      where
-        missingVariance _ _ =
-          compilerBug "matchKinds' called with uninferred variance during type inference"
-
-    expectKindMatchKinds :: [String] -> TypeVariance -> TypeKind -> MetaR Span Type -> CheckState ()
-    expectKindMatchKinds locals var args typeWithMeta = do
-      runMaybeT (expectKind locals var (Just args) typeWithMeta) >>= \case
-        Nothing ->
-          return ()
-        Just actual ->
-          matchKinds' (getSpan typeWithMeta) args actual
-
-    expectKind :: [String] -> TypeVariance -> Maybe TypeKind -> MetaR Span Type -> MaybeT CheckState TypeKind
-    expectKind locals var args typeWithMeta =
-      -- NOTE: A large portion of this code is similar to the type checking code in InferVariance
-      case unmeta typeWithMeta of
-        TNamed name ->
-          lookupDecl'' decls name
-        TPoly name
-          | name `elem` locals -> MaybeT do
-            addError compileError
-              { errorFile = file
-              , errorSpan = getSpan typeWithMeta
-              , errorMessage = "quantified effect `" ++ name ++ "` cannot be used as a type" }
-            return Nothing
-          | otherwise ->
-            case args of
-              Nothing ->
-                getVar (name <$ typeWithMeta)
-              Just expected -> do
-                lift $ addVar (name <$ typeWithMeta) KType $ DataArg var expected
-                return expected
-        TAnon _ ->
-          case args of
-            Nothing -> MaybeT do
+        addVar :: Meta Span String -> (Maybe TypeKind) -> CheckState ()
+        addVar (name :&: span) kind = do
+          (deps, vars) <- get
+          let
+            insert entry = put (deps, HashMap.insert name (entry :&: span) vars)
+            err msg =
               addError compileError
                 { errorFile = file
-                , errorSpan = getSpan typeWithMeta
-                , errorMessage = "type constructor name cannot be left blank" }
-              return Nothing
-            Just expected ->
-              return expected
-        TApp a b -> do
-          TypeKind effs args <- expectKind locals var Nothing a
-          case args of
-            [] -> MaybeT do
-              let (base, _, argCount) = findBase a
-              addError compileError
-                { errorFile = file
-                , errorSpan = getSpan b
-                , errorMessage =
-                  "`" ++ show base ++ "` " ++
-                    if argCount == 0 then
-                      "does not accept any type arguments"
-                    else
-                      "only accepts " ++ plural argCount  "type argument" }
-              return Nothing
-            DataArg { argVariance, argKind } : rest -> lift do
-              expectKindMatchKinds locals (var <> argVariance) argKind b
-              return $ TypeKind effs rest
-        TEffApp ty e -> do
-          TypeKind effs args <- expectKind locals var Nothing ty
-          case effs of
-            [] -> MaybeT do
-              matchEff e VInvariant
-              let (base, effCount, _) = findBase ty
-              addError compileError
-                { errorFile = file
-                , errorSpan = getSpan e
-                , errorMessage =
-                  "`" ++ show base ++ "` " ++
-                    if effCount == 0 then
-                      "does not accept any effect arguments"
-                    else
-                      "only accepts " ++ plural effCount  "effect argument" }
-              return Nothing
-            argVariance : rest -> lift do
-              matchEff e $ var <> argVariance
-              return $ TypeKind rest args
-        TForEff e ty -> do
-          lift $ expectKindMatchKinds (unmeta e : locals) var NullaryKind ty
-          return NullaryKind
-        _ ->
-          return NullaryKind
-      where
-        matchEff effs var =
-          forM_ (setEffects $ unmeta effs) \eff ->
-            case unmeta eff of
-              EffectPoly name ->
-                addVar (name <$ eff) KEffect $ NullaryArg var
-              _ ->
-                return ()
+                , errorSpan = span
+                , errorMessage = msg }
+          case kind of
+            Nothing ->
+              -- This is being used as an effect variable
+              case HashMap.lookup name vars of
+                Nothing ->
+                  -- It wasn't used previously
+                  ask >>= \case
+                    Nothing ->
+                      -- It wasn't used in the type signature
+                      unusedInType KEffect (name :&: span)
+                    Just _ ->
+                      insert Nothing
+                Just (Nothing :&: _) ->
+                  return ()
+                _ ->
+                  -- It was previously used as a type
+                  kindMismatch KEffect KType (name :&: span)
+            Just kind ->
+              -- This is being used as a type variable
+              case HashMap.lookup name vars of
+                Nothing ->
+                  -- It wasn't used previously
+                  ask >>= \case
+                    Nothing ->
+                      -- It wasn't used in the type signature
+                      unusedInType KType (name :&: span)
+                    Just polyArgs ->
+                      -- It's being used in the type signature, so check for constraints
+                      case HashMap.lookup name polyArgs of
+                        Nothing ->
+                          -- There was no constraint, so just insert it
+                          insert $ Just kind
+                        Just (constraintKind :&: _) ->
+                          -- There was a constraint, so check if it matches
+                          case matchTypeKind kind constraintKind of
+                            Just newKind ->
+                              -- The constraint matched, so add the new kind
+                              insert $ Just newKind
+                            Nothing ->
+                              -- The constraint didn't match, so add an error
+                              err case kind of
+                                NullaryKind ->
+                                  " type constrained by `" ++ showWithName name constraintKind ++ "`" ++
+                                  " cannot be used without arguments"
+                                _ ->
+                                  "type constrained by`" ++ showWithName name constraintKind ++ "`\n" ++
+                                  "  cannot be used as `" ++ showWithName name kind ++ "`"
+                Just (Just oldKind :&: _) ->
+                  -- It was already used as a type, so there's a type kind to check
+                  ask >>= \case
+                    Nothing ->
+                      -- It was used in the signature, so just check if it matches
+                      matchKinds' span kind oldKind
+                    Just _ ->
+                      -- It's being used in the type signature, so unify it with the previous usage
+                      case matchTypeKind kind oldKind of
+                        Just newKind ->
+                          -- The kinds matched successfully, so update the type kind
+                          insert $ Just newKind
+                        Nothing ->
+                          -- The kinds didn't match, so add an error
+                          err case (oldKind, kind) of
+                            (NullaryKind, _) ->
+                              " parameter first used without arguments" ++
+                              " cannot also be used as `" ++ showWithName name kind ++ "`"
+                            (_, NullaryKind) ->
+                              " parameter first used as kind `" ++ showWithName name oldKind ++ "`" ++
+                              " cannot also be used without arguments"
+                            _ ->
+                              "parameter first used as kind `" ++ showWithName name oldKind ++ "`\n" ++
+                              "      cannot also be used as `" ++ showWithName name kind ++ "`"
+                _ ->
+                  -- It was previously used as an effect
+                  kindMismatch KType KEffect (name :&: span)
+
+        matchKinds' :: Span -> TypeKind -> TypeKind -> CheckState ()
+        matchKinds' actualSpan expected actual =
+          matchKinds missingVariance expected actual >>= \case
+            Nothing -> return ()
+            Just err ->
+              addMatchError file actualSpan err
+          where
+            missingVariance _ _ =
+              compilerBug "matchKinds' called with uninferred variance during type inference"
+
+        expectKindMatchKinds :: [String] -> TypeVariance -> TypeKind -> MetaR Span Type -> CheckState ()
+        expectKindMatchKinds locals var args typeWithMeta = do
+          runMaybeT (expectKind locals var (Just args) typeWithMeta) >>= \case
+            Nothing ->
+              return ()
+            Just actual ->
+              matchKinds' (getSpan typeWithMeta) args actual
+
+        expectKind :: [String] -> TypeVariance -> Maybe TypeKind -> MetaR Span Type -> MaybeT CheckState TypeKind
+        expectKind locals var args typeWithMeta =
+          -- NOTE: A large portion of this code is similar to the type checking code in InferVariance
+          case unmeta typeWithMeta of
+            TNamed name ->
+              lookupDecl'' decls name
+            TPoly name
+              | name `elem` locals -> MaybeT do
+                addError compileError
+                  { errorFile = file
+                  , errorSpan = getSpan typeWithMeta
+                  , errorMessage = "quantified effect `" ++ name ++ "` cannot be used as a type" }
+                return Nothing
+              | otherwise ->
+                case args of
+                  Nothing ->
+                    getVar (name <$ typeWithMeta)
+                  Just expected -> do
+                    lift $ addVar (name <$ typeWithMeta) $ Just expected
+                    return expected
+            TAnon _ ->
+              case args of
+                Nothing -> MaybeT do
+                  addError compileError
+                    { errorFile = file
+                    , errorSpan = getSpan typeWithMeta
+                    , errorMessage = "type constructor name cannot be left blank" }
+                  return Nothing
+                Just expected ->
+                  return expected
+            TApp a b -> do
+              TypeKind effs args <- expectKind locals var Nothing a
+              case args of
+                [] -> MaybeT do
+                  let (base, _, argCount) = findBase a
+                  addError compileError
+                    { errorFile = file
+                    , errorSpan = getSpan b
+                    , errorMessage =
+                      "`" ++ show base ++ "` " ++
+                        if argCount == 0 then
+                          "does not accept any type arguments"
+                        else
+                          "only accepts " ++ plural argCount  "type argument" }
+                  return Nothing
+                DataArg { argVariance, argKind } : rest -> lift do
+                  expectKindMatchKinds locals (var <> argVariance) argKind b
+                  return $ TypeKind effs rest
+            TEffApp ty e -> do
+              TypeKind effs args <- expectKind locals var Nothing ty
+              lift $ addEffs e
+              case effs of
+                [] -> MaybeT do
+                  let (base, effCount, _) = findBase ty
+                  addError compileError
+                    { errorFile = file
+                    , errorSpan = getSpan e
+                    , errorMessage =
+                      "`" ++ show base ++ "` " ++
+                        if effCount == 0 then
+                          "does not accept any effect arguments"
+                        else
+                          "only accepts " ++ plural effCount  "effect argument" }
+                  return Nothing
+                _ : rest -> lift do
+                  return $ TypeKind rest args
+            TForEff e ty -> do
+              lift $ expectKindMatchKinds (unmeta e : locals) var NullaryKind ty
+              return NullaryKind
+            _ ->
+              return NullaryKind
+          where
+            addEffs effs =
+              forM_ (setEffects $ unmeta effs) \eff ->
+                case unmeta eff of
+                  EffectPoly name ->
+                    addVar (name <$ eff) Nothing
+                  _ ->
+                    return ()
 
     check exprWithMeta =
       case unmeta exprWithMeta of
@@ -360,25 +483,6 @@ checkAndDeps decls (path, decl@(LetDecl { letTypeAscription, letConstraints, let
           checkPat a >> checkPat b
         _ ->
           return ()
-
-hasBlank :: MetaR Span Type -> Bool
-hasBlank typeWithMeta =
-  case unmeta typeWithMeta of
-    TAnon _ ->
-      True
-    TApp a b ->
-      hasBlank a || hasBlank b
-    TEffApp ty e ->
-      hasBlank ty || any isBlank (setEffects $ unmeta e)
-    TForEff _ ty ->
-      hasBlank ty
-    _ ->
-      False
-  where
-    isBlank eff =
-      case unmeta eff of
-        EffectAnon _ -> True
-        _ -> False
 
 newLocal :: MonadCompile m => m Effect
 newLocal = EffectLocal <$> getNewAnon

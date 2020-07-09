@@ -523,7 +523,7 @@ checkSelfEvenOdd self = HashSet.foldr check
 onlyRefersToSelf :: AnonCount -> InferVariable -> Bool
 onlyRefersToSelf _ InvariantVariable = True
 onlyRefersToSelf self InferVariable { outputVariables, inputVariables } =
-  HashSet.foldr check True $ HashSet.union outputVariables inputVariables
+  HashSet.foldr check True $ outputVariables <> inputVariables
   where
     check _ False = False
     check xs _ = all (self ==) xs

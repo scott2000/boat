@@ -106,4 +106,3 @@ startCompile = do
     setPhase phase = compileModify \s ->
       s { compilePhase = phase }
 
-

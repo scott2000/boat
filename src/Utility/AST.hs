@@ -30,6 +30,7 @@ module Utility.AST
   , bindingsForPat
   , assertUniqueBindings
   , Type (..)
+  , findBlank
   , EffectSet (..)
   , emptyEffectSet
   , singletonEffectSet
@@ -78,6 +79,7 @@ import Utility.Basics
 import Data.List
 import Data.Maybe
 
+import Control.Applicative
 import Control.Monad.Reader
 import Control.Monad.State.Strict
 import Control.Monad.Trans.Maybe
@@ -554,6 +556,34 @@ instance ShowExpr (Type info) where
 
 instance Show (Type info) where
   show = showExprBlock 0
+
+-- | Find the span of a 'TAnon' or 'EffectAnon' in the type if there is one
+findBlank :: MetaR Span Type -> Maybe Span
+findBlank (ty :&: span) =
+  case ty of
+    TAnon _ ->
+      Just span
+    TApp a b ->
+      findBlank a <|> findBlank b
+    TEffApp ty e ->
+      findBlank ty <|> foldr (<|>) Nothing (map findBlankEff $ Set.toAscList $ setEffects $ unmeta e)
+    TForEff _ ty ->
+      findBlank ty
+    TParen ty ->
+      findBlank ty
+    TUnaryOp _ ty ->
+      findBlank ty
+    TBinOp _ lhs rhs ->
+      findBlank lhs <|> findBlank rhs
+    _ ->
+      Nothing
+  where
+    findBlankEff (eff :&: span) =
+      case eff of
+        EffectAnon _ ->
+          Just span
+        _ ->
+          Nothing
 
 -- | A form of a 'Type' with all applications reduced
 data ReducedApp = ReducedApp

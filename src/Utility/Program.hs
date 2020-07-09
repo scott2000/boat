@@ -332,7 +332,7 @@ modAddOpDecls file names op mod = do
         { errorFile = file
         , errorSpan = span
         , errorMessage = "duplicate operator declaration for name `" ++ show name ++ "`" }
-  return mod { modOpDecls = HashMap.union (HashMap.fromList newOps) oldOps }
+  return mod { modOpDecls = HashMap.fromList newOps <> oldOps }
 
 -- | A declaration of a new effect with an optional super-effect
 data EffectDecl = EffectDecl

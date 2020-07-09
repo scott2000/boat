@@ -106,6 +106,27 @@ parseFile file = do
           maybeAscription <- optional (specialOp TypeAscription *> blockOf parserExpectEnd <* nbsc)
           constraints <- option [] (parseConstraints <* nbsc)
           body <- specialOp Assignment >> blockOf parser
+          case maybeAscription of
+            Nothing ->
+              case body of
+                ETypeAscribe _ ty :&: _ | Nothing <- findBlank ty ->
+                  addError compileError
+                    { errorFile = file
+                    , errorSpan = getSpan ty
+                    , errorKind = Warning
+                    , errorMessage =
+                      "type ascription could be moved to top of let binding\n" ++
+                      "(`let " ++ show name ++ " : " ++ show ty ++ "`)" }
+                _ ->
+                  return ()
+            Just ty
+              | Just blankSpan <- findBlank ty ->
+                addError compileError
+                  { errorFile = file
+                  , errorSpan = blankSpan
+                  , errorMessage = "top level type ascription cannot contain `_`" }
+              | otherwise ->
+                return ()
           let
             letDecl = LetDecl
               { letTypeAscription = maybeAscription
