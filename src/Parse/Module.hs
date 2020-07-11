@@ -9,7 +9,6 @@ import Text.Megaparsec
 import Text.Megaparsec.Char
 
 import Data.Maybe
-import qualified Data.Set as Set
 
 -- | Run 'parseFile' on a certain path and return the parsed module
 parseSingleFile :: FilePath -> CompileIO Module
@@ -86,8 +85,8 @@ parseFile file = do
               try (nbsc >> specialOp TypeAscription)
               blockOf $ parseSomeCommaList parseSingleEffect
             parseSingleEffect = do
-              EffectSet effs :&: span <- withSpan parseEffectSet
-              case Set.toList effs of
+              effs :&: span <- withSpan parseEffectSet
+              case esToList effs of
                 [eff] ->
                   return eff
                 _ -> do

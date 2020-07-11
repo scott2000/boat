@@ -65,7 +65,6 @@ import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HashMap
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import qualified Data.Set as Set
 
 import Control.Monad.State.Strict
 
@@ -594,7 +593,7 @@ disambiguateConstraint file typeWithMeta maybeAscription =
                 err "constraint name cannot be left blank"
               _ -> do
                 err "expected a name for a constraint"
-    Just (EffectSet bound :&: boundSpan) -> do
+    Just (bound :&: boundSpan) -> do
       -- There was an ascription, so this is an effect constraint
       eff <-
         let
@@ -613,7 +612,7 @@ disambiguateConstraint file typeWithMeta maybeAscription =
             _ ->
               err "expected a single effect variable before `:` in constraint"
       super <-
-        case Set.toList $ bound of
+        case esToList bound of
           [EffectAnon _ :&: span] -> do
             addError compileError
               { errorFile = file
@@ -743,8 +742,8 @@ extractSingleEffect :: AddError m
                     -> (FilePath -> Meta Span Effect -> m (Maybe a))
                     -> MetaR Span EffectSet
                     -> m (Maybe a)
-extractSingleEffect file parseEffect (EffectSet set :&: span) =
-  case Set.toList set of
+extractSingleEffect file parseEffect (es :&: span) =
+  case esToList es of
     [eff] ->
       parseEffect file eff
     _ -> do

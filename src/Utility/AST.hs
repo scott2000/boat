@@ -32,13 +32,19 @@ module Utility.AST
   , assertUniqueBindings
   , Type (..)
   , findBlank
-  , EffectSet (..)
-  , emptyEffectSet
-  , singletonEffectSet
-  , toUniqueEffectSet
   , Effect (..)
   , pattern EffectPure
   , pattern EffectVoid
+  , NoCmp
+  , EffectSet
+  , esEmpty
+  , esSingleton
+  , esSize
+  , esInsert
+  , esMember
+  , esLookup
+  , esToList
+  , toUniqueEffectSet
   , UseModule (..)
   , UseContents (..)
 
@@ -86,7 +92,10 @@ import Control.Monad.Reader
 import Control.Monad.State.Strict
 import Control.Monad.Trans.Maybe
 
-import Data.Set (Set)
+import Data.HashMap.Strict (HashMap)
+import qualified Data.HashMap.Strict as HashMap
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
 -- | Stores some information as metadata along with a value
@@ -251,11 +260,9 @@ data AfterMap m = AfterMap
   , aWithBindings :: forall a. [String] -> m a -> m a
   , aPattern :: MetaR Span Pattern -> m (MetaR Span Pattern)
   , aType :: MetaR Span Type -> m (MetaR Span Type)
-  , aEffect :: Meta Span Effect -> m (Meta Span Effect)
-    -- | Note that this function is called after the sub-effects are transformed
-  , aEffectSet :: [Meta Span Effect] -> m (EffectSet Span)
-    -- | Transformations for 'Path' require an 'ExprKind' to indicate where they are being used
-  , aPath :: ExprKind -> Meta Span Path -> m Path }
+  , aPoly :: ExprKind -> Meta Span String -> m String
+  , aPath :: ExprKind -> Meta Span Path -> m Path
+  , aEffectSet :: Maybe ([Meta Span Effect] -> m (EffectSet Span)) }
 
 -- | A default transformation which does nothing
 aDefault :: Monad m => AfterMap m
@@ -265,9 +272,9 @@ aDefault = AfterMap
   , aWithBindings = const id
   , aPattern = pure
   , aType = pure
-  , aEffect = pure
-  , aEffectSet = pure . EffectSet . Set.fromList
-  , aPath = const (pure . unmeta) }
+  , aPoly = const (pure . unmeta)
+  , aPath = const (pure . unmeta)
+  , aEffectSet = Nothing }
 
 -- | A class for anything that can be transformed with an 'AfterMap'
 class After a where
@@ -391,54 +398,6 @@ afterUnassociated m = \case
   UBinOp op lhs rhs ->
     UBinOp <$> after m op <*> after m lhs <*> after m rhs
 
--- | A wrapper around a set of 'Effect's
-newtype EffectSet info = EffectSet
-  { setEffects :: Set (Meta info Effect) }
-  deriving (Ord, Eq)
-
-instance After (EffectSet Span) where
-  after m =
-    mapM \effs ->
-      mapM (after m) (Set.toAscList $ setEffects effs) >>= aEffectSet m
-
-instance Show (EffectSet info) where
-  show EffectSet { setEffects }
-    | Set.null setEffects = "Pure"
-    | otherwise = intercalate " + " $ map (show . unmeta) $ Set.toAscList setEffects
-
--- | An empty 'EffectSet'
-emptyEffectSet :: EffectSet info
-emptyEffectSet = EffectSet Set.empty
-
--- | An 'EffectSet' with a single element
-singletonEffectSet :: Meta info Effect -> EffectSet info
-singletonEffectSet = EffectSet . Set.singleton
-
--- | Convert a list of effects to an 'EffectSet', giving an warning for duplicate effects
-toUniqueEffectSet :: AddError m => FilePath -> [Meta Span Effect] -> m (EffectSet Span)
-toUniqueEffectSet file = go Set.empty
-  where
-    go set [] =
-      return $ EffectSet set
-    go set (new:rest) =
-      case Set.lookupIndex new set of
-        Nothing ->
-          go (Set.insert new set) rest
-        Just oldIndex -> do
-          let
-            _ :&: oldSpan = Set.elemAt oldIndex set
-            newSpan = getSpan new
-            -- Make sure the warning isn't emitted for the first effect, even if the list is out of order
-            (set', span)
-              | newSpan < oldSpan = (Set.insert new set, oldSpan)
-              | otherwise         = (set, newSpan)
-          addError compileError
-            { errorFile = file
-            , errorSpan = span
-            , errorKind = Warning
-            , errorMessage = "effect is unnecessary since it was already listed" }
-          go set' rest
-
 -- | An effect that can occur in impure code
 data Effect
   -- | A named effect
@@ -452,11 +411,12 @@ data Effect
   deriving (Ord, Eq)
 
 instance After Effect where
-  after m x = do
-    x <- aEffect m x
+  after m x =
     forM x \case
       EffectNamed path ->
         EffectNamed <$> aPath m KEffect (copyInfo x path)
+      EffectPoly name ->
+        EffectPoly <$> aPoly m KEffect (copyInfo x name)
       other ->
         return other
 
@@ -466,6 +426,166 @@ instance Show Effect where
     EffectPoly name  -> name
     EffectAnon _     -> "_"
     EffectLocal anon -> "<local" ++ show anon ++ ">"
+
+-- | An effect representing pure code
+pattern EffectPure :: Effect
+pattern EffectPure = EffectNamed (Core (Identifier "Pure"))
+
+-- | An effect representing an uncallable function
+pattern EffectVoid :: Effect
+pattern EffectVoid = EffectNamed (Core (Identifier "Void"))
+
+-- | A helper for 'EffectSet' to not compare values for equality
+newtype NoCmp info = NoCmp
+  { getNoCmp :: info }
+
+instance Eq (NoCmp info) where
+  _ == _ = True
+
+-- | A set of effects, splitting each kind of effect into a different map
+data EffectSet info = EffectSet
+  { esNamed :: HashMap Path (NoCmp info)
+  , esPoly :: HashMap String (NoCmp info)
+  , esAnon :: Map AnonCount (NoCmp info)
+  , esLocal :: Map AnonCount (NoCmp info) }
+  deriving Eq
+
+instance After (EffectSet Span) where
+  after m x =
+    case aEffectSet m of
+      Nothing ->
+        return x
+      Just toEffectSet ->
+        forM x \es ->
+          mapM (after m) (esToList es) >>= toEffectSet
+
+instance Show (EffectSet info) where
+  show effs =
+    case esToList effs of
+      [] -> "Pure"
+      es ->
+        intercalate " + " $ map (show . unmeta) es
+
+-- | An empty 'EffectSet'
+esEmpty :: EffectSet info
+esEmpty = EffectSet
+  { esNamed = HashMap.empty
+  , esPoly = HashMap.empty
+  , esAnon = Map.empty
+  , esLocal = Map.empty }
+
+-- | An 'EffectSet' with a single element
+esSingleton :: Meta info Effect -> EffectSet info
+esSingleton eff = esInsert eff esEmpty
+
+-- | Computes the total number of effects in an 'EffectSet'
+esSize :: EffectSet info -> Int
+esSize es =
+  (HashMap.size $ esNamed es)
+  + (HashMap.size $ esPoly es)
+  + (Map.size $ esAnon es)
+  + (Map.size $ esLocal es)
+
+-- | Insert an 'Effect' into an 'EffectSet'
+esInsert :: Meta info Effect -> EffectSet info -> EffectSet info
+esInsert (eff :&: span) es =
+  let span' = NoCmp span in
+  case eff of
+    EffectNamed name ->
+      es { esNamed = HashMap.insert name span' $ esNamed es }
+    EffectPoly name ->
+      es { esPoly = HashMap.insert name span' $ esPoly es }
+    EffectAnon anon ->
+      es { esAnon = Map.insert anon span' $ esAnon es }
+    EffectLocal anon ->
+      es { esLocal = Map.insert anon span' $ esLocal es }
+
+-- | Check if an 'Effect' is present in this 'EffectSet'
+esMember :: Effect -> EffectSet info -> Bool
+esMember eff es =
+  case eff of
+    EffectNamed name ->
+      HashMap.member name $ esNamed es
+    EffectPoly name ->
+      HashMap.member name $ esPoly es
+    EffectAnon anon ->
+      Map.member anon $ esAnon es
+    EffectLocal anon ->
+      Map.member anon $ esLocal es
+
+-- | Get the information associated with an 'Effect' in an 'EffectSet', if it is present
+esLookup :: Effect -> EffectSet info -> Maybe info
+esLookup eff es =
+  getNoCmp <$> case eff of
+    EffectNamed name ->
+      HashMap.lookup name $ esNamed es
+    EffectPoly name ->
+      HashMap.lookup name $ esPoly es
+    EffectAnon anon ->
+      Map.lookup anon $ esAnon es
+    EffectLocal anon ->
+      Map.lookup anon $ esLocal es
+
+-- | Create a list of effects present in an 'EffectSet'
+esToList :: EffectSet info -> [Meta info Effect]
+esToList EffectSet { esNamed, esPoly, esAnon, esLocal } =
+  let
+    insertLocal = Map.foldrWithKey (insert EffectLocal) [] esLocal
+    insertAnon = Map.foldrWithKey (insert EffectAnon) insertLocal esAnon
+    insertPoly = HashMap.foldrWithKey (insert EffectPoly) insertAnon esPoly
+  in
+    HashMap.foldrWithKey (insert EffectNamed) insertPoly esNamed
+  where
+    insert f k (NoCmp v) list = (f k :&: v) : list
+
+-- | Convert a list of effects to an 'EffectSet', giving an warning for duplicate effects
+toUniqueEffectSet :: AddError m => FilePath -> [Meta Span Effect] -> m (EffectSet Span)
+toUniqueEffectSet file = go esEmpty
+  where
+    go es [] =
+      let EffectSet { esNamed } = es in
+      case HashMap.lookup (Core $ Identifier "Void") esNamed of
+        Just (NoCmp voidSpan) -> do
+          -- If there is a `Void` effect, emit a warning for all other effects and just return `Void`
+          let
+            err = compileError
+              { errorFile = file
+              , errorKind = Warning
+              , errorMessage = "effect is unnecessary since `Void` includes all effects" }
+          forM_ (esToList es) \(eff :&: errorSpan) ->
+            when (eff /= EffectVoid) $ addError err { errorSpan }
+          return $ esSingleton $ EffectVoid :&: voidSpan
+        Nothing ->
+          let purePath = Core $ Identifier "Pure" in
+          case HashMap.lookup purePath esNamed of
+            Just (NoCmp pureSpan) -> do
+              -- If there is a `Pure` effect, remove it from the set and emit a warning if it was unnecessary
+              when (esSize es > 1) do
+                addError compileError
+                  { errorFile = file
+                  , errorSpan = pureSpan
+                  , errorKind = Warning
+                  , errorMessage = "effect `Pure` does nothing since there are other effects" }
+              return es { esNamed = HashMap.delete purePath esNamed }
+            Nothing ->
+              return es
+    go es (new:rest) =
+      case esLookup (unmeta new) es of
+        Nothing ->
+          go (esInsert new es) rest
+        Just oldSpan -> do
+          let
+            newSpan = getSpan new
+            -- Make sure the warning isn't emitted for the first effect, even if the list is out of order
+            (es', span)
+              | newSpan < oldSpan = (esInsert new es, oldSpan)
+              | otherwise         = (es, newSpan)
+          addError compileError
+            { errorFile = file
+            , errorSpan = span
+            , errorKind = Warning
+            , errorMessage = "effect is unnecessary since it was already listed" }
+          go es' rest
 
 -- | Formats a string of |...| bracketed effects to add after a declaration
 effectSuffix :: [MetaR info EffectSet] -> String
@@ -533,6 +653,8 @@ instance After (Type Span) where
     forM x \case
       TNamed path ->
         TNamed <$> aPath m KType (copyInfo x path)
+      TPoly name ->
+        TPoly <$> aPoly m KType (copyInfo x name)
       TApp a b ->
         TApp <$> after m a <*> after m b
       TEffApp ty e ->
@@ -586,7 +708,7 @@ findBlank (ty :&: span) =
     TApp a b ->
       findBlank a <|> findBlank b
     TEffApp ty e ->
-      findBlank ty <|> foldr (<|>) Nothing (map findBlankEff $ Set.toAscList $ setEffects $ unmeta e)
+      findBlank ty <|> foldr (<|>) Nothing (map findBlankEff $ esToList $ unmeta e)
     TForEff _ ty ->
       findBlank ty
     TUnassociated (UParen op) ->
@@ -693,14 +815,6 @@ pattern TFunc a b <-
 pattern TEffFunc :: MetaR info Type -> MetaR info EffectSet -> MetaR info Type -> Type info
 pattern TEffFunc a eff b <-
   TApp (TEffApp (TApp (TFuncArrow :&: _) a :&: _) eff :&: _) b
-
--- | An effect representing pure code
-pattern EffectPure :: Effect
-pattern EffectPure = EffectNamed (Core (Identifier "Pure"))
-
--- | An effect representing an uncallable function
-pattern EffectVoid :: Effect
-pattern EffectVoid = EffectNamed (Core (Identifier "Void"))
 
 -- | A concrete value produced by evaluating an expression
 data Value info

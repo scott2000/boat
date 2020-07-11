@@ -448,7 +448,7 @@ generateConstraints file dataInfo ((_, types) :&: _) =
           return NullaryKind
       where
         matchEff effs c =
-          forM_ (setEffects $ unmeta effs) \eff ->
+          forM_ (esToList $ unmeta effs) \eff ->
             case unmeta eff of
               EffectPoly name
                 | name `elem` locals -> return ()

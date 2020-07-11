@@ -881,10 +881,9 @@ nameResolveAfter basePath file =
 nameResolveRestrictedType :: Path -> FilePath -> MetaR Span Type -> NR (MetaR Span Type)
 nameResolveRestrictedType basePath file =
   after (nameResolveAfterMap basePath file)
-    { aType = updateType
-    , aEffect = updateEffect }
+    { aPoly = checkLocal }
   where
-    checkLocal span local = do
+    checkLocal kind (local :&: span) = do
       locals <- asks localNames
       when (not $ local `HashSet.member` locals) do
         nearbyItems <- take 5 <$> getClosest (Identifier local)
@@ -892,61 +891,20 @@ nameResolveRestrictedType basePath file =
           { errorFile = file
           , errorSpan = span
           , errorMessage =
-            " cannot find parameter named `" ++ local ++ "`, " ++
+            "cannot find " ++ show kind ++ " parameter named `" ++ local ++ "`, " ++
             suggestionMessage "did you forget to declare it?" nearbyItems }
-
-    updateType typeWithMeta = do
-      case unmeta typeWithMeta of
-        TPoly local ->
-          checkLocal (getSpan typeWithMeta) local
-        _ ->
-          return ()
-      return typeWithMeta
-
-    updateEffect effectWithMeta = do
-      case unmeta effectWithMeta of
-        EffectPoly local ->
-          checkLocal (getSpan effectWithMeta) local
-        _ ->
-          return ()
-      return effectWithMeta
+      return local
 
 -- | A mapping that resolves all paths in an expression
 nameResolveAfterMap :: Path -> FilePath -> AfterMap NR
 nameResolveAfterMap basePath file = aDefault
   { aUseExpr = handleUseExpr
   , aWithBindings = withLocals
-  , aEffectSet = updateEffectSet
+  , aEffectSet = Just $ toUniqueEffectSet file
   , aPath = updatePath }
   where
     handleUseExpr m use expr =
       addUse basePath (file :/: use) $ unmeta <$> after m expr
-
-    updateEffectSet resolvedEffs = do
-      EffectSet set <- toUniqueEffectSet file resolvedEffs
-      EffectSet <$>
-        case Set.lookupIndex (meta EffectVoid) set of
-          Just voidIndex -> do
-            let
-              err = compileError
-                { errorFile = file
-                , errorKind = Warning
-                , errorMessage = "effect is unnecessary since `Void` includes all effects" }
-            forM_ (zip [0..] $ Set.toList set) \(i, _ :&: errorSpan) ->
-              when (i /= voidIndex) $ addError err { errorSpan }
-            return $ Set.singleton $ Set.elemAt voidIndex set
-          _ ->
-            case Set.lookupIndex (meta EffectPure) set of
-              Nothing -> return set
-              Just i -> do
-                when (Set.size set > 1) do
-                  let _ :&: span = Set.elemAt i set
-                  addError compileError
-                    { errorFile = file
-                    , errorSpan = span
-                    , errorKind = Warning
-                    , errorMessage = "effect `Pure` does nothing since there are other effects" }
-                return $ Set.deleteAt i set
 
     updatePath k path = nameResolvePath file kIs (show k) (getSpan path) (unmeta path)
       where

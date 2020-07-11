@@ -37,7 +37,7 @@ import Control.Monad.Trans.Maybe
 --   assert(A : B)
 --   assert(B : A)
 
-type Infer = ReaderT InferInfo (StateT InferState CompileIO)
+type Infer = StateT InferState (ReaderT InferInfo CompileIO)
 
 data InferInfo = InferInfo
   { iAllDecls :: !AllDecls
@@ -430,7 +430,7 @@ checkAndDeps decls (path, decl@(LetDecl { letTypeAscription, letConstraints, let
               return NullaryKind
           where
             addEffs effs =
-              forM_ (setEffects $ unmeta effs) \eff ->
+              forM_ (esToList $ unmeta effs) \eff ->
                 case unmeta eff of
                   EffectPoly name ->
                     addVar (name <$ eff) Nothing
