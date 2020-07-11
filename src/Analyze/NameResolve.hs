@@ -701,14 +701,14 @@ nameResolveEach path mod =
       forM letConstraints \case
         name `IsSubEffectOf` (eff :&: span) :&: _ ->
           case eff of
-            EffectPure ->
+            Core (Identifier "Pure") ->
               addError compileError
                 { errorFile = file
                 , errorSpan = span
                 , errorKind = Warning
                 , errorMessage =
                   "this constraint is the same as replacing `" ++ unmeta name ++ "` with `Pure`" }
-            EffectVoid ->
+            Core (Identifier "Void") ->
               addError compileError
                 { errorFile = file
                 , errorSpan = span

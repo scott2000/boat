@@ -198,19 +198,15 @@ updateExprs
         where
           v path = hashMapGet path assocPaths
 
-      allow :: ContainsOp a => FilePath -> Maybe (Meta Span Path) -> Meta Span a -> MaybeT CompileIO Bool
+      allow :: ContainsOp a => FilePath -> Maybe (Meta Span a) -> Meta Span a -> MaybeT CompileIO Bool
       allow file current next =
         case current of
           Nothing ->
             return True
           Just current ->
-            case ( HashMap.lookup (unmeta current) allOpDecls
-                 , getPath next >>= \next -> HashMap.lookup (unmeta next) allOpDecls ) of
-              (Nothing, Nothing) -> MaybeT do
-                missing current
-                missing next
-                return Nothing
-              (Nothing, _) -> MaybeT do
+            let tryLookup x = getPath x >>= \path -> HashMap.lookup path allOpDecls in
+            case (tryLookup current, tryLookup next) of
+              (Nothing, Just _) -> MaybeT do
                 missing current
                 return Nothing
               (_, Nothing) -> MaybeT do
@@ -246,14 +242,19 @@ updateExprs
               , errorMessage = ' ' : msg
                 ++ ", so explicit grouping is required" }
             return Nothing
-          missing (path :&: span) =
+          missing item =
             addError compileError
               { errorFile = file
-              , errorSpan = span
+              , errorSpan = getSpan item
               , errorCategory = [ECAssocOps]
               , errorMessage =
-                " operator `" ++ show path ++ "` has not been assigned an operator precedence," ++
-                " so explicit grouping is required" }
+                case getPath item of
+                  Nothing ->
+                    " explicit grouping is required when local variable operators are used with" ++
+                    " other operators since they cannot be assigned a precedence"
+                  Just path ->
+                    " operator `" ++ show path ++ "` has not been assigned an operator precedence," ++
+                    " so explicit grouping is required" }
 
       unwrap :: MaybeT CompileIO a -> CompileIO a
       unwrap m = runMaybeT m >>= \case
@@ -277,7 +278,7 @@ updateExprs
             next <- getNext
             a <- case next of
               UnOp unaryOp ->
-                applyUnary unaryOp <$> goExpr (getPath unaryOp)
+                applyUnary unaryOp <$> goExpr (Just unaryOp)
               UnExpr expr ->
                 return expr
             goBin current a
@@ -289,7 +290,7 @@ updateExprs
                 allowed <- lift $ allow file current binaryOp
                 if allowed then do
                   put rest
-                  b <- goExpr $ getPath binaryOp
+                  b <- goExpr $ Just binaryOp
                   goBin current (applyBinary binaryOp a b)
                 else
                   return a
@@ -324,26 +325,36 @@ data UnOpOrExpr a
 
 -- | A class representing anything that contains infix expressions
 class (Show a, After a) => ContainsOp a where
-  -- | Convert the expression to a list of unassociated expressions
-  toUnOpList :: Meta Span a -> [UnOpOrExpr a]
-  -- | Strip any leading parentheses
-  stripParen :: Meta Span a -> Meta Span a
+  -- | Try to get an 'Unassociated' operator from the expression
+  getUnassociated :: Meta Span a -> Maybe (Unassociated Span a)
   -- | Get the 'Path' if this is a global identifier
-  getPath :: Meta Span a -> Maybe (Meta Span Path)
+  getPath :: Meta Span a -> Maybe Path
   -- | Apply a unary operator to an expression
   applyUnary :: Meta Span a -> Meta Span a -> Meta Span a
   -- | Apply a binary operator to two expressions
   applyBinary :: Meta Span a -> Meta Span a -> Meta Span a -> Meta Span a
 
--- | Like 'toUnOpList', but takes an 'Unassociated' instead
-uToUnOpList :: ContainsOp a => Unassociated Span a -> [UnOpOrExpr a]
-uToUnOpList = \case
-  UParen op ->
-    [UnExpr op]
-  UUnaryOp op rhs ->
-    UnOp op : toUnOpList rhs
-  UBinOp op lhs rhs ->
-    UnExpr lhs : UnOp op : toUnOpList rhs
+-- | Convert the expression to a list of unassociated expressions
+toUnOpList :: ContainsOp a => Meta Span a -> [UnOpOrExpr a]
+toUnOpList x =
+  case getUnassociated x of
+    Just (UParen op) ->
+      [UnExpr op]
+    Just (UUnaryOp op rhs) ->
+      UnOp op : toUnOpList rhs
+    Just (UBinOp op lhs rhs) ->
+      UnExpr lhs : UnOp op : toUnOpList rhs
+    Nothing ->
+      [UnExpr x]
+
+-- | Strip any leading parentheses
+stripParen :: ContainsOp a => Meta Span a -> Meta Span a
+stripParen x =
+  case getUnassociated x of
+    Just (UParen op) ->
+      stripParen op
+    _ ->
+      x
 
 -- | Using an 'Associator', fully associate all infix expressions
 reassociate :: (ContainsOp a, Monad m) => Associator m -> Meta Span a -> m (Meta Span a)
@@ -358,23 +369,15 @@ reassociate f = after $ aContainsOp (f . toUnOpList . stripParen)
       , aType = f }
 
 instance ContainsOp (Type Span) where
-  toUnOpList x =
-    case unmeta x of
-      TUnassociated u ->
-        uToUnOpList u
-      _ ->
-        [UnExpr x]
-
-  stripParen x =
-    case unmeta x of
-      TUnassociated (UParen op) ->
-        stripParen op
-      _ ->
-        x
+  getUnassociated = \case
+    TUnassociated u :&: _ ->
+      Just u
+    _ ->
+      Nothing
 
   getPath = \case
-    TNamed path :&: span ->
-      Just $ path :&: span
+    TNamed path :&: _ ->
+      Just path
     _ ->
       Nothing
 
@@ -386,23 +389,15 @@ instance ContainsOp (Type Span) where
       TApp (withEnds lhs op $ TApp op lhs) rhs
 
 instance ContainsOp (Expr Span) where
-  toUnOpList x =
-    case unmeta x of
-      EUnassociated u ->
-        uToUnOpList u
-      _ ->
-        [UnExpr x]
-
-  stripParen x =
-    case unmeta x of
-      EUnassociated (UParen op) ->
-        stripParen op
-      _ ->
-        x
+  getUnassociated = \case
+    EUnassociated u :&: _ ->
+      Just u
+    _ ->
+      Nothing
 
   getPath = \case
-    EGlobal path :&: span ->
-      Just $ path :&: span
+    EGlobal path :&: _ ->
+      Just path
     _ ->
       Nothing
 
@@ -414,22 +409,14 @@ instance ContainsOp (Expr Span) where
       EApp (withEnds lhs op $ EApp op lhs) rhs
 
 instance ContainsOp (Pattern Span) where
-  toUnOpList x =
-    case unmeta x of
-      PUnassociated u ->
-        uToUnOpList u
-      _ ->
-        [UnExpr x]
-
-  stripParen x =
-    case unmeta x of
-      PUnassociated (UParen op) ->
-        stripParen op
-      _ ->
-        x
+  getUnassociated = \case
+    PUnassociated u :&: _ ->
+      Just u
+    _ ->
+      Nothing
 
   getPath = \case
-    PCons path [] :&: _ ->
+    PCons (path :&: _) [] :&: _ ->
       Just path
     _ ->
       Nothing

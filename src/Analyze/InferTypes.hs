@@ -11,7 +11,6 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.HashSet (HashSet)
 import qualified Data.HashSet as HashSet
-import Data.Set (Set)
 
 import Control.Monad.State.Strict
 import Control.Monad.Reader
@@ -41,8 +40,8 @@ type Infer = StateT InferState (ReaderT InferInfo CompileIO)
 
 data InferInfo = InferInfo
   { iAllDecls :: !AllDecls
-  , iEffectExpansions :: !(HashMap Path (Set Effect))
-  , iLocalEffectExpansions :: !(HashMap String (Set Effect)) }
+  , iEffectSupers :: !(HashMap Path (HashSet Path))
+  , iLocalEffectExpansions :: !(HashMap String (HashSet Path)) }
 
 data InferState = InferState
   { iResolvedDecls :: !(PathMap InferredLetDecl)

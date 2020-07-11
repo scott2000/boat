@@ -35,14 +35,15 @@ module Utility.AST
   , Effect (..)
   , pattern EffectPure
   , pattern EffectVoid
-  , NoCmp
-  , EffectSet
+  , NoCmp (..)
+  , EffectSet (..)
   , esEmpty
   , esSingleton
   , esSize
   , esInsert
   , esMember
   , esLookup
+  , esHideInfo
   , esToList
   , toUniqueEffectSet
   , UseModule (..)
@@ -435,19 +436,22 @@ pattern EffectPure = EffectNamed (Core (Identifier "Pure"))
 pattern EffectVoid :: Effect
 pattern EffectVoid = EffectNamed (Core (Identifier "Void"))
 
--- | A helper for 'EffectSet' to not compare values for equality
+-- | Always compares as equal no matter what value it holds
 newtype NoCmp info = NoCmp
   { getNoCmp :: info }
+
+instance Ord (NoCmp info) where
+  _ `compare` _ = EQ
 
 instance Eq (NoCmp info) where
   _ == _ = True
 
 -- | A set of effects, splitting each kind of effect into a different map
 data EffectSet info = EffectSet
-  { esNamed :: HashMap Path (NoCmp info)
-  , esPoly :: HashMap String (NoCmp info)
-  , esAnon :: Map AnonCount (NoCmp info)
-  , esLocal :: Map AnonCount (NoCmp info) }
+  { esNamed :: !(HashMap Path (NoCmp info))
+  , esPoly :: !(HashMap String (NoCmp info))
+  , esAnon :: !(Map AnonCount (NoCmp info))
+  , esLocal :: !(Map AnonCount (NoCmp info)) }
   deriving Eq
 
 instance After (EffectSet Span) where
@@ -525,6 +529,16 @@ esLookup eff es =
       Map.lookup anon $ esAnon es
     EffectLocal anon ->
       Map.lookup anon $ esLocal es
+
+-- | Hide the information associated with each item in the 'EffectSet' by replacing it with @()@
+esHideInfo :: EffectSet info -> EffectSet ()
+esHideInfo es = EffectSet
+  { esNamed = HashMap.map hide $ esNamed es
+  , esPoly = HashMap.map hide $ esPoly es
+  , esAnon = Map.map hide $ esAnon es
+  , esLocal = Map.map hide $ esLocal es }
+  where
+    hide = const $ NoCmp ()
 
 -- | Create a list of effects present in an 'EffectSet'
 esToList :: EffectSet info -> [Meta info Effect]

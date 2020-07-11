@@ -370,7 +370,7 @@ modAddEffect file name decl mod = do
 
 -- | A constraint from a with-clause in a declaration
 data Constraint info
-  = Meta info String `IsSubEffectOf` Meta info Effect
+  = Meta info String `IsSubEffectOf` Meta info Path
   | Meta info String `HasKind` TypeKind
   deriving (Ord, Eq)
 
@@ -383,8 +383,8 @@ instance Show (Constraint info) where
 
 instance After (Constraint Span) where
   after m = mapM \case
-    eff `IsSubEffectOf` effs ->
-      IsSubEffectOf eff <$> after m effs
+    eff `IsSubEffectOf` super ->
+      IsSubEffectOf eff <$> afterPath m KEffect super
     other ->
       return other
 
@@ -612,21 +612,25 @@ disambiguateConstraint file typeWithMeta maybeAscription =
             _ ->
               err "expected a single effect variable before `:` in constraint"
       super <-
-        case esToList bound of
-          [EffectAnon _ :&: span] -> do
-            addError compileError
-              { errorFile = file
-              , errorSpan = span
-              , errorMessage = "upper bound for effect constraint cannot be left blank" }
-            return Nothing
-          [eff] ->
-            return $ Just eff
-          _ -> do
+        let
+          err msg = do
             addError compileError
               { errorFile = file
               , errorSpan = boundSpan
-              , errorMessage = "effect variables can only be constrained by a single effect" }
+              , errorMessage = msg }
             return Nothing
+        in
+          case esToList bound of
+            [eff] ->
+              case unmeta eff of
+                EffectNamed path ->
+                  return $ Just $ path :&: boundSpan
+                EffectPoly _ ->
+                  err "upper bound for effect constraint cannot be another effect variable"
+                _ ->
+                  err "upper bound for effect constraint cannot be left blank"
+            _ ->
+              err "effect variables can only be constrained by a single effect"
       return $ IsSubEffectOf <$> eff <*> super
   where
     traitsUnimplemented = do
