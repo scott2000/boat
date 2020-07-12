@@ -19,41 +19,37 @@ import Control.Monad.Reader
 import Control.Monad.Trans.Maybe
 
 -- (A + a?) : (B + b)
---   b ~ (A - B) + a? + b'
---   checkBounds(b)
+--   b ~ (A - B) + b'
+--   a? ~ b'
 -- (A + a?) : B
 --   assert(A : B)
 --   a? : B
---
--- (A + a) = (B + b) => A + B + c
---   a ~ (B - A) + c
---   checkBounds(a)
---   b ~ (A - B) + c
---   checkBounds(b)
--- (A + a) = B => A + B
---   assert(A : B)
---   a ~ (B - A) + a'
---   a' : B
--- A = B => A + B
---   assert(A : B)
---   assert(B : A)
 
 type Infer = ReaderT InferInfo (StateT InferState CompileIO)
 
 data InferInfo = InferInfo
   { iAllDecls :: !AllDecls
   , iEffectSupers :: !(HashMap Path (HashSet Path))
+  , iInitialAnonCount :: !AnonCount
   , iLocalEffectSupers :: !(HashMap String (HashSet Path))
   , iLocalTypeKinds :: !(HashMap String TypeKind) }
 
 getInferInfo :: AllDecls -> CompileIO InferInfo
 getInferInfo decls = do
   iEffectSupers <- execStateT (sortEffects $ allEffects decls) HashMap.empty
+  iInitialAnonCount <- compileAnonCount <$> compileState
   return InferInfo
     { iAllDecls = decls
     , iEffectSupers
+    , iInitialAnonCount
     , iLocalEffectSupers = HashMap.empty
     , iLocalTypeKinds = HashMap.empty }
+
+restoreAnonCount :: Infer ()
+restoreAnonCount = do
+  compileAnonCount <- asks iInitialAnonCount
+  compileModify \s -> s
+    { compileAnonCount }
 
 data InferState = InferState
   { iResolvedDecls :: !(PathMap InferredLetDecl)
@@ -547,8 +543,8 @@ newLocal = EffectLocal <$> getNewAnon
 
 inferTypes :: AllDecls -> CompileIO InferredDecls
 inferTypes decls = do
-  inferInfo <- getInferInfo decls
   sortedLets <- topSortExt (checkAndDeps decls) $ allLets decls
+  inferInfo <- getInferInfo decls
   liftIO do
     putStrLn "\nEffect ancestors:\n"
     forM_ (HashMap.toList $ iEffectSupers inferInfo) \(path, supers) ->
@@ -561,7 +557,11 @@ inferTypes decls = do
     forM_ sortedLets \scc ->
       putStrLn $ intercalate ", " $ flattenSCC scc <&> \(path, _, _) -> show path
   exitIfErrors
-  inferState <- execStateT (runReaderT (mapM_ inferDeclSCC sortedLets) inferInfo) defaultInferState
+  let
+    runInfer = do
+      mapM_ inferDeclSCC sortedLets
+      restoreAnonCount
+  inferState <- execStateT (runReaderT runInfer inferInfo) defaultInferState
   return InferredDecls
     { iDatas = allDatas decls
     , iLets = iResolvedDecls inferState }
