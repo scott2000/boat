@@ -65,7 +65,7 @@ defaultNames = Names
 -- | Adds a name associated with an item to a 'NameSet'
 addName :: ImportMark mark => Explicitness -> mark -> Path -> (Name, Item) -> NameSet mark -> NameSet mark
 addName exp id path (name, item) s =
-  if HashMap.member name s then
+  if name `HashMap.member` s then
     HashMap.adjust collide name s
   else
     HashMap.insert name new s
@@ -196,8 +196,10 @@ coreNameTable = NameTable
   { getNameTable = HashMap.fromList
     [ ( Identifier "Core"
       , modItem $ addModule coreModule $ NameTable $ HashMap.fromList
-        [ -- The (->) function arrow
-          (Operator "->", typeItem)
+        [ -- The `Pure` effect that inherits from every other effect
+          (Identifier "Pure", effectItem)
+          -- The (->) function arrow
+        , (Operator "->", typeItem)
           -- The (unary ^) dereferencing operator
         , (Unary "^", valueItem <> patternItem)
           -- The (:=) reference assignment operator
@@ -218,12 +220,9 @@ coreModule = defaultModule
     [ (Operator ":=", assignmentDecl)
     , (Operator "<-", assignmentDecl)
     , (Unary "^", dereferenceDecl) ]
-    -- effect Pure
-    -- effect Void
+   -- effect Void
   , modEffects = HashMap.fromList
-    [ (Identifier "Pure", meta EffectDecl
-      { effectSuper = [] })
-    , (Identifier "Void", meta EffectDecl
+    [ (Identifier "Void", meta EffectDecl
       { effectSuper = [] }) ] }
   where
     assignment = Identifier "Assignment"
@@ -342,7 +341,7 @@ addUse path (file :/: useWithMeta@(use :&: span)) nr
       usePath =
         case use of
           UseModule name _
-            | nameTableMember (unmeta name) nt -> useWithMeta
+            | unmeta name `nameTableMember` nt -> useWithMeta
           _ ->
             prefixUse (unpath path) useWithMeta
     add EmptyPath nt usePath nr
@@ -579,8 +578,7 @@ nameResolveEach path mod =
         other ->
           afterDeclare Nothing other
       where
-        resPath = nameResolvePath file isOperatorType "operator type"
-        resMetaPath path = forM path $ resPath $ getSpan path
+        resMetaPath = nameResolveMetaPath file isOperatorType "operator type"
 
         afterLink lower = \case
           OpDeclare (name :&: span) : rest -> do
@@ -628,14 +626,14 @@ nameResolveEach path mod =
         decl' = decl { opType = opType' }
         opPath = path .|. name
       -- Check that something that can be used as an operator exists at the path
-      _ <- nameResolvePath file isInfixable "operator" span opPath
+      _ <- nameResolvePath file isInfixable "operator" $ opPath :&: span
       insertOpDecl opPath (decl' :&: file :/: span)
       where
-        resPath = nameResolvePath file isOperatorType "operator type"
-        resMetaPath path = forM path $ resPath $ getSpan path
+        resMetaPath = nameResolveMetaPath file isOperatorType "operator type"
 
     nameResolveEffect (name, EffectDecl { effectSuper } :&: file :/: span) = do
-      super <- forM effectSuper $ nameResolveAfter path file
+      super <- forM effectSuper $
+        nameResolveMetaPath file isEffect "effect"
       forM_ super \case
         EffectPure :&: span ->
           addError compileError
@@ -654,14 +652,8 @@ nameResolveEach path mod =
             , errorKind = Warning
             , errorMessage =
               "all effects are implicitly subtypes of `Void`, so listing it is unnecessary" }
-        EffectNamed _ :&: _ ->
+        _ ->
           return ()
-        other :&: span ->
-          addError compileError
-            { errorFile = file
-            , errorSpan = span
-            , errorMessage =
-              "expected a named effect, but found `" ++ show other ++ "` instead" }
       insertEffect (path .|. name) $ withInfo (file :/: span) EffectDecl
         { effectSuper = super }
 
@@ -701,14 +693,14 @@ nameResolveEach path mod =
       forM letConstraints \case
         name `IsSubEffectOf` (eff :&: span) :&: _ ->
           case eff of
-            Core (Identifier "Pure") ->
+            EffectPure ->
               addError compileError
                 { errorFile = file
                 , errorSpan = span
                 , errorKind = Warning
                 , errorMessage =
                   "this constraint is the same as replacing `" ++ unmeta name ++ "` with `Pure`" }
-            Core (Identifier "Void") ->
+            EffectVoid ->
               addError compileError
                 { errorFile = file
                 , errorSpan = span
@@ -721,10 +713,10 @@ nameResolveEach path mod =
         LetDecl { letTypeAscription, letConstraints, letBody }
 
 -- | Resolve a single 'Path'
-nameResolvePath :: FilePath -> (Item -> Bool) -> String -> Span -> Path -> NR Path
-nameResolvePath _ _ _ _ Path { unpath = [] } =
+nameResolvePath :: FilePath -> (Item -> Bool) -> String -> Meta Span Path -> NR Path
+nameResolvePath _ _ _ (Path { unpath = [] } :&: _) =
   compilerBug "nameResolvePath called on empty path"
-nameResolvePath file check kind span path@Path { unpath = parts@(head:rest) } = do
+nameResolvePath file check kind (path@Path { unpath = parts@(head:rest) } :&: span) = do
   nt <- gets nameTable
   case nameTableEntry head nt of
     Just item ->
@@ -820,6 +812,11 @@ nameResolvePath file check kind span path@Path { unpath = parts@(head:rest) } = 
           " cannot find `" ++ show path ++ "` in scope, " ++
           suggestionMessage "did you forget to `use` it?" nearbyItems
 
+-- | Like 'nameResolvePath', but directly outputs a 'Path' with the original 'Span'
+nameResolveMetaPath :: FilePath -> (Item -> Bool) -> String -> Meta Span Path -> NR (Meta Span Path)
+nameResolveMetaPath file check kind path =
+  copyInfo path <$> nameResolvePath file check kind path
+
 -- | Finds items in scope for which the requested name might be a typo
 getClosest :: Name -> NR [Name]
 getClosest target = do
@@ -906,7 +903,7 @@ nameResolveAfterMap basePath file = aDefault
     handleUseExpr m use expr =
       addUse basePath (file :/: use) $ unmeta <$> after m expr
 
-    updatePath k path = nameResolvePath file kIs (show k) (getSpan path) (unmeta path)
+    updatePath k = nameResolvePath file kIs $ show k
       where
         kIs =
           case k of

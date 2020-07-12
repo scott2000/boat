@@ -5,6 +5,8 @@ import Utility
 
 import Analyze.InferVariance (lookupDecl, addMatchError, matchKinds)
 
+import Data.List
+
 import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HashMap
 import Data.Map.Strict (Map)
@@ -36,53 +38,95 @@ import Control.Monad.Trans.Maybe
 --   assert(A : B)
 --   assert(B : A)
 
-type Infer = StateT InferState (ReaderT InferInfo CompileIO)
+type Infer = ReaderT InferInfo (StateT InferState CompileIO)
 
 data InferInfo = InferInfo
   { iAllDecls :: !AllDecls
   , iEffectSupers :: !(HashMap Path (HashSet Path))
-  , iLocalEffectExpansions :: !(HashMap String (HashSet Path)) }
+  , iLocalEffectSupers :: !(HashMap String (HashSet Path))
+  , iLocalTypeKinds :: !(HashMap String TypeKind) }
+
+getInferInfo :: AllDecls -> CompileIO InferInfo
+getInferInfo decls = do
+  iEffectSupers <- execStateT (sortEffects $ allEffects decls) HashMap.empty
+  return InferInfo
+    { iAllDecls = decls
+    , iEffectSupers
+    , iLocalEffectSupers = HashMap.empty
+    , iLocalTypeKinds = HashMap.empty }
 
 data InferState = InferState
   { iResolvedDecls :: !(PathMap InferredLetDecl)
-  , iUnresolvedDecls :: !(PathMap (Type ()))
-  , iConstraints :: !(Map (Constraint ()) ConstraintSource) }
+  , iKnownDecls :: !(PathMap (Type ()))
+  , iUnknownDecls :: !(PathMap AnonCount)
+  , iAnonEffectSubs :: !(Map AnonCount (EffectSet ()))
+  , iAnonEffectBounds :: !(Map AnonCount (HashSet (HashSet Path)))
+  , iAnonTypeSubs :: !(Map AnonCount (Type ()))
+  , iAnonTypeKinds :: !(Map AnonCount TypeKind) }
 
 defaultInferState :: InferState
 defaultInferState = InferState
   { iResolvedDecls = HashMap.empty
-  , iUnresolvedDecls = HashMap.empty
-  , iConstraints = Map.empty }
+  , iKnownDecls = HashMap.empty
+  , iUnknownDecls = HashMap.empty
+  , iAnonEffectSubs = Map.empty
+  , iAnonEffectBounds = Map.empty
+  , iAnonTypeSubs = Map.empty
+  , iAnonTypeKinds = Map.empty }
 
-data ConstraintSource = ConstraintSource
-  { csLocation :: Maybe ContextLocation
-  , csSpan :: InFile Span }
+type EffectSortState = StateT (HashMap Path (HashSet Path)) CompileIO
 
-data ContextLocation
-  = CFunctionArgument (Maybe Path) Int
-  | CLetBinding (Maybe String)
-  | CMatchBranch Int
-  | CMatchInput Int
+sortEffects :: PathMap EffectDecl -> EffectSortState ()
+sortEffects =
+  mapM_ addEffectSCC . topSort effectDeps
 
-instance Show ContextLocation where
-  show = \case
-    CFunctionArgument path index ->
-      ordinal index ++ " argument of " ++
-        case path of
-          Nothing ->
-            "function"
-          Just path ->
-            "`" ++ show (last $ unpath path) ++ "`"
-    CLetBinding name ->
-      "let binding" ++
-        case name of
-          Nothing -> ""
-          Just name ->
-            " for `" ++ name ++ "`"
-    CMatchBranch index ->
-      ordinal index ++ " match case"
-    CMatchInput index ->
-      ordinal index ++ " input for match expression"
+effectDeps :: (Path, Meta (InFile Span) EffectDecl) -> [Path]
+effectDeps (_, EffectDecl { effectSuper } :&: _) =
+  map unmeta effectSuper
+
+addEffectSCC :: SCC (Path, Meta (InFile Span) EffectDecl) -> EffectSortState ()
+addEffectSCC = \case
+  AcyclicSCC (path, EffectDecl { effectSuper } :&: file :/: _) -> do
+    m <- get
+    let
+      -- A list of all direct parents
+      parents = map unmeta effectSuper
+      -- A set of ancestors of the parents
+      ancestors = HashSet.unions $ map (`hashMapGet` m) parents
+      -- Warn for duplicate effects that are already covered by other effects
+      mergeAndCheckDuplicates set [] = return set
+      mergeAndCheckDuplicates set ((path :&: span) : rest)
+        | path == EffectVoid =
+          -- A warning will already have been emitted in "NameResolve", so just ignore `Void`
+          mergeAndCheckDuplicates set rest
+        | path `HashSet.member` set = do
+          addError compileError
+            { errorFile = file
+            , errorSpan = span
+            , errorKind = Warning
+            , errorMessage =
+              if path `elem` parents then
+                "effect is unnecessary since it was already listed"
+              else
+                "effect is unnecessary since it is an ancestor of another parent effect" }
+          mergeAndCheckDuplicates set rest
+        | otherwise =
+          mergeAndCheckDuplicates (HashSet.insert path set) rest
+    superEffects <- mergeAndCheckDuplicates ancestors effectSuper
+    put $ HashMap.insert path superEffects m
+  CyclicSCC effs -> do
+    let
+      (_, _ :&: file :/: span) = head effs
+      effList =
+        intercalate ", " $ map (show . fst) effs
+    addError compileError
+      { errorFile = file
+      , errorSpan = span
+      , errorMessage =
+        " cyclic subtyping for effect declarations\n" ++
+        " (effects in cycle: " ++ effList ++ ")" }
+    forM_ effs \(path, _) ->
+      modify $ HashMap.insert path HashSet.empty
 
 -- | Looks up a data type declaration's parameters
 lookupDecl' :: Path -> Infer TypeKind
@@ -472,19 +516,57 @@ checkAndDeps decls (path, decl@(LetDecl { letTypeAscription, letConstraints, let
         _ ->
           return ()
 
+data ContextLocation
+  = CFunctionArgument (Maybe Path) Int
+  | CLetBinding (Maybe String)
+  | CMatchBranch Int
+  | CMatchInput Int
+
+instance Show ContextLocation where
+  show = \case
+    CFunctionArgument path index ->
+      ordinal index ++ " argument of " ++
+        case path of
+          Nothing ->
+            "function"
+          Just path ->
+            "`" ++ show (last $ unpath path) ++ "`"
+    CLetBinding name ->
+      "let binding" ++
+        case name of
+          Nothing -> ""
+          Just name ->
+            " for `" ++ name ++ "`"
+    CMatchBranch index ->
+      ordinal index ++ " match case"
+    CMatchInput index ->
+      ordinal index ++ " input for match expression"
+
 newLocal :: MonadCompile m => m Effect
 newLocal = EffectLocal <$> getNewAnon
 
 inferTypes :: AllDecls -> CompileIO InferredDecls
 inferTypes decls = do
-  _sortedLets <- topSortExt (checkAndDeps decls) $ allLets decls
+  inferInfo <- getInferInfo decls
+  sortedLets <- topSortExt (checkAndDeps decls) $ allLets decls
+  liftIO do
+    putStrLn "\nEffect ancestors:\n"
+    forM_ (HashMap.toList $ iEffectSupers inferInfo) \(path, supers) ->
+      putStrLn $ show path ++
+        if HashSet.null supers then
+          ""
+        else
+          " : " ++ intercalate ", " (map show $ HashSet.toList supers)
+    putStrLn "\nInference order:\n"
+    forM_ sortedLets \scc ->
+      putStrLn $ intercalate ", " $ flattenSCC scc <&> \(path, _, _) -> show path
   exitIfErrors
-  -- let
-  --   inferInfo = InferInfo
-  --     { iAllDecls = decls
-  --     , iEffectExpansions = expansions }
-  -- i <- execStateT (runReaderT (mapM_ inferDeclSCC sortedLets) inferInfo) defaultInferState
-  -- return decls { allLets = iResolvedDecls i }
+  inferState <- execStateT (runReaderT (mapM_ inferDeclSCC sortedLets) inferInfo) defaultInferState
+  return InferredDecls
+    { iDatas = allDatas decls
+    , iLets = iResolvedDecls inferState }
+
+inferDeclSCC :: SCC LetComponent -> Infer ()
+inferDeclSCC _ =
   addFatal compileError
     { errorMessage = "type inference not yet implemented" }
-

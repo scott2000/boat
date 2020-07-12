@@ -419,7 +419,7 @@ type AddError = MonadCompile
 addError :: AddError m => CompileError -> m ()
 addError err =
   compileModify \s ->
-    if Set.member err $ compileErrors s then
+    if err `Set.member` compileErrors s then
       -- Don't try to insert the error if there is already an exact duplicate of the error
       s
     else

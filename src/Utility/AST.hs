@@ -429,12 +429,12 @@ instance Show Effect where
     EffectLocal anon -> "<local" ++ show anon ++ ">"
 
 -- | An effect representing pure code
-pattern EffectPure :: Effect
-pattern EffectPure = EffectNamed (Core (Identifier "Pure"))
+pattern EffectPure :: Path
+pattern EffectPure = Core (Identifier "Pure")
 
 -- | An effect representing an uncallable function
-pattern EffectVoid :: Effect
-pattern EffectVoid = EffectNamed (Core (Identifier "Void"))
+pattern EffectVoid :: Path
+pattern EffectVoid = Core (Identifier "Void")
 
 -- | Always compares as equal no matter what value it holds
 newtype NoCmp info = NoCmp
@@ -509,13 +509,13 @@ esMember :: Effect -> EffectSet info -> Bool
 esMember eff es =
   case eff of
     EffectNamed name ->
-      HashMap.member name $ esNamed es
+      name `HashMap.member` esNamed es
     EffectPoly name ->
-      HashMap.member name $ esPoly es
+      name `HashMap.member` esPoly es
     EffectAnon anon ->
-      Map.member anon $ esAnon es
+      anon `Map.member` esAnon es
     EffectLocal anon ->
-      Map.member anon $ esLocal es
+      anon `Map.member` esLocal es
 
 -- | Get the information associated with an 'Effect' in an 'EffectSet', if it is present
 esLookup :: Effect -> EffectSet info -> Maybe info
@@ -558,7 +558,7 @@ toUniqueEffectSet file = go esEmpty
   where
     go es [] =
       let EffectSet { esNamed } = es in
-      case HashMap.lookup (Core $ Identifier "Void") esNamed of
+      case HashMap.lookup EffectVoid esNamed of
         Just (NoCmp voidSpan) -> do
           -- If there is a `Void` effect, emit a warning for all other effects and just return `Void`
           let
@@ -567,11 +567,10 @@ toUniqueEffectSet file = go esEmpty
               , errorKind = Warning
               , errorMessage = "effect is unnecessary since `Void` includes all effects" }
           forM_ (esToList es) \(eff :&: errorSpan) ->
-            when (eff /= EffectVoid) $ addError err { errorSpan }
-          return $ esSingleton $ EffectVoid :&: voidSpan
+            when (eff /= EffectNamed EffectVoid) $ addError err { errorSpan }
+          return $ esSingleton $ EffectNamed EffectVoid :&: voidSpan
         Nothing ->
-          let purePath = Core $ Identifier "Pure" in
-          case HashMap.lookup purePath esNamed of
+          case HashMap.lookup EffectPure esNamed of
             Just (NoCmp pureSpan) -> do
               -- If there is a `Pure` effect, remove it from the set and emit a warning if it was unnecessary
               when (esSize es > 1) do
@@ -580,7 +579,7 @@ toUniqueEffectSet file = go esEmpty
                   , errorSpan = pureSpan
                   , errorKind = Warning
                   , errorMessage = "effect `Pure` does nothing since there are other effects" }
-              return es { esNamed = HashMap.delete purePath esNamed }
+              return es { esNamed = HashMap.delete EffectPure esNamed }
             Nothing ->
               return es
     go es (new:rest) =
@@ -1119,7 +1118,7 @@ assertUniqueBindings file pats =
       case unmeta patternWithMeta of
         PBind (Just name) -> do
           s <- get
-          if Set.member name s then
+          if name `Set.member` s then
             MaybeT do
               addError compileError
                 { errorFile = file

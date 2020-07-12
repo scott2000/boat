@@ -83,21 +83,26 @@ parseFile file = do
           where
             parseEffectSuper = do
               try (nbsc >> specialOp TypeAscription)
-              blockOf $ parseSomeCommaList parseSingleEffect
+              catMaybes <$> blockOf (parseSomeCommaList parseSingleEffect)
             parseSingleEffect = do
               effs :&: span <- withSpan parseEffectSet
-              case esToList effs of
-                [eff] ->
-                  return eff
-                _ -> do
+              let
+                err msg = do
                   file <- getFilePath
                   addError compileError
                     { errorFile = file
                     , errorSpan = span
-                    , errorMessage =
-                      "effects cannot inherit from a single set of multiple effects\n" ++
-                      "(to inherit from multiple effects at once, separate them with commas)" }
-                  withInfo span . EffectAnon <$> getNewAnon
+                    , errorMessage = msg }
+                  return Nothing
+              case esToList effs of
+                [EffectNamed path :&: span] ->
+                  return $ Just $ path :&: span
+                [_] ->
+                  err "expected a specific named effect to inherit from"
+                _ ->
+                  err $
+                    "effects cannot inherit from a single set of multiple effects\n" ++
+                    "(to inherit from multiple effects at once, separate them with commas)"
 
         parseLet = do
           keyword "let"

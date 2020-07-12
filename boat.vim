@@ -24,6 +24,7 @@ syn keyword boatTodo        contained TODO FIXME XXX NOTE
 syn match   boatLineCmnt    "--.*$" contains=boatTodo,@Spell
 syn region  boatBlockCmnt   start='{-' end='-}' contains=boatBlockCmnt,boatTodo,@Spell
 syn match   boatLabel       '<\<[A-Za-z_][A-Za-z0-9_]*\>>'
+syn match   boatBacktick    '`[^`"\']*`'
 
 let b:current_syntax = "boat"
 
@@ -42,3 +43,4 @@ hi def link boatTodo        Todo
 hi def link boatLineCmnt    Comment
 hi def link boatBlockCmnt   Comment
 hi def link boatLabel       Special
+hi def link boatBacktick    Operator

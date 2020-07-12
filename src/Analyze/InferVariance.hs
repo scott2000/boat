@@ -73,12 +73,12 @@ addConstraint _ InvariantVariable = InvariantVariable
 addConstraint VarianceConstraint { vBase, vDeps } i =
   case vBase of
     VOutput
-      | null vDeps && HashSet.member [] (inputVariables i) ->
+      | null vDeps && [] `HashSet.member` inputVariables i ->
         InvariantVariable
       | otherwise ->
         i { outputVariables = HashSet.insert vDeps $ outputVariables i }
     VInput
-      | null vDeps && HashSet.member [] (outputVariables i) ->
+      | null vDeps && [] `HashSet.member` outputVariables i ->
         InvariantVariable
       | otherwise ->
         i { inputVariables = HashSet.insert vDeps $ inputVariables i }
@@ -246,7 +246,7 @@ makeDataInfo file DataSig { dataEffs, dataArgs } =
     add UnnamedArg _ = return ()
     add (name :&: span) info = do
       m <- get
-      if HashMap.member name m then do
+      if name `HashMap.member` m then do
         addError compileError
           { errorFile = file
           , errorSpan = span
@@ -523,7 +523,8 @@ checkSelfEvenOdd self = HashSet.foldr check
 onlyRefersToSelf :: AnonCount -> InferVariable -> Bool
 onlyRefersToSelf _ InvariantVariable = True
 onlyRefersToSelf self InferVariable { outputVariables, inputVariables } =
-  HashSet.foldr check True $ outputVariables <> inputVariables
+  -- Input variables are added first because HashSet.union requests the smaller set first
+  HashSet.foldr check True $ inputVariables <> outputVariables
   where
     check _ False = False
     check xs _ = all (self ==) xs

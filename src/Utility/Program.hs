@@ -134,15 +134,13 @@ emptyDecls = AllDecls
 
 -- | Like 'AllDecls', but with all types inferred and some information discarded
 data InferredDecls = InferredDecls
-  { iEffects :: !(PathMap EffectDecl)
-  , iDatas :: !(PathMap DataDecl)
+  { iDatas :: !(PathMap DataDecl)
   , iLets :: !(PathMap InferredLetDecl) }
 
 instance Show InferredDecls where
-  show InferredDecls { iEffects, iDatas, iLets } =
+  show InferredDecls { iDatas, iLets } =
     intercalate "\n" $ concat
-      [ showDeclHashMap iEffects
-      , showDeclHashMap iDatas
+      [ showDeclHashMap iDatas
       , showDeclHashMap iLets ]
 
 -- | Like 'LetDecl', but with all types inferred and some extra information
@@ -326,7 +324,7 @@ modAddOpDecls file names op mod = do
     newOps = names <&> \(name :&: span) ->
       (name, op :&: file :/: span)
   forM_ names \(name :&: span) ->
-    when (HashMap.member name oldOps) $
+    when (name `HashMap.member` oldOps) $
       addError compileError
         { errorFile = file
         , errorSpan = span
@@ -335,7 +333,7 @@ modAddOpDecls file names op mod = do
 
 -- | A declaration of a new effect with an optional super-effect
 data EffectDecl = EffectDecl
-  { effectSuper :: [Meta Span Effect] }
+  { effectSuper :: [Meta Span Path] }
 
 instance ShowWithName EffectDecl where
   showWithName name EffectDecl { effectSuper } =
@@ -348,7 +346,7 @@ instance ShowWithName EffectDecl where
 -- | Try to insert a declaration into a 'NameMap' with a given error message for failure
 insertWithError :: AddError m => FilePath -> Meta Span Name -> a -> String -> NameMap a -> m (NameMap a)
 insertWithError file (name :&: span) decl errorMessage map = do
-  when (HashMap.member name map) $
+  when (name `HashMap.member` map) $
     addError compileError
       { errorFile = file
       , errorSpan = span

@@ -204,15 +204,10 @@ updateExprs
           Nothing ->
             return True
           Just current ->
-            let tryLookup x = getPath x >>= \path -> HashMap.lookup path allOpDecls in
-            case (tryLookup current, tryLookup next) of
-              (Nothing, Just _) -> MaybeT do
-                missing current
-                return Nothing
-              (_, Nothing) -> MaybeT do
-                missing next
-                return Nothing
-              (Just (a :&: _), Just (b :&: _)) ->
+            let lookup path = HashMap.lookup path allOpDecls in
+            case (lookup <$> getPath current, lookup <$> getPath next) of
+              (Just (Just (a :&: _)), Just (Just (b :&: _))) ->
+                -- Both operators have an operator type
                 let
                   aOp = unmeta $ opType a
                   bOp = unmeta $ opType b
@@ -233,6 +228,23 @@ updateExprs
                         "operator `" ++ show bOp
                         ++ "` has a different associativity than `" ++ show aOp
                         ++ "` (" ++ show aAssoc ++ " != " ++ show bAssoc ++ ")"
+              err -> MaybeT do
+                -- Something doesn't have an operator type or is a local variable, so pick which error message to emit
+                -- and where it should be emitted depending on what information is missing
+                case err of
+                  (Nothing, Just _) ->
+                    -- The first operator is local and the second is not
+                    local current
+                  (_, Nothing) ->
+                    -- The second operator is local
+                    local next
+                  (Just Nothing, Just (Just _)) ->
+                    -- The first operator has no operator type and the second does
+                    missing current
+                  _ ->
+                    -- The second operator has no operator type
+                    missing next
+                return Nothing
         where
           notAllowed msg = MaybeT do
             addError compileError
@@ -242,19 +254,22 @@ updateExprs
               , errorMessage = ' ' : msg
                 ++ ", so explicit grouping is required" }
             return Nothing
-          missing item =
+          local (_ :&: span) =
             addError compileError
               { errorFile = file
-              , errorSpan = getSpan item
+              , errorSpan = span
               , errorCategory = [ECAssocOps]
               , errorMessage =
-                case getPath item of
-                  Nothing ->
-                    " explicit grouping is required when local variable operators are used with" ++
-                    " other operators since they cannot be assigned a precedence"
-                  Just path ->
-                    " operator `" ++ show path ++ "` has not been assigned an operator precedence," ++
-                    " so explicit grouping is required" }
+                " explicit grouping is required when local variable operators are used with" ++
+                " other operators since they cannot be assigned a precedence" }
+          missing (path :&: span) =
+            addError compileError
+              { errorFile = file
+              , errorSpan = span
+              , errorCategory = [ECAssocOps]
+              , errorMessage =
+                " operator `" ++ show path ++ "` has not been assigned an operator precedence," ++
+                " so explicit grouping is required" }
 
       unwrap :: MaybeT CompileIO a -> CompileIO a
       unwrap m = runMaybeT m >>= \case

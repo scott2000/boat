@@ -419,7 +419,7 @@ unseenCategory :: ErrorCategory -> StateT PrettyErrorState IO Bool
 unseenCategory cat = do
   s <- get
   let seen = peCategoriesSeen s
-  if not $ Set.member cat seen then do
+  if not $ cat `Set.member` seen then do
     put s { peCategoriesSeen = Set.insert cat seen }
     return True
   else
