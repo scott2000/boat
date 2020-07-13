@@ -357,16 +357,7 @@ data CompileError = CompileError
   , errorExplain :: !(Maybe String)
     -- | The basic error message to print
   , errorMessage :: String }
-  deriving Eq
-
-instance Ord CompileError where
-  a `compare` b =
-    errorFile a `compare` errorFile b
-    <> errorSpan a `compare` errorSpan b
-    <> errorKind a `compare` errorKind b
-    <> errorCategory a `compare` errorCategory b
-    <> errorExplain a `compare` errorExplain b
-    <> errorMessage a `compare` errorMessage b
+  deriving (Ord, Eq)
 
 -- | A default 'CompileError' containing everything but a message
 compileError :: CompileError
