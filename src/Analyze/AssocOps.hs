@@ -198,7 +198,7 @@ updateExprs
         where
           v path = hashMapGet path assocPaths
 
-      allow :: ContainsOp a => FilePath -> Maybe (Meta Span a) -> Meta Span a -> MaybeT CompileIO Bool
+      allow :: ContainsOp a => File -> Maybe (Meta Span a) -> Meta Span a -> MaybeT CompileIO Bool
       allow file current next =
         case current of
           Nothing ->
@@ -271,13 +271,6 @@ updateExprs
                 " operator `" ++ show path ++ "` has not been assigned an operator precedence," ++
                 " so explicit grouping is required" }
 
-      unwrap :: MaybeT CompileIO a -> CompileIO a
-      unwrap m = runMaybeT m >>= \case
-        Nothing -> do
-          exitIfErrors
-          compilerBug "unwrapping associated operator list failed despite no errors being reported"
-        Just x -> return x
-
       getNext :: Monad m => StateT [a] m a
       getNext = do
         s <- get
@@ -285,9 +278,11 @@ updateExprs
         put t
         return h
 
-      associateList :: FilePath -> Associator CompileIO
+      associateList :: File -> Associator CompileIO
       associateList file list =
-        unwrap $ evalStateT (goExpr Nothing) list
+        runMaybeT (evalStateT (goExpr Nothing) list) <&> \case
+          Nothing -> incomplete
+          Just x -> x
         where
           goExpr current = do
             next <- getNext

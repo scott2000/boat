@@ -362,7 +362,7 @@ firstColumnOr1 = fromMaybe 1 . firstColumn
 -- | Stores the state of a file as it is being traversed
 data PrettyErrorState = PrettyErrorState
   { -- | The file that is currently loaded
-    peCurrentFile :: !FilePath
+    peCurrentFile :: !File
     -- | Any lines that occurred before the current position, in reverse order
   , peBefore :: ![String]
     -- | Any remaining lines in the current file (requires a loaded file)
@@ -382,11 +382,11 @@ peDefault = PrettyErrorState
   , peCategoriesSeen = Set.empty }
 
 -- | Makes sure the requested file has been loaded
-setFile :: FilePath -> StateT PrettyErrorState IO ()
+setFile :: File -> StateT PrettyErrorState IO ()
 setFile file = do
   s <- get
   when (peCurrentFile s /= file) do
-    contents <- lift $ readFile file
+    contents <- lift $ readFile $ filePathString file
     modify \s -> s
       { peCurrentFile = file
       , peBefore = []
@@ -579,16 +579,16 @@ prettyCompileErrors explainEnabled errs =
           when (explainEnabled && unseen) $ lift do
             putStrLn ""
             printMessageFooter Info $ getExplanation cat
-        if null errorFile then
+        if null $ filePathString errorFile then
           lift $ putStrLn ""
         else
           case errorSpan of
             NoSpan -> do
               s <- get
               when (peLine s /= -1 || peCurrentFile s /= errorFile) $
-                lift $ putStrLn ("\n" ++ errorFile ++ ": ")
+                lift $ putStrLn ("\n" ++ show errorFile ++ ": ")
             Span { spanStart, spanEnd } -> do
-              lift $ putStrLn ("\n" ++ errorFile ++ ":" ++ show spanStart ++ ":")
+              lift $ putStrLn ("\n" ++ show errorFile ++ ":" ++ show spanStart ++ ":")
               setFile errorFile
               let startLine = posLine spanStart
               (context, lines) <- getLineRangeAndContext spanStart spanEnd

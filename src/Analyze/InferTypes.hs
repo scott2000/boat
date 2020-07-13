@@ -13,6 +13,7 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.HashSet (HashSet)
 import qualified Data.HashSet as HashSet
+import Data.Set (Set)
 
 import Control.Monad.State.Strict
 import Control.Monad.Reader
@@ -20,7 +21,7 @@ import Control.Monad.Trans.Maybe
 
 -- (A + a?) : (B + b)
 --   b ~ (A - B) + b'
---   a? ~ b'
+--   a? ~ a0 + a1 + a2 with a0 : A, a1 : B, a2 : b'
 -- (A + a?) : B
 --   assert(A : B)
 --   a? : B
@@ -53,21 +54,25 @@ restoreAnonCount = do
 
 data InferState = InferState
   { iResolvedDecls :: !(PathMap InferredLetDecl)
-  , iKnownDecls :: !(PathMap (Type ()))
-  , iUnknownDecls :: !(PathMap AnonCount)
+  , iFailedDecls :: !(HashSet Path)
+  , iKnownDecls :: !(HashMap Path (MetaR Span Type))
+  , iUnknownDecls :: !(HashMap Path AnonCount)
   , iAnonEffectSubs :: !(Map AnonCount (EffectSet ()))
-  , iAnonEffectBounds :: !(Map AnonCount (HashSet (HashSet Path)))
-  , iAnonTypeSubs :: !(Map AnonCount (Type ()))
+  , iAnonEffectBounds :: !(Map AnonCount (EffectSet ()))
+  , iAnonTypeSubs :: !(Map AnonCount (MetaR () Type))
+  , iAnonTypeBounds :: !(Map AnonCount (Set AnonCount))
   , iAnonTypeKinds :: !(Map AnonCount TypeKind) }
 
 defaultInferState :: InferState
 defaultInferState = InferState
   { iResolvedDecls = HashMap.empty
+  , iFailedDecls = HashSet.empty
   , iKnownDecls = HashMap.empty
   , iUnknownDecls = HashMap.empty
   , iAnonEffectSubs = Map.empty
   , iAnonEffectBounds = Map.empty
   , iAnonTypeSubs = Map.empty
+  , iAnonTypeBounds = Map.empty
   , iAnonTypeKinds = Map.empty }
 
 type EffectSortState = StateT (HashMap Path (HashSet Path)) CompileIO
@@ -553,20 +558,88 @@ inferTypes decls = do
           ""
         else
           " : " ++ intercalate ", " (map show $ HashSet.toList supers)
-    putStrLn "\nInference order:\n"
-    forM_ sortedLets \scc ->
-      putStrLn $ intercalate ", " $ flattenSCC scc <&> \(path, _, _) -> show path
   exitIfErrors
   let
     runInfer = do
-      mapM_ inferDeclSCC sortedLets
+      mapM_ (inferDecls . flattenSCC) sortedLets
       restoreAnonCount
   inferState <- execStateT (runReaderT runInfer inferInfo) defaultInferState
   return InferredDecls
     { iDatas = allDatas decls
     , iLets = iResolvedDecls inferState }
 
-inferDeclSCC :: SCC LetComponent -> Infer ()
-inferDeclSCC _ =
-  addFatal compileError
-    { errorMessage = "type inference not yet implemented" }
+type TypedComponent = (LetComponent, MetaR Span Type)
+
+splitComponents :: [LetComponent]
+                -> Infer ([TypedComponent], [TypedComponent])
+splitComponents = go [] []
+  where
+    go anonList polyList = \case
+      [] ->
+        -- Sort by location so that there is a consistent and reasonable order
+        let getLocation ((_, _ :&: location, _), _) = location in
+        return (sortOn getLocation anonList, polyList)
+      (component@(path, LetDecl { letTypeAscription } :&: _, (deps, vars)) : rest) -> do
+        i <- get
+        if HashSet.null $ deps `HashSet.intersection` iFailedDecls i then
+          case letTypeAscription of
+            Nothing -> do
+              anon <- getNewAnon
+              put i { iUnknownDecls = HashMap.insert path anon $ iUnknownDecls i }
+              go ((component, meta $ TAnon anon) : anonList) polyList rest
+            Just ty -> do
+              put i { iKnownDecls = HashMap.insert path ty $ iKnownDecls i }
+              if HashMap.null vars then
+                -- Since there were no variables used, infer it with any declarations without signatures
+                go ((component, ty) : anonList) polyList rest
+              else
+                go anonList ((component, ty) : polyList) rest
+        else do
+          -- Since a dependency failed, don't even try to resolve this
+          put i { iFailedDecls = HashSet.insert path $ iFailedDecls i }
+          return ([], [])
+
+inferDecls :: [LetComponent] -> Infer ()
+inferDecls components = do
+  liftIO $ putStrLn ""
+
+  (anonList, polyList) <- splitComponents components
+
+  -- First, infer all non-polymorphic declarations
+  when (not $ null anonList) do
+    forM_ anonList inferComponent
+    forM_ anonList generalizeComponent
+    forM_ anonList finalizeComponent
+    resetVariables
+
+  -- Infer each polymorphic binding independently
+  forM_ polyList \poly -> do
+    inferComponent poly
+    finalizeComponent poly
+    resetVariables
+  where
+    resetVariables = do
+      liftIO $ putStrLn "**"
+      modify \i -> i
+        { iAnonEffectSubs = Map.empty
+        , iAnonEffectBounds = Map.empty
+        , iAnonTypeSubs = Map.empty
+        , iAnonTypeBounds = Map.empty
+        , iAnonTypeKinds = Map.empty }
+      restoreAnonCount
+
+inferComponent :: TypedComponent -> Infer ()
+inferComponent ((path, _, _), _) =
+  liftIO $ putStrLn $ ">> " ++ show path
+
+generalizeComponent :: TypedComponent -> Infer ()
+generalizeComponent ((path, _, _), _) =
+  liftIO $ putStrLn $ "-- " ++ show path
+
+finalizeComponent :: TypedComponent -> Infer ()
+finalizeComponent ((path, _, _), _) =
+  liftIO $ putStrLn $ "<< " ++ show path
+
+inferExpr :: MetaR Span Expr -> Infer (MetaR (Typed Span) Expr)
+inferExpr = undefined
+

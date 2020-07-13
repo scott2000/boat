@@ -147,7 +147,7 @@ instance Show InferredDecls where
 data InferredLetDecl = InferredLetDecl
   { iLetBody :: MetaR (Typed Span) Expr
   , iLetConstraints :: [MetaR () Constraint]
-  , iLetInferredType :: Type ()
+  , iLetInferredType :: MetaR () Type
   , iLetInstanceArgs :: [String] }
 
 instance ShowWithName InferredLetDecl where
@@ -238,7 +238,7 @@ moduleAddCoreImports m = m
       use : addCore rest
 
 -- | Adds a 'UseModule' to the module
-modAddUse :: FilePath -> Meta Span UseModule -> Module -> Module
+modAddUse :: File -> Meta Span UseModule -> Module -> Module
 modAddUse file use mod = mod
   { modUses = file :/: use : modUses mod }
 
@@ -266,7 +266,7 @@ instance Show OpPart where
       "(" ++ show path ++ ")"
 
 -- | Adds an 'OpType' declaration to the module
-modAddOpType :: FilePath -> OpType -> Module -> Module
+modAddOpType :: File -> OpType -> Module -> Module
 modAddOpType file ops mod = mod
   { modOpTypes = file :/: ops : modOpTypes mod }
 
@@ -313,7 +313,7 @@ instance ShowWithName OpDecl where
 -- | Adds an 'OpDecl' for a list of operators to the module
 modAddOpDecls
   :: AddError m
-  => FilePath
+  => File
   -> [Meta Span Name]
   -> OpDecl
   -> Module
@@ -344,7 +344,7 @@ instance ShowWithName EffectDecl where
           " : " ++ intercalate ", " (map show effectSuper)
 
 -- | Try to insert a declaration into a 'NameMap' with a given error message for failure
-insertWithError :: AddError m => FilePath -> Meta Span Name -> a -> String -> NameMap a -> m (NameMap a)
+insertWithError :: AddError m => File -> Meta Span Name -> a -> String -> NameMap a -> m (NameMap a)
 insertWithError file (name :&: span) decl errorMessage map = do
   when (name `HashMap.member` map) $
     addError compileError
@@ -356,7 +356,7 @@ insertWithError file (name :&: span) decl errorMessage map = do
 -- | Adds an 'EffectDecl' to the module
 modAddEffect
   :: AddError m
-  => FilePath
+  => File
   -> Meta Span Name
   -> EffectDecl
   -> Module
@@ -386,6 +386,8 @@ instance After (Constraint Span) where
     other ->
       return other
 
+  incomplete = meta $ meta "{error}" `HasKind` NullaryKind
+
 -- | A declaration for a top-level binding of an expression
 data LetDecl = LetDecl
   { letTypeAscription :: Maybe (MetaR Span Type)
@@ -412,7 +414,7 @@ instance ShowWithName LetDecl where
 -- | Adds a @LetDecl@ to the module
 modAddLet
   :: AddError m
-  => FilePath
+  => File
   -> Meta Span Name
   -> LetDecl
   -> Module
@@ -543,7 +545,7 @@ instance ShowWithName DataDecl where
 -- | Adds a 'DataDecl' to the module
 modAddData
   :: AddError m
-  => FilePath
+  => File
   -> Meta Span Name
   -> DataDecl
   -> Module
@@ -555,7 +557,7 @@ modAddData file name decl mod = do
 
 -- | Parses a constraint from a type that would be ambiguous on its own
 disambiguateConstraint :: AddError m
-                       => FilePath                     -- ^ The file being parsed
+                       => File                     -- ^ The file being parsed
                        -> MetaR Span Type              -- ^ The initial part of the constraint
                        -> Maybe (MetaR Span EffectSet) -- ^ The ascription part of the constraint (if any)
                        -> m (Maybe (Constraint Span))  -- ^ The parsed constraint (if valid)
@@ -674,7 +676,7 @@ instance FromTypeOrEffect Effect where
       other -> TEOther $ show other
 
 -- | Extract an unnamed variance from a 'Type' or an 'Effect'
-extractUnnamed :: (AddError m, FromTypeOrEffect a) => FilePath -> Meta Span a -> m (Maybe TypeVariance)
+extractUnnamed :: (AddError m, FromTypeOrEffect a) => File -> Meta Span a -> m (Maybe TypeVariance)
 extractUnnamed file (typeOrEffect :&: span) =
   case te of
     TENamed SymbolOutput ->
@@ -696,7 +698,7 @@ extractUnnamed file (typeOrEffect :&: span) =
 
 -- | Extract a named argument from a 'Type' or an 'Effect'
 extractNamed :: (AddError m, FromTypeOrEffect a)
-             => FilePath
+             => File
              -> Meta Span a
              -> m (Maybe (Meta Span String, TypeVariance))
 extractNamed file (typeOrEffect :&: span) =
@@ -740,8 +742,8 @@ extractNamed file (typeOrEffect :&: span) =
 
 -- | Using an extraction function, extract a single effect from a set of effects
 extractSingleEffect :: AddError m
-                    => FilePath
-                    -> (FilePath -> Meta Span Effect -> m (Maybe a))
+                    => File
+                    -> (File -> Meta Span Effect -> m (Maybe a))
                     -> MetaR Span EffectSet
                     -> m (Maybe a)
 extractSingleEffect file parseEffect (es :&: span) =
@@ -756,7 +758,7 @@ extractSingleEffect file parseEffect (es :&: span) =
       return Nothing
 
 -- | Tries to parse a 'TypeKind' from lists of effect and type arguments
-typeKindFromEffsAndArgs :: AddError m => FilePath -> [MetaR Span EffectSet] -> [MetaR Span Type] -> m (Maybe TypeKind)
+typeKindFromEffsAndArgs :: AddError m => File -> [MetaR Span EffectSet] -> [MetaR Span Type] -> m (Maybe TypeKind)
 typeKindFromEffsAndArgs file effs args = do
   effs <- forM effs $ extractSingleEffect file extractUnnamed
   args <- forM args \ty ->
@@ -766,8 +768,8 @@ typeKindFromEffsAndArgs file effs args = do
 
 -- | Tries to parse a 'TypeKind' given a way to parse the head of the type
 typeKindFromType :: AddError m
-                 => FilePath
-                 -> (FilePath -> MetaR Span Type -> m (Maybe a))
+                 => File
+                 -> (File -> MetaR Span Type -> m (Maybe a))
                  -> MetaR Span Type
                  -> m (Maybe (a, TypeKind))
 typeKindFromType file parseHead typeWithMeta =
@@ -785,7 +787,7 @@ typeKindFromType file parseHead typeWithMeta =
 
 -- | Tries to parse a 'DataSig' from a given type
 namedDataSigFromType :: AddError m
-                     => FilePath                            -- ^ The file where the data type is defined
+                     => File                            -- ^ The file where the data type is defined
                      -> MetaR Span Type                     -- ^ The type containing the signature to parse
                      -> m (Maybe (Meta Span Name, DataSig)) -- ^ The parsed name and signature (if valid)
 namedDataSigFromType file typeWithMeta =
@@ -828,7 +830,7 @@ namedDataSigFromType file typeWithMeta =
 
 -- | Tries to parse a 'DataVariant' from a given type
 variantFromType :: AddError m
-                => FilePath                          -- ^ The file where the data type is defined
+                => File                          -- ^ The file where the data type is defined
                 -> MetaR Span Type                   -- ^ The type containing the signature to parse
                 -> m (Maybe (Meta Span DataVariant)) -- ^ The parsed variant (if valid)
 variantFromType file typeWithMeta =

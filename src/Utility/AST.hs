@@ -175,14 +175,15 @@ withEnds (_ :&: start) (_ :&: end) =
 -- | Metadata that contains file information
 class FileInfo info where
   -- | Extracts the file information
-  infoFile :: info -> FilePath
+  infoFile :: info -> File
 
 -- | Adds file information to a value (usually a 'Span')
 data InFile info = (:/:)
   { -- | The file path where the item can be found
-    getFile' :: !FilePath
+    getFile' :: !File
     -- | The rest of the information
   , unfile :: !info }
+  deriving (Ord, Eq)
 
 instance SpanInfo info => SpanInfo (InFile info) where
   infoSpan = infoSpan . unfile
@@ -197,24 +198,24 @@ instance TypeInfo info => TypeInfo (InFile info) where
   infoType = infoType . unfile
 
 -- | Gets the file information of a value
-getFile :: FileInfo info => Meta info a -> FilePath
+getFile :: FileInfo info => Meta info a -> File
 getFile = infoFile . getInfo
 
 -- | Adds file information to a value
-withFile :: FilePath -> Meta info a -> Meta (InFile info) a
+withFile :: File -> Meta info a -> Meta (InFile info) a
 withFile file (x :&: info) = (x :&: file :/: info)
 
 -- | Metadata that contains type information
 class TypeInfo info where
   -- | Extracts the type information
-  infoType :: info -> Type ()
+  infoType :: info -> MetaR () Type
 
 -- | Adds type information to a value
 data Typed info = (:::)
   { -- | The rest of the information
     untype :: !info
     -- | The type of the item
-  , getType' :: !(Type ()) }
+  , getType' :: !(MetaR () Type) }
 
 instance SpanInfo info => SpanInfo (Typed info) where
   infoSpan = infoSpan . untype
@@ -226,11 +227,11 @@ instance TypeInfo (Typed info) where
   infoType = getType'
 
 -- | Gets the type information of a value
-getType :: TypeInfo info => Meta info a -> Type ()
+getType :: TypeInfo info => Meta info a -> MetaR () Type
 getType = infoType . getInfo
 
 -- | Adds type information to a value
-withType :: Type () -> Meta info a -> Meta (Typed info) a
+withType :: MetaR () Type -> Meta info a -> Meta (Typed info) a
 withType ty (x :&: info) = (x :&: info ::: ty)
 
 -- | Represents the different kinds of AST expression
@@ -281,6 +282,7 @@ aDefault = AfterMap
 class After a where
   -- | Applies the transformation represented by the 'AfterMap'
   after :: Monad m => AfterMap m -> Meta Span a -> m (Meta Span a)
+  incomplete :: Meta Span a
 
 -- | Wrapper for 'aPath' that more closely matches the signature of 'after'
 afterPath :: Monad m => AfterMap m -> ExprKind -> Meta Span Path -> m (Meta Span Path)
@@ -421,6 +423,8 @@ instance After Effect where
       other ->
         return other
 
+  incomplete = meta $ EffectNamed Incomplete
+
 instance Show Effect where
   show = \case
     EffectNamed path -> show path
@@ -462,6 +466,8 @@ instance After (EffectSet Span) where
       Just toEffectSet ->
         forM x \es ->
           mapM (after m) (esToList es) >>= toEffectSet
+
+  incomplete = meta $ esSingleton $ incomplete
 
 instance Show (EffectSet info) where
   show effs =
@@ -553,7 +559,7 @@ esToList EffectSet { esNamed, esPoly, esAnon, esLocal } =
     insert f k (NoCmp v) list = (f k :&: v) : list
 
 -- | Convert a list of effects to an 'EffectSet', giving an warning for duplicate effects
-toUniqueEffectSet :: AddError m => FilePath -> [Meta Span Effect] -> m (EffectSet Span)
+toUniqueEffectSet :: AddError m => File -> [Meta Span Effect] -> m (EffectSet Span)
 toUniqueEffectSet file = go esEmpty
   where
     go es [] =
@@ -678,6 +684,8 @@ instance After (Type Span) where
         TUnassociated <$> afterUnassociated m u
       other ->
         return other
+
+  incomplete = meta $ TNamed Incomplete
 
 instance ShowExpr (Type info) where
   isSimple = \case
@@ -944,6 +952,8 @@ instance After (Expr Span) where
           expr <- aWithBindings m (catMaybes $ concatMap bindingsForPat pats) $ after m expr
           return (pats, expr)
 
+  incomplete = meta $ EGlobal Incomplete
+
 instance Eq (Expr info) where
   EValue v0 == EValue v1 =
     v0 == v1
@@ -1052,6 +1062,8 @@ instance After (Pattern Span) where
       other ->
         return other
 
+  incomplete = meta $ PCons (meta Incomplete) []
+
 instance Eq (Pattern info) where
   PUnit   == PUnit   = True
   PAny    == PAny    = True
@@ -1110,7 +1122,7 @@ bindingsForPat pat =
       bindingsForPat lhs ++ bindingsForPat rhs
 
 -- | Assert that there are no duplicate bindings in a set of patterns
-assertUniqueBindings :: (AddError m, SpanInfo info) => FilePath -> [MetaR info Pattern] -> m ()
+assertUniqueBindings :: (AddError m, SpanInfo info) => File -> [MetaR info Pattern] -> m ()
 assertUniqueBindings file pats =
   evalStateT (void $ runMaybeT $ mapM_ check pats) Set.empty
   where

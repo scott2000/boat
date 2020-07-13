@@ -140,7 +140,7 @@ convertParseErrors bundle =
               | errLen == 1 = startPos
               | otherwise = pstateSourcePos $ reachOffsetNoLine (o+errLen-1) posState'
           addError compileError
-            { errorFile = file
+            { errorFile = File file
             , errorSpan = Span
               (Position (unPos $ sourceLine startPos) (unPos $ sourceColumn startPos))
               (Position (unPos $ sourceLine endPos) (unPos (sourceColumn endPos) + 1))
@@ -213,9 +213,9 @@ getLevel :: Parser Int
 getLevel = subtract 1 . unPos <$> L.indentLevel
 
 -- | Gets the current file being parsed
-getFilePath :: Parser FilePath
+getFilePath :: Parser File
 getFilePath =
-  sourceName . pstateSourcePos . statePosState <$> getParserState
+  File . sourceName . pstateSourcePos . statePosState <$> getParserState
 
 -- | Adds new bindings for local variables to the parser to be run
 withBindings :: [Maybe String] -> Parser a -> Parser a

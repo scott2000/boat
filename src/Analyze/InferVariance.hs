@@ -233,7 +233,7 @@ inferDeclSCC scc = do
 type DataInfo = HashMap String (Maybe (ExprKind, DataArg))
 
 -- | Constructs a 'DataInfo' map from a 'DataSig'
-makeDataInfo :: AddError m => FilePath -> DataSig -> m DataInfo
+makeDataInfo :: AddError m => File -> DataSig -> m DataInfo
 makeDataInfo file DataSig { dataEffs, dataArgs } =
   execStateT addAll HashMap.empty
   where
@@ -277,7 +277,7 @@ instance Show MatchKindsError where
       "  to a type constructor expecting `" ++ show expected ++ "`"
 
 -- | Emits a 'MatchKindsError' in the given file at the given span
-addMatchError :: AddError m => FilePath -> Span -> MatchKindsError -> m ()
+addMatchError :: AddError m => File -> Span -> MatchKindsError -> m ()
 addMatchError file span err =
   addError compileError
     { errorFile = file
@@ -342,7 +342,7 @@ matchKinds resolveAnon expected@(TypeKind eEffs eArgs) (TypeKind aEffs aArgs) =
       | otherwise = unifyFail >> return act
 
 -- | Adds constraints for a data type's variant
-generateConstraints :: FilePath -> DataInfo -> Meta Span DataVariant -> Infer ()
+generateConstraints :: File -> DataInfo -> Meta Span DataVariant -> Infer ()
 generateConstraints file dataInfo ((_, types) :&: _) =
   forM_ types $ inferTypeMatchKinds [] (defaultConstraint VOutput) NullaryKind
   where

@@ -12,6 +12,8 @@ module Utility.Basics
   , pattern Core
   , pattern Local
   , pattern EmptyPath
+  , pattern Incomplete
+  , File (..)
   , pattern NoFile
 
     -- * Global Compiler State
@@ -165,9 +167,32 @@ pattern Underscore name = Identifier ('_':name)
 pattern EmptyPath :: Path
 pattern EmptyPath = DefaultPath []
 
+-- | A path for an item that has a delayed error
+pattern Incomplete :: Path
+pattern Incomplete = Local (Identifier "{error}")
+
+-- | A wrapper around 'FilePath' with short file paths being sorted first
+newtype File = File
+  { filePathString :: FilePath }
+  deriving Eq
+
+instance Ord File where
+  File a `compare` File b =
+    a `shortLast` b
+    where
+      -- Short file paths should appear last
+      []     `shortLast` []     = EQ
+      []     `shortLast` _      = GT
+      _      `shortLast` []     = LT
+      (a:as) `shortLast` (b:bs) =
+        a `compare` b <> as `shortLast` bs
+
+instance Show File where
+  show = filePathString
+
 -- | An empty 'FilePath' for missing file information (e.g. for generated code)
-pattern NoFile :: FilePath
-pattern NoFile = ""
+pattern NoFile :: File
+pattern NoFile = File ""
 
 -- | Helper function for 'parsePackageName' and 'parseModuleName'
 parseIdentIn :: String -> Bool -> String -> Either String Name
@@ -321,7 +346,7 @@ getNewAnon = compileModifyIO \r -> do
 -- | An error encountered during compilation
 data CompileError = CompileError
   { -- | The file in which the error occurred (optional)
-    errorFile :: !FilePath
+    errorFile :: !File
     -- | The span at which the error occurred (requires a file)
   , errorSpan :: !Span
     -- | The kind of error that occurred
@@ -336,19 +361,12 @@ data CompileError = CompileError
 
 instance Ord CompileError where
   a `compare` b =
-    errorFile a `shortLast` errorFile b
+    errorFile a `compare` errorFile b
     <> errorSpan a `compare` errorSpan b
     <> errorKind a `compare` errorKind b
     <> errorCategory a `compare` errorCategory b
     <> errorExplain a `compare` errorExplain b
     <> errorMessage a `compare` errorMessage b
-    where
-      -- Short file paths should appear last
-      []     `shortLast` []     = EQ
-      []     `shortLast` _      = GT
-      _      `shortLast` []     = LT
-      (a:as) `shortLast` (b:bs) =
-        a `compare` b <> as `shortLast` bs
 
 -- | A default 'CompileError' containing everything but a message
 compileError :: CompileError

@@ -299,7 +299,7 @@ defaultNameState nameTable = NameState
   , importId = 0 }
 
 -- | Gets a unique identifier for an import and tracks its use
-uniqueId :: FilePath -> Span -> NR ImportId
+uniqueId :: File -> Span -> NR ImportId
 uniqueId _ NoSpan =
   return hiddenImport
 uniqueId file span = do
@@ -413,9 +413,9 @@ duplicateMessage :: Meta (InFile Span) a -> String -> String
 duplicateMessage (_ :&: otherFile :/: otherSpan) baseMessage =
   baseMessage ++
     if isSpanValid otherSpan then
-      baseMessage ++ "(other at " ++ otherFile ++ ":" ++ show otherSpan ++ ")"
+      baseMessage ++ "(other at " ++ show otherFile ++ ":" ++ show otherSpan ++ ")"
     else
-      baseMessage ++ "(other in " ++ otherFile ++ ")"
+      baseMessage ++ "(other in " ++ show otherFile ++ ")"
 
 -- | Resolve an 'EffectDecl'
 insertEffect :: Path -> Meta (InFile Span) EffectDecl -> NR ()
@@ -713,7 +713,7 @@ nameResolveEach path mod =
         LetDecl { letTypeAscription, letConstraints, letBody }
 
 -- | Resolve a single 'Path'
-nameResolvePath :: FilePath -> (Item -> Bool) -> String -> Meta Span Path -> NR Path
+nameResolvePath :: File -> (Item -> Bool) -> String -> Meta Span Path -> NR Path
 nameResolvePath _ _ _ (Path { unpath = [] } :&: _) =
   compilerBug "nameResolvePath called on empty path"
 nameResolvePath file check kind (path@Path { unpath = parts@(head:rest) } :&: span) = do
@@ -813,7 +813,7 @@ nameResolvePath file check kind (path@Path { unpath = parts@(head:rest) } :&: sp
           suggestionMessage "did you forget to `use` it?" nearbyItems
 
 -- | Like 'nameResolvePath', but directly outputs a 'Path' with the original 'Span'
-nameResolveMetaPath :: FilePath -> (Item -> Bool) -> String -> Meta Span Path -> NR (Meta Span Path)
+nameResolveMetaPath :: File -> (Item -> Bool) -> String -> Meta Span Path -> NR (Meta Span Path)
 nameResolveMetaPath file check kind path =
   copyInfo path <$> nameResolvePath file check kind path
 
@@ -870,12 +870,12 @@ suggestionMessage defaultMessage = \case
     defaultMessage ++ "\n(similar names in scope: " ++ intercalate ", " (map show names) ++ ")"
 
 -- | Resolve any kind of expression
-nameResolveAfter :: After a => Path -> FilePath -> Meta Span a -> NR (Meta Span a)
+nameResolveAfter :: After a => Path -> File -> Meta Span a -> NR (Meta Span a)
 nameResolveAfter basePath file =
   after $ nameResolveAfterMap basePath file
 
 -- | Resolve a type given a list of valid type parameters
-nameResolveRestrictedType :: Path -> FilePath -> MetaR Span Type -> NR (MetaR Span Type)
+nameResolveRestrictedType :: Path -> File -> MetaR Span Type -> NR (MetaR Span Type)
 nameResolveRestrictedType basePath file =
   after (nameResolveAfterMap basePath file)
     { aPoly = checkLocal }
@@ -893,7 +893,7 @@ nameResolveRestrictedType basePath file =
       return local
 
 -- | A mapping that resolves all paths in an expression
-nameResolveAfterMap :: Path -> FilePath -> AfterMap NR
+nameResolveAfterMap :: Path -> File -> AfterMap NR
 nameResolveAfterMap basePath file = aDefault
   { aUseExpr = handleUseExpr
   , aWithBindings = withLocals

@@ -14,7 +14,7 @@ import Data.Maybe
 parseSingleFile :: FilePath -> CompileIO Module
 parseSingleFile path = do
   file <- liftIO $ readFile path
-  let parserT = runCustomParser $ parseFile path
+  let parserT = runCustomParser $ parseFile $ File path
   runParserT parserT path file >>= \case
     Left err -> do
       convertParseErrors err
@@ -23,7 +23,7 @@ parseSingleFile path = do
       return m
 
 -- | Parse a single 'Module' from file
-parseFile :: FilePath -> Parser Module
+parseFile :: File -> Parser Module
 parseFile file = do
   trySpaces >>= \case
     Right NoSpace ->
