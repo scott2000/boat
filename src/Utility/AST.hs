@@ -42,6 +42,7 @@ module Utility.AST
   , esSize
   , esInsert
   , esMember
+  , esDelete
   , esLookup
   , esHideInfo
   , esToList
@@ -51,7 +52,7 @@ module Utility.AST
 
     -- * Functions and Type Applications
   , ReducedApp (..)
-  , reduceApply
+  , tryReduceApply
   , reduceApplyNoInfix
   , findBase
   , expandFunction
@@ -523,6 +524,19 @@ esMember eff es =
     EffectLocal anon ->
       anon `Map.member` esLocal es
 
+-- | Delete an 'Effect' from an 'EffectSet'
+esDelete :: Effect -> EffectSet info -> EffectSet info
+esDelete eff es =
+  case eff of
+    EffectNamed name ->
+      es { esNamed = HashMap.delete name $ esNamed es }
+    EffectPoly name ->
+      es { esPoly = HashMap.delete name $ esPoly es }
+    EffectAnon anon ->
+      es { esAnon = Map.delete anon $ esAnon es }
+    EffectLocal anon ->
+      es { esLocal = Map.delete anon $ esLocal es }
+
 -- | Get the information associated with an 'Effect' in an 'EffectSet', if it is present
 esLookup :: Effect -> EffectSet info -> Maybe info
 esLookup eff es =
@@ -749,23 +763,23 @@ findBlank (ty :&: span) =
           Nothing
 
 -- | A form of a 'Type' with all applications reduced
-data ReducedApp = ReducedApp
-  { reducedType :: MetaR Span Type
-  , reducedEffs :: [MetaR Span EffectSet]
-  , reducedArgs :: [MetaR Span Type] }
+data ReducedApp info = ReducedApp
+  { reducedType :: MetaR info Type
+  , reducedEffs :: [MetaR info EffectSet]
+  , reducedArgs :: [MetaR info Type] }
 
 -- | Try to reduce all applications, otherwise return the conflicting infix operators
-reduceApply :: MetaR Span Type -> Either (MetaR Span Type, MetaR Span Type) ReducedApp
-reduceApply typeWithMeta =
+tryReduceApply :: MetaR info Type -> Either (MetaR info Type, MetaR info Type) (ReducedApp info)
+tryReduceApply typeWithMeta =
   case unmeta typeWithMeta of
     TApp a b -> do
-      ReducedApp base effs args <- reduceApply a
+      ReducedApp base effs args <- tryReduceApply a
       Right $ ReducedApp base effs (args ++ [b])
     TEffApp ty e -> do
-      ReducedApp base effs args <- reduceApply ty
+      ReducedApp base effs args <- tryReduceApply ty
       Right $ ReducedApp base (effs ++ [e]) args
     TUnassociated (UParen ty) ->
-      reduceApply ty
+      tryReduceApply ty
     TUnassociated (UUnaryOp a (TUnassociated (UBinOp b _ _) :&: _)) ->
       Left (a, b)
     TUnassociated (UBinOp a _ (TUnassociated (UBinOp b _ _) :&: _)) ->
@@ -778,7 +792,7 @@ reduceApply typeWithMeta =
       Right $ ReducedApp typeWithMeta [] []
 
 -- | Try to reduce all applications but don't allow infix operators
-reduceApplyNoInfix :: MetaR Span Type -> Either (MetaR Span Type) ReducedApp
+reduceApplyNoInfix :: MetaR info Type -> Either (MetaR info Type) (ReducedApp info)
 reduceApplyNoInfix typeWithMeta =
   case unmeta typeWithMeta of
     TApp a b -> do

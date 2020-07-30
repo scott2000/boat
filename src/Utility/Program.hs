@@ -557,7 +557,7 @@ modAddData file name decl mod = do
 
 -- | Parses a constraint from a type that would be ambiguous on its own
 disambiguateConstraint :: AddError m
-                       => File                     -- ^ The file being parsed
+                       => File                         -- ^ The file being parsed
                        -> MetaR Span Type              -- ^ The initial part of the constraint
                        -> Maybe (MetaR Span EffectSet) -- ^ The ascription part of the constraint (if any)
                        -> m (Maybe (Constraint Span))  -- ^ The parsed constraint (if valid)
@@ -787,11 +787,11 @@ typeKindFromType file parseHead typeWithMeta =
 
 -- | Tries to parse a 'DataSig' from a given type
 namedDataSigFromType :: AddError m
-                     => File                            -- ^ The file where the data type is defined
+                     => File                                -- ^ The file where the data type is defined
                      -> MetaR Span Type                     -- ^ The type containing the signature to parse
                      -> m (Maybe (Meta Span Name, DataSig)) -- ^ The parsed name and signature (if valid)
 namedDataSigFromType file typeWithMeta =
-  case reduceApply typeWithMeta of
+  case tryReduceApply typeWithMeta of
     Left (_, _ :&: span) -> do
       addError compileError
         { errorFile = file
@@ -830,11 +830,11 @@ namedDataSigFromType file typeWithMeta =
 
 -- | Tries to parse a 'DataVariant' from a given type
 variantFromType :: AddError m
-                => File                          -- ^ The file where the data type is defined
+                => File                              -- ^ The file where the data type is defined
                 -> MetaR Span Type                   -- ^ The type containing the signature to parse
                 -> m (Maybe (Meta Span DataVariant)) -- ^ The parsed variant (if valid)
 variantFromType file typeWithMeta =
-  case reduceApply typeWithMeta of
+  case tryReduceApply typeWithMeta of
     Left (a, b) -> do
       addError compileError
         { errorFile = file

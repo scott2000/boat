@@ -14,26 +14,21 @@ import qualified Data.Map.Strict as Map
 import Data.HashSet (HashSet)
 import qualified Data.HashSet as HashSet
 import Data.Set (Set)
+import qualified Data.Set as Set
 
+import Control.Applicative
 import Control.Monad.State.Strict
 import Control.Monad.Reader
 import Control.Monad.Trans.Maybe
-
--- (A + a?) : (B + b)
---   b ~ (A - B) + b'
---   a? ~ a0 + a1 + a2 with a0 : A, a1 : B, a2 : b'
--- (A + a?) : B
---   assert(A : B)
---   a? : B
-
-type Infer = ReaderT InferInfo (StateT InferState CompileIO)
 
 data InferInfo = InferInfo
   { iAllDecls :: !AllDecls
   , iEffectSupers :: !(HashMap Path (HashSet Path))
   , iInitialAnonCount :: !AnonCount
   , iLocalEffectSupers :: !(HashMap String (HashSet Path))
-  , iLocalTypeKinds :: !(HashMap String TypeKind) }
+  , iLocalTypeKinds :: !(HashMap String TypeKind)
+  , iKnownDecls :: !(HashMap Path (MetaR TypeKind Type))
+  , iUnknownDecls :: !(HashMap Path AnonCount) }
 
 getInferInfo :: AllDecls -> CompileIO InferInfo
 getInferInfo decls = do
@@ -44,36 +39,13 @@ getInferInfo decls = do
     , iEffectSupers
     , iInitialAnonCount
     , iLocalEffectSupers = HashMap.empty
-    , iLocalTypeKinds = HashMap.empty }
+    , iLocalTypeKinds = HashMap.empty
+    , iKnownDecls = HashMap.empty
+    , iUnknownDecls = HashMap.empty }
 
-restoreAnonCount :: Infer ()
-restoreAnonCount = do
-  compileAnonCount <- asks iInitialAnonCount
-  compileModify \s -> s
-    { compileAnonCount }
-
-data InferState = InferState
-  { iResolvedDecls :: !(PathMap InferredLetDecl)
-  , iFailedDecls :: !(HashSet Path)
-  , iKnownDecls :: !(HashMap Path (MetaR Span Type))
-  , iUnknownDecls :: !(HashMap Path AnonCount)
-  , iAnonEffectSubs :: !(Map AnonCount (EffectSet ()))
-  , iAnonEffectBounds :: !(Map AnonCount (EffectSet ()))
-  , iAnonTypeSubs :: !(Map AnonCount (MetaR () Type))
-  , iAnonTypeBounds :: !(Map AnonCount (Set AnonCount))
-  , iAnonTypeKinds :: !(Map AnonCount TypeKind) }
-
-defaultInferState :: InferState
-defaultInferState = InferState
-  { iResolvedDecls = HashMap.empty
-  , iFailedDecls = HashSet.empty
-  , iKnownDecls = HashMap.empty
-  , iUnknownDecls = HashMap.empty
-  , iAnonEffectSubs = Map.empty
-  , iAnonEffectBounds = Map.empty
-  , iAnonTypeSubs = Map.empty
-  , iAnonTypeBounds = Map.empty
-  , iAnonTypeKinds = Map.empty }
+withDecls :: HashMap Path (MetaR TypeKind Type) -> HashMap Path AnonCount -> Infer a -> Infer a
+withDecls iKnownDecls iUnknownDecls inner = ReaderT \i ->
+  runReaderT inner i { iKnownDecls, iUnknownDecls }
 
 type EffectSortState = StateT (HashMap Path (HashSet Path)) CompileIO
 
@@ -140,8 +112,8 @@ lookupDecl'' :: AddFatal m => AllDecls -> Path -> m TypeKind
 lookupDecl'' decls = lookupDecl \path -> do
   return $ HashMap.lookup path $ allDatas decls
 
-matchTypeKind :: TypeKind -> TypeKind -> Maybe TypeKind
-matchTypeKind (TypeKind eEffs eArgs) (TypeKind aEffs aArgs)
+unifyTypeKind :: TypeKind -> TypeKind -> Maybe TypeKind
+unifyTypeKind (TypeKind eEffs eArgs) (TypeKind aEffs aArgs)
   | length eArgs /= length aArgs = Nothing
   | otherwise =
     TypeKind <$> matchEffs eEffs aEffs <*> zipWithM matchArg eArgs aArgs
@@ -152,7 +124,7 @@ matchTypeKind (TypeKind eEffs eArgs) (TypeKind aEffs aArgs)
       (:) <$> matchVariance e a <*> matchEffs es as
 
     matchArg (DataArg eVar eKind) (DataArg aVar aKind) =
-      DataArg <$> matchVariance eVar aVar <*> matchTypeKind eKind aKind
+      DataArg <$> matchVariance eVar aVar <*> unifyTypeKind eKind aKind
 
     matchVariance VInvariant act = Just act
     matchVariance exp VInvariant = Just exp
@@ -183,7 +155,7 @@ checkAndDeps decls (path, decl@(LetDecl { letTypeAscription, letConstraints, let
                 Just (oldKind :&: oldSpan) -> do
                   let
                     (map', suffix) =
-                      case matchTypeKind kind oldKind of
+                      case unifyTypeKind kind oldKind of
                         Nothing -> (map, " (and the kinds are incompatible!)")
                         Just k  -> (HashMap.insert name (k :&: oldSpan) map, "")
                   addError compileError
@@ -342,7 +314,7 @@ checkAndDeps decls (path, decl@(LetDecl { letTypeAscription, letConstraints, let
                           insert $ Just kind
                         Just (constraintKind :&: _) ->
                           -- There was a constraint, so check if it matches
-                          case matchTypeKind kind constraintKind of
+                          case unifyTypeKind kind constraintKind of
                             Just newKind ->
                               -- The constraint matched, so add the new kind
                               insert $ Just newKind
@@ -363,7 +335,7 @@ checkAndDeps decls (path, decl@(LetDecl { letTypeAscription, letConstraints, let
                       matchKinds' span kind oldKind
                     Just _ ->
                       -- It's being used in the type signature, so unify it with the previous usage
-                      case matchTypeKind kind oldKind of
+                      case unifyTypeKind kind oldKind of
                         Just newKind ->
                           -- The kinds matched successfully, so update the type kind
                           insert $ Just newKind
@@ -568,55 +540,85 @@ inferTypes decls = do
     { iDatas = allDatas decls
     , iLets = iResolvedDecls inferState }
 
-type TypedComponent = (LetComponent, MetaR Span Type)
+type Infer = ReaderT InferInfo (StateT InferState CompileIO)
 
-splitComponents :: [LetComponent]
-                -> Infer ([TypedComponent], [TypedComponent])
-splitComponents = go [] []
+data InferState = InferState
+  { iResolvedDecls :: !(PathMap InferredLetDecl)
+  , iFailedDecls :: !(HashSet Path)
+  , iAnonEffectSubs :: !(Map AnonCount (EffectSet ()))
+  , iAnonEffectBounds :: !(Map AnonCount (EffectSet ()))
+  , iAnonTypeSubs :: !(Map AnonCount (MetaR TypeKind Type))
+  , iAnonTypeBounds :: !(Map AnonCount (Set AnonCount))
+  , iAnonTypeKinds :: !(Map AnonCount TypeKind) }
+
+defaultInferState :: InferState
+defaultInferState = InferState
+  { iResolvedDecls = HashMap.empty
+  , iFailedDecls = HashSet.empty
+  , iAnonEffectSubs = Map.empty
+  , iAnonEffectBounds = Map.empty
+  , iAnonTypeSubs = Map.empty
+  , iAnonTypeBounds = Map.empty
+  , iAnonTypeKinds = Map.empty }
+
+restoreAnonCount :: Infer ()
+restoreAnonCount = do
+  compileAnonCount <- asks iInitialAnonCount
+  compileModify \s -> s
+    { compileAnonCount }
+
+type TypedComponent = (LetComponent, MetaR TypeKind Type)
+
+splitComponents :: (([TypedComponent], [TypedComponent]) -> Infer ())
+                -> [LetComponent]
+                -> Infer ()
+splitComponents inner = go HashMap.empty HashMap.empty [] []
   where
-    go anonList polyList = \case
+    go known unknown anonList polyList = \case
       [] ->
         -- Sort by location so that there is a consistent and reasonable order
         let getLocation ((_, _ :&: location, _), _) = location in
-        return (sortOn getLocation anonList, polyList)
+        withDecls known unknown $ inner (sortOn getLocation anonList, polyList)
       (component@(path, LetDecl { letTypeAscription } :&: _, (deps, vars)) : rest) -> do
         i <- get
         if HashSet.null $ deps `HashSet.intersection` iFailedDecls i then
           case letTypeAscription of
             Nothing -> do
               anon <- getNewAnon
-              put i { iUnknownDecls = HashMap.insert path anon $ iUnknownDecls i }
-              go ((component, meta $ TAnon anon) : anonList) polyList rest
+              let
+                unknown' = HashMap.insert path anon unknown
+                anonList' = (component, TAnon anon :&: NullaryKind) : anonList
+              go known unknown' anonList' polyList rest
             Just ty -> do
-              put i { iKnownDecls = HashMap.insert path ty $ iKnownDecls i }
+              ty <- resolveKind ty
+              let known' = HashMap.insert path ty known
               if HashMap.null vars then
                 -- Since there were no variables used, infer it with any declarations without signatures
-                go ((component, ty) : anonList) polyList rest
+                go known' unknown ((component, ty) : anonList) polyList rest
               else
-                go anonList ((component, ty) : polyList) rest
+                go known' unknown anonList ((component, ty) : polyList) rest
         else do
           -- Since a dependency failed, don't even try to resolve this
           put i { iFailedDecls = HashSet.insert path $ iFailedDecls i }
-          return ([], [])
+          return ()
 
 inferDecls :: [LetComponent] -> Infer ()
-inferDecls components = do
-  liftIO $ putStrLn ""
+inferDecls =
+  splitComponents \(anonList, polyList) -> do
+    liftIO $ putStrLn ""
 
-  (anonList, polyList) <- splitComponents components
+    -- First, infer all non-polymorphic declarations
+    when (not $ null anonList) do
+      forM_ anonList inferComponent
+      forM_ anonList generalizeComponent
+      forM_ anonList finalizeComponent
+      resetVariables
 
-  -- First, infer all non-polymorphic declarations
-  when (not $ null anonList) do
-    forM_ anonList inferComponent
-    forM_ anonList generalizeComponent
-    forM_ anonList finalizeComponent
-    resetVariables
-
-  -- Infer each polymorphic binding independently
-  forM_ polyList \poly -> do
-    inferComponent poly
-    finalizeComponent poly
-    resetVariables
+    -- Infer each polymorphic binding independently
+    forM_ polyList \poly -> do
+      inferComponent poly
+      finalizeComponent poly
+      resetVariables
   where
     resetVariables = do
       liftIO $ putStrLn "**"
@@ -642,4 +644,161 @@ finalizeComponent ((path, _, _), _) =
 
 inferExpr :: MetaR Span Expr -> Infer (MetaR (Typed Span) Expr)
 inferExpr = undefined
+
+-- (A + a?) : (B + b)
+--   b ~ (A - B) + b'
+--   a? ~ a0 + a1 + a2 with a0 : A, a1 : B, a2 : b'
+-- (A + a?) : B
+--   assert(A : B)
+--   a? : B
+
+unifyKinds :: TypeKind -> TypeKind -> MaybeT Infer TypeKind
+unifyKinds exp act =
+  MaybeT $ return $ unifyTypeKind exp act
+
+matchKinds' :: TypeKind -> TypeKind -> MaybeT Infer ()
+matchKinds' expected actual =
+  matchKinds missingVariance expected actual >>= \case
+    Nothing -> return ()
+    Just _ -> empty
+  where
+    missingVariance _ _ =
+      compilerBug "matchKinds' called with uninferred variance during type inference"
+
+unifyAnonKinds :: AnonCount -> AnonCount -> MaybeT Infer TypeKind
+unifyAnonKinds exp act = do
+  i@InferState { iAnonTypeKinds } <- get
+  let
+    expKind = mapGet exp iAnonTypeKinds
+    actKind = mapGet act iAnonTypeKinds
+  kind <- unifyKinds expKind actKind
+  put i
+    { iAnonTypeKinds = Map.insert exp kind $ Map.insert act kind iAnonTypeKinds }
+  return kind
+
+substituteForall :: String -> Effect -> MetaR TypeKind Type -> MetaR TypeKind Type
+substituteForall name sub = goTy
+  where
+    eff = EffectPoly name
+    goTy =
+      fmap \case
+        TApp a b ->
+          TApp (goTy a) (goTy b)
+        TEffApp ty (es :&: info) ->
+          let
+            es' | esMember eff es = esInsert (sub :&: NullaryKind) $ esDelete eff es
+                | otherwise       = es
+          in
+            TEffApp (goTy ty) (es' :&: info)
+        TForEff e ty
+          | unmeta e == name ->
+            TForEff e ty
+          | otherwise ->
+            TForEff e (goTy ty)
+        other -> other
+
+resolveKind :: MetaR a Type -> Infer (MetaR TypeKind Type)
+resolveKind (ty :&: _) =
+  case ty of
+    TApp a b -> do
+      a <- resolveKind a
+      b <- resolveKind b
+      forM
+
+(<:) :: MetaR TypeKind Type -> MetaR TypeKind Type -> MaybeT Infer ()
+lower <: upper = do
+  -- TODO unify kinds
+  lower <- subAnon lower
+  upper <- subAnon upper
+  checkSubstituted lower upper
+  where
+    subAnon ty =
+      case unmeta ty of
+        TAnon anon -> do
+          subs <- gets iAnonTypeSubs
+          case Map.lookup anon subs of
+            Nothing -> return ty
+            Just ty -> return ty
+        _ -> return ty
+
+checkSubstituted :: MetaR TypeKind Type -> MetaR TypeKind Type -> MaybeT Infer ()
+checkSubstituted lower upper =
+  case (unmeta lower, unmeta upper) of
+    (TAnon a, TAnon b) -> do
+      modify \i -> i
+        { iAnonTypeBounds = Map.insertWith (<>) a (Set.singleton b) $ iAnonTypeBounds i }
+      void $ unifyAnonKinds a b
+    (TAnon a, _) -> do
+      lower <- lift $ copyStructure upper
+      checkSubstituted lower upper
+      substitute a lower
+    (_, TAnon b) -> do
+      upper <- lift $ copyStructure lower
+      checkSubstituted lower upper
+      substitute b upper
+    (TForEff (e :&: _) ty, _) -> do
+      anon <- getNewAnon
+      substituteForall e (EffectAnon anon) ty <: upper
+    (_, TForEff (e :&: _) ty) -> do
+      anon <- getNewAnon
+      lower <: substituteForall e (EffectLocal anon) ty
+    (a, b) ->
+      guard $ a == b
+
+substitute :: AnonCount -> MetaR TypeKind Type -> MaybeT Infer ()
+substitute _ (TAnon _ :&: _) =
+  compilerBug "substitute called with two anonymous type variables"
+substitute anon ty = do
+  i <- get
+  -- TODO check if this is the right "unify"
+  kind <- unifyKinds (getInfo ty) $ mapGet anon $ iAnonTypeKinds i
+  put i
+    { iAnonTypeSubs = Map.insert anon ty $ iAnonTypeSubs i
+    , iAnonTypeBounds = Map.delete anon $ iAnonTypeBounds i
+    , iAnonTypeKinds = Map.insert anon kind $ iAnonTypeKinds i }
+  case Map.lookup anon $ iAnonTypeBounds i of
+    Nothing ->
+      return ()
+    Just bounds ->
+      forM_ bounds \bound -> do
+        ty <- lift $ copyStructure ty
+        iAnonTypeKinds <- gets iAnonTypeKinds
+        checkSubstituted ty (TAnon bound :&: mapGet bound iAnonTypeKinds)
+        substitute bound ty
+
+copyStructure :: MetaR TypeKind Type -> Infer (MetaR TypeKind Type)
+copyStructure typeWithMeta =
+  evalStateT (copyTy typeWithMeta) Map.empty
+  where
+    copyTy (ty :&: kind) =
+      case ty of
+        TAnon anon -> do
+          m <- get
+          case Map.lookup anon m of
+            Nothing -> do
+              anon' <- getNewAnon
+              put $ Map.insert anon anon' m
+              lift do
+                i@InferState { iAnonTypeKinds } <- get
+                let kind = mapGet anon iAnonTypeKinds
+                put i
+                  { iAnonTypeKinds = Map.insert anon' kind iAnonTypeKinds }
+                return $ withInfo kind $ TAnon anon'
+            Just anon' -> lift do
+              kind <- mapGet anon' <$> gets iAnonTypeKinds
+              return $ withInfo kind $ TAnon anon'
+        TApp a b -> do
+          a <- copyTy a
+          b <- copyTy b
+          return $ withInfo kind $ TApp a b
+        TEffApp ty _ -> do
+          ty <- copyTy ty
+          e <- newEff
+          return $ withInfo kind $ TEffApp ty e
+        TForEff _ ty ->
+          copyTy ty
+        other ->
+          return $ withInfo kind other
+
+    newEff = withInfo NullaryKind . esSingleton . withInfo NullaryKind . EffectAnon <$> getNewAnon
 

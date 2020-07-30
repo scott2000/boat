@@ -27,6 +27,7 @@ import Data.List (intercalate, stripPrefix)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Control.Monad.State.Strict
+import Control.Exception
 
 import System.Console.ANSI
 
@@ -386,7 +387,10 @@ setFile :: File -> StateT PrettyErrorState IO ()
 setFile file = do
   s <- get
   when (peCurrentFile s /= file) do
-    contents <- lift $ readFile $ filePathString file
+    contents <- lift do
+      readFile (filePathString file) `catch` \(_ :: IOException) ->
+        -- If there is an error reading the file, pretend it's empty so the error still gets displayed
+        return $ unlines $ repeat "<file not found>"
     modify \s -> s
       { peCurrentFile = file
       , peBefore = []

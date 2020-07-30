@@ -20,6 +20,7 @@ module Utility.Basics
   , CompileOptions (..)
   , CompileState (..)
   , initialCompileState
+  , CompileException (..)
   , CompileIO (..)
   , MonadCompile (..)
   , liftIO
@@ -64,7 +65,10 @@ module Utility.Basics
   , lowerFirst
 
     -- * General Helper Functions
+  , mapGet
   , hashMapGet
+  , splitLongerFromEnd
+  , zipFromEndM
   , (<&>)
   ) where
 
@@ -80,6 +84,8 @@ import Data.Hashable
 
 import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HashMap
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.HashSet (HashSet)
 import qualified Data.HashSet as HashSet
 import Data.Set (Set)
@@ -89,6 +95,8 @@ import Control.Monad.State.Strict
 import Control.Monad.Writer.Strict
 import Control.Monad.Reader
 import Control.Monad.Trans.Maybe
+import Control.Monad.Fail
+import Control.Exception
 
 import Text.Megaparsec (ParsecT, Stream)
 
@@ -291,10 +299,18 @@ compileModify f = compileModifyIO \r ->
 compileModifyIO :: MonadCompile m => (IORef CompileState -> IO a) -> m a
 compileModifyIO = liftCompile . CompileIO . ReaderT . (. snd)
 
+data CompileException = CompileException String
+  deriving Show
+
+instance Exception CompileException
+
 -- | 'StateT' used for all stages of compilation to store state
 newtype CompileIO a = CompileIO
   { runCompileIO :: ReaderT (CompileOptions, IORef CompileState) IO a }
   deriving (Functor, Applicative, Monad, MonadIO)
+
+instance MonadFail CompileIO where
+  fail = liftIO . throwIO . CompileException
 
 -- | A record used to store state throughout compilation
 data CompileState = CompileState
@@ -612,6 +628,14 @@ lowerFirst :: String -> String
 lowerFirst (x:xs) = toLower x : xs
 lowerFirst _ = error "lowerFirst called on empty string"
 
+-- | A version of 'Map.lookup' that calls 'error' with the key if it fails
+mapGet :: (Show k, Ord k) => k -> Map k v -> v
+mapGet key m =
+  case Map.lookup key m of
+    Just v -> v
+    Nothing ->
+      error ("Map does not contain key: " ++ show key)
+
 -- | A version of 'HashMap.lookup' that calls 'error' with the key if it fails
 hashMapGet :: (Show k, Eq k, Hashable k) => k -> HashMap k v -> v
 hashMapGet key m =
@@ -619,6 +643,19 @@ hashMapGet key m =
     Just v -> v
     Nothing ->
       error ("HashMap does not contain key: " ++ show key)
+
+splitLongerFromEnd :: [short] -> [long] -> ([long], [long])
+splitLongerFromEnd short long
+  | shortLen > longLen = error "splitLongerFromEnd: short list is longer than long list"
+  | otherwise = splitAt (longLen - shortLen) long
+  where
+    shortLen = length short
+    longLen = length long
+
+zipFromEndM :: Monad m => [short] -> [long] -> (short -> long -> m long) -> m [long]
+zipFromEndM short long f =
+  let (extra, matching) = splitLongerFromEnd short long in
+  (extra ++) <$> zipWithM f short matching
 
 -- | A flipped version of 'fmap'
 (<&>) :: Functor f => f a -> (a -> b) -> f b

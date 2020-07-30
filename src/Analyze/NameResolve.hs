@@ -413,9 +413,9 @@ duplicateMessage :: Meta (InFile Span) a -> String -> String
 duplicateMessage (_ :&: otherFile :/: otherSpan) baseMessage =
   baseMessage ++
     if isSpanValid otherSpan then
-      baseMessage ++ "(other at " ++ show otherFile ++ ":" ++ show otherSpan ++ ")"
+      "(other at " ++ show otherFile ++ ":" ++ show otherSpan ++ ")"
     else
-      baseMessage ++ "(other in " ++ show otherFile ++ ")"
+      "(other in " ++ show otherFile ++ ")"
 
 -- | Resolve an 'EffectDecl'
 insertEffect :: Path -> Meta (InFile Span) EffectDecl -> NR ()

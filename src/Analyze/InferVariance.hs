@@ -311,7 +311,7 @@ matchKinds resolveAnon expected@(TypeKind eEffs eArgs) (TypeKind aEffs aArgs) =
         return $ Just $ MustAcceptArgs KType $ length eArgs - length aArgs
       EQ -> do
         (actual, mismatches) <- runWriterT $
-          TypeKind <$> zipWithM unifyVar eEffs aEffs <*> zipWithM unifyArg eArgs aArgs
+          TypeKind <$> zipFromEndM eEffs aEffs unifyVar <*> zipWithM unifyArg eArgs aArgs
         return $
           if getAny mismatches then
             Just $ GeneralMismatch expected actual
@@ -325,7 +325,7 @@ matchKinds resolveAnon expected@(TypeKind eEffs eArgs) (TypeKind aEffs aArgs) =
       var <- unifyVar expVar actVar
       kind <-
         if length eEffs <= length aEffs && length eArgs == length aArgs then
-          TypeKind <$> zipWithM unifyVar eEffs aEffs <*> zipWithM unifyArg eArgs aArgs
+          TypeKind <$> zipFromEndM eEffs aEffs unifyVar <*> zipWithM unifyArg eArgs aArgs
         else
           unifyFail >> return actual
       return $ DataArg var kind

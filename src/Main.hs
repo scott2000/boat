@@ -9,7 +9,6 @@ import System.FilePath
 import System.Directory
 import System.Exit (ExitCode)
 
-import Data.List (intercalate)
 import Data.IORef
 import Control.Monad.State.Strict
 import Control.Exception
@@ -27,6 +26,9 @@ main = do
   stateRef <- newIORef initialCompileState
   runReaderT (runCompileIO startCompile) (options, stateRef) `catches`
     [ Handler \(e :: ExitCode) -> throwIO e
+    , Handler \(CompileException msg) -> do
+        state <- readIORef stateRef
+        compilerBugRawIO state $ "failure message: " ++ msg
     , Handler \(e :: SomeException) -> do
         state <- readIORef stateRef
         let
@@ -72,7 +74,6 @@ startCompile = do
   setPhase PhaseParser
   mods <- parse
   exitIfErrors
-  liftIO $ putStrLn ("\n" ++ intercalate "\n" (map show mods))
 
   when (null mods) $
     addError compileError
